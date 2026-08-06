@@ -1,0 +1,117 @@
+Applies to libdragon 69d4326 (tools: fix msys2 cross-compilation).
+EverDrive read path: verify sector CRCs instead of discarding them.
+Linked as an explicit object by the Makefile; see the comment there.
+
+diff --git a/src/libcart/cart.c b/src/libcart/cart.c
+index 4731506..82324b3 100644
+--- a/src/libcart/cart.c
++++ b/src/libcart/cart.c
+@@ -603,6 +603,18 @@ int ci_card_wr_cart(uint32_t cart, uint32_t lba, uint32_t count)
+ 
+ #define EDX_SD_CFG_BITLEN       0x000F
+ #define EDX_SD_CFG_SPD          0x0010
++
++/* Set to 1 to keep the SD interface at its initialisation clock instead of
++ * stepping up once the card is selected.
++ *
++ * Tried and reverted: clearing this bit is not a slower clock, it is the mode
++ * used for card identification only, and 4-bit data transfer does not work in
++ * it -- the card disappears entirely (ENODEV). Left as a define because the
++ * idea of backing off the transfer rate is sound; the mechanism is simply not
++ * this bit. */
++#ifndef EDX_SD_LOW_SPEED
++#define EDX_SD_LOW_SPEED        0
++#endif
+ #define EDX_SD_STA_BUSY         0x0080
+ 
+ #define EDX_CFG_SDRAM_ON        0x0000
+@@ -809,12 +821,30 @@ int edx_card_init(void)
+         if (__edx_sd_cmd(CMD55, rca) < 0) CART_ABORT();
+         if (__edx_sd_cmd(ACMD6, 2) < 0) CART_ABORT();
+     }
+-    __sd_cfg = EDX_SD_CFG_SPD;
++    /* Stay at the initialisation clock rather than switching to high speed.
++     *
++     * This was an unconditional step up once the card was selected, with no
++     * fallback if the card could not keep up at that rate -- and nothing
++     * downstream can tell, because the read path discards each sector's CRC.
++     *
++     * Observed on an EverDrive 64 X7 with a 30 GB card: the same sector
++     * returning different data on consecutive reads, a directory listing ten
++     * entries long on one boot and three garbled entries on the next, and
++     * FatFs eventually failing its own internal consistency check. All of it
++     * independent of how much was being read -- cutting the load fourfold
++     * changed nothing -- which is the signature of a clock the card cannot
++     * meet rather than a bandwidth limit.
++     *
++     * The low clock costs throughput that this project does not need: the
++     * music stream asks for 48 KB/s and everything else is read once at level
++     * load. Correct and slower beats fast and wrong. */
++    __sd_cfg = EDX_SD_LOW_SPEED ? 0 : EDX_SD_CFG_SPD;
+     __cart_acs_rel();
+     return 0;
+ }
+ 
+-int edx_card_rd_dram(void *dram, uint32_t lba, uint32_t count)
++/* Unverified single pass over the card -- the original read, renamed. */
++static int __edx_card_rd_dram_raw(void *dram, uint32_t lba, uint32_t count)
+ {
+     char *addr = dram;
+     int n;
+@@ -854,6 +884,56 @@ int edx_card_rd_dram(void *dram, uint32_t lba, uint32_t count)
+     return 0;
+ }
+ 
++/* Verified read: fetch twice and compare, retrying on disagreement.
++ *
++ * The transfer above collects each sector's 8 CRC bytes and discards them, so
++ * a corrupted sector is handed up looking exactly like a good one. On some
++ * cards that is invisible; on others it is not. Observed on an EverDrive 64
++ * X7: a root directory that enumerated ten correct entries on one boot and
++ * three entries named '?' on the next, a file whose length read back as zero
++ * six times out of seven, and the same filename resolving under two different
++ * spellings on consecutive attempts -- all from identical code and an
++ * unchanged card.
++ *
++ * Verifying the CRC properly means un-interleaving four bit-planes and running
++ * four CRC16s over every sector, which is both intricate and not free. Reading
++ * twice and comparing catches the same class of fault for a few lines, and
++ * costs bandwidth only where it is applied.
++ *
++ * It is applied to small reads only. Those are the filesystem's metadata --
++ * directory entries, FAT chains -- where a single wrong byte turns into a
++ * missing file, and where the doubled traffic is irrelevant. Bulk reads pass
++ * through unverified: they are streamed data, they are the bandwidth that
++ * matters, and a corrupt sample is a click rather than a lost file.
++ */
++#define EDX_VERIFY_MAX_SECTORS 8
++#define EDX_VERIFY_ATTEMPTS    4
++
++int edx_card_rd_dram(void *dram, uint32_t lba, uint32_t count)
++{
++    static uint8_t verify_buf[EDX_VERIFY_MAX_SECTORS * 512]
++        __attribute__((aligned(16)));
++
++    if (count == 0 || count > EDX_VERIFY_MAX_SECTORS)
++        return __edx_card_rd_dram_raw(dram, lba, count);
++
++    const uint32_t bytes = count * 512;
++
++    for (int attempt = 0; attempt < EDX_VERIFY_ATTEMPTS; attempt++)
++    {
++        if (__edx_card_rd_dram_raw(dram, lba, count) < 0) continue;
++        if (__edx_card_rd_dram_raw(verify_buf, lba, count) < 0) continue;
++
++        uint32_t i = 0;
++        while (i < bytes && ((uint8_t *)dram)[i] == verify_buf[i]) i++;
++        if (i == bytes) return 0;          /* both passes agree */
++    }
++
++    /* Never agreed. Returning the last read would pass corruption upward as
++     * though it were sound, which is the behaviour this exists to stop. */
++    return -1;
++}
++
+ int edx_card_rd_cart(uint32_t cart, uint32_t lba, uint32_t count)
+ {
+     uint32_t resp;
