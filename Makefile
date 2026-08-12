@@ -300,6 +300,14 @@ N64_CFLAGS += -DR_FASTNARROW=$(FASTNARROW)
 VAPOR ?= 1
 N64_CFLAGS += -DR_VAPOR=$(VAPOR)
 
+# SMOKETRAIL=1 gives every rocket a smoke exhaust: the same MT_SMOKE puffs
+# the revenant's tracer already leaves, spawned one tic behind the shell on
+# every other tic. Game-visible decoration, demo-sync invisible: the spawn
+# consumes no P_Random, so recorded demos (the title attracts) play back
+# unchanged -- proven route-identical with abdiff over the walker route.
+SMOKETRAIL ?= 1
+N64_CFLAGS += -DD_SMOKETRAIL=$(SMOKETRAIL)
+
 # ZCHECK=1 proves the z-only node refresh reproduces the full pass exactly:
 # it runs both on every refresh and asserts every field of every node matches.
 # Costs far more than the work it is checking -- for validation only.

@@ -33,6 +33,12 @@
 
 #include "doomstat.h"
 
+// Rocket smoke trails are a port addition, flag-gated from the Makefile
+// (SMOKETRAIL); compiling this file outside that build system gets vanilla.
+#ifndef D_SMOKETRAIL
+#define D_SMOKETRAIL 0
+#endif
+
 
 void G_PlayerReborn (int player);
 void P_SpawnMapThing (mapthing_t*	mthing);
@@ -462,6 +468,26 @@ void P_MobjThinker (mobj_t* mobj)
         mobj->oldz     = mobj->z;
         mobj->oldangle = mobj->angle;
     }
+
+#if D_SMOKETRAIL
+    // Rocket exhaust: the same MT_SMOKE the revenant's tracer leaves
+    // (A_Tracer above spawns it the identical way), every other tic, one
+    // tic behind the shell. Decoration must be invisible to demo sync,
+    // so the animation jitter comes from M_Random -- the P_Random
+    // sequence the recorded demos replay against is never consulted.
+    // P_ExplodeMissile clears MF_MISSILE, which ends the trail.
+    if (mobj->type == MT_ROCKET && (mobj->flags & MF_MISSILE)
+        && (leveltime & 1))
+    {
+        mobj_t *smoke = P_SpawnMobj (mobj->x - mobj->momx,
+                                     mobj->y - mobj->momy,
+                                     mobj->z, MT_SMOKE);
+        smoke->momz = FRACUNIT;
+        smoke->tics -= M_Random()&3;
+        if (smoke->tics < 1)
+            smoke->tics = 1;
+    }
+#endif
 
     // momentum movement
     if (mobj->momx

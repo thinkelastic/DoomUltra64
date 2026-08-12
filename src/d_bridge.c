@@ -1190,6 +1190,29 @@ void D_LightsUpdate(void)
                                  cr = 1.00f; cg = 0.55f; cb = 0.30f; break;
             case MT_BRUISERSHOT: radius = 320.0f; intensity = 0.80f;
                                  cr = 0.55f; cg = 1.00f; cb = 0.40f; break;
+            case MT_SKULL: {
+                /* A lost soul is a burning skull; it carries its fire
+                 * everywhere. Kept modest while it floats -- with 8 slots,
+                 * weakest-light eviction must let any real fireball beat an
+                 * ambient skull -- rising when it ignites for the charge,
+                 * and popping like a small barrel when it dies, since its
+                 * death frames are an explosion. */
+                cr = 1.00f; cg = 0.60f; cb = 0.26f;
+                if (mo->health <= 0) {
+                    /* Death frames F..K are 5..10; fade with the blast. */
+                    const int fr = (int)(mo->frame & FF_FRAMEMASK);
+                    radius    = 480.0f;
+                    intensity = 1.10f - 0.18f * (float)(fr - 5);
+                    if (intensity < 0.25f) intensity = 0.25f;
+                } else {
+                    const int sn = (int)(mo->state - states);
+                    const int charging =
+                        sn >= S_SKULL_ATK1 && sn <= S_SKULL_ATK4;
+                    radius    = charging ? 420.0f : 320.0f;
+                    intensity = charging ? 0.95f  : 0.55f;
+                }
+                break;
+            }
             default: continue;
         }
 

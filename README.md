@@ -56,7 +56,12 @@ pixel-identical to its plain output:
   explosions light the walls, floors and things around them with distance
   falloff, folded into the shade the renderer already computes. Barrels
   flash on death; rocket impacts flare wider and hotter than their flight
-  glow.
+  glow; lost souls carry their fire with them, brightening for the charge
+  and popping like a small barrel when they die.
+- **Rocket smoke trails** (`SMOKETRAIL=0`). Rockets leave the revenant
+  tracer's own smoke puffs behind them — fogged, lit by the rocket's glow,
+  interpolated like every other thing, and invisible to demo sync (the
+  spawn consumes no `P_Random`, so the title attracts play back unchanged).
 - **Emissive liquids.** Nukage, lava and blood glow with colour sampled from
   their own art and spill it up nearby walls at the waterline.
 - **Liquid vapor** (`VAPOR=0`). A translucent noise layer drifts and churns
