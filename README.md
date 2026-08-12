@@ -6,7 +6,8 @@ hardware through an SC64 flashcart.
 
 Doom's game code is vendored under `src/doom` and compiled nearly untouched —
 the only additions are the marked frame-interpolation snapshots (`old*`
-state). The software column and span rasteriser is gone; everything else that
+state) and the flag-gated smoke-trail spawn, which provably leaves the
+demo-sync random sequence untouched. The software column and span rasteriser is gone; everything else that
 touched a PC — video, sound, files, saves, input — was replaced.
 
 ## Why the RDP suits Doom
@@ -71,8 +72,9 @@ pixel-identical to its plain output:
   which its view ray crosses the water plane, so anything nearer wins and
   the mirror clips itself with zero polygon math.
 - **Full-resolution liquids and floors** (`CI4FLATS=0`). Every flat whose
-  art fits one 16-entry bank of the palette ships as full 64×64 CI4 — 59
-  of the IWAD's 107, losslessly — instead of the 32×32 downsample TMEM
+  art fits one 16-entry bank of the palette ships as full 64×64 CI4 — 20
+  of the IWAD's 107, losslessly, both NUKAGE frames among them — instead
+  of the 32×32 downsample TMEM
   used to force. The RDP's CI4 palette field selects the matching bank of
   the resident PLAYPAL, so palette flashes recolour them for free.
 - **Emissive liquids.** Nukage, lava and blood glow with colour sampled from
