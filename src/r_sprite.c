@@ -68,6 +68,9 @@ typedef struct {
 } refljob_t;
 static refljob_t refl[REFL_MAX];
 static int       numrefl;
+#if D_DYNLIGHT
+static int       numrwrefl;      /* wall ghosts; queue at end of file */
+#endif
 #endif
 
 static const rdpq_trifmt_t TRIFMT_SPR = {
@@ -83,6 +86,9 @@ void r_sprite_begin(void)
     numjobs = stat_drawn = stat_uploads = stat_dropped = 0;
 #if R_REFLECT
     numrefl = 0;
+#if D_DYNLIGHT
+    numrwrefl = 0;      /* a frame whose flush never ran must not leak */
+#endif
 #endif
 }
 
@@ -450,6 +456,10 @@ void r_reflect_add(const r_camera_t *cam, const r_thing_t *t,
     j->sb = sh[2] * k * (0.34f + 0.30f * pool_rgb[2]);
 }
 
+#if D_DYNLIGHT
+static void reflect_walls_emit(const r_camera_t *cam);
+#endif
+
 /* Draw the queued images. Runs after the sprite pass -- nearer actors
  * occlude images through the z-buffer -- and before sky and vapor: sky
  * repaints any spill into never-written columns, and the haze drifts over
@@ -463,7 +473,11 @@ void r_reflect_add(const r_camera_t *cam, const r_thing_t *t,
  * polygon math at all. */
 void r_reflect_flush(const r_camera_t *cam)
 {
+#if D_DYNLIGHT
+    if (!numrefl && !numrwrefl) return;
+#else
     if (!numrefl) return;
+#endif
 
     /* Blended, z-tested, never z-written. Texture alpha rides through the
      * combiner's alpha channel, so transparent texels leave the memory
@@ -546,5 +560,168 @@ void r_reflect_flush(const r_camera_t *cam)
         }
     }
     numrefl = 0;
+#if D_DYNLIGHT
+    /* The walls over the same pools, in the same mode block. */
+    reflect_walls_emit(cam);
+#endif
 }
 #endif /* R_REFLECT */
+
+#if R_REFLECT && D_DYNLIGHT
+/* --- wall reflections ---------------------------------------------------
+ *
+ * The walls standing over a glowing pool mirror in it too. A wall is a
+ * vertical quad, so its reflection about z = H is another vertical quad:
+ * same endpoints, heights mirrored, rows sampled in reverse from the
+ * waterline down. Only the band just under the surface is drawn -- alpha
+ * fades to nothing REFL_WALL_FADE units below the waterline, which is how
+ * water actually reads, bounds the cost to one TMEM tile per wall, and
+ * hides the one deliberate approximation: the tile holds texture columns
+ * 0..63 with S wrapping at 64, so art wider than 64 ghosts its first 64
+ * columns. A dim ripple-covered reflection does not tell.
+ */
+#define REFL_WALL_MAX  12
+#define REFL_WALL_FADE 40.0f
+
+typedef struct {
+    dt64_tex_t *tex;
+    float x1, y1, x2, y2;
+    float ztop;              /* wall top; the mirrored band hangs from H */
+    float ztex;              /* world height of texture row 0 */
+    float u0, len;
+    float plane_h;
+    float sr, sg, sb;        /* dimmed, pool-tinted, light-scaled */
+    uint8_t light;
+} rwrefl_t;
+static rwrefl_t rwrefl[REFL_WALL_MAX];
+/* numrwrefl is declared beside numrefl at the top of the file: the frame
+ * reset lives in r_sprite_begin, far above this block. */
+
+void r_reflect_wall_add(const r_wall_t *w)
+{
+    if (numrwrefl >= REFL_WALL_MAX || !w->tex) return;
+    if (w->ztop <= w->glowz) return;          /* nothing above the water */
+
+    /* One wall arrives as several column ranges; keep one ghost. */
+    if (numrwrefl) {
+        const rwrefl_t *p = &rwrefl[numrwrefl - 1];
+        if (p->x1 == w->x1 && p->y1 == w->y1 &&
+            p->x2 == w->x2 && p->y2 == w->y2) return;
+    }
+
+    rwrefl_t *r = &rwrefl[numrwrefl++];
+    r->tex  = w->tex;
+    r->x1 = w->x1; r->y1 = w->y1;
+    r->x2 = w->x2; r->y2 = w->y2;
+    r->ztop    = w->ztop;
+    r->ztex    = w->ztex;
+    r->u0      = w->u0;
+    r->len     = w->len;
+    r->plane_h = w->glowz;
+    r->light   = w->light;
+
+    const float l = (float)w->light * (1.0f / 255.0f);
+    r->sr = l * (0.34f + 0.30f * w->glow_rgb[0]);
+    r->sg = l * (0.34f + 0.30f * w->glow_rgb[1]);
+    r->sb = l * (0.34f + 0.30f * w->glow_rgb[2]);
+}
+
+/* Emit the queued wall ghosts; called from r_reflect_flush inside its mode
+ * block. Same z-plane masking as the thing images. */
+static void reflect_walls_emit(const r_camera_t *cam)
+{
+    const float cs = r_view_cs, sn = r_view_sn;
+    const float cx = SCREEN_W * 0.5f, cy = SCREEN_H * 0.5f;
+
+    for (int jn = 0; jn < numrwrefl; jn++) {
+        const rwrefl_t *r = &rwrefl[jn];
+        if (cam->z <= r->plane_h + 1.0f) continue;
+
+        /* Endpoints to camera space, near-clipping the segment; the u
+         * coordinate interpolates with the clip so the art stays put. */
+        float d1 = (r->x1 - cam->x) * cs + (r->y1 - cam->y) * sn;
+        float d2 = (r->x2 - cam->x) * cs + (r->y2 - cam->y) * sn;
+        float o1 = (r->x1 - cam->x) * sn - (r->y1 - cam->y) * cs;
+        float o2 = (r->x2 - cam->x) * sn - (r->y2 - cam->y) * cs;
+        float u1 = r->u0, u2 = r->u0 + r->len;
+        const float NEARP = 8.0f;
+        if (d1 < NEARP && d2 < NEARP) continue;
+        if (d1 < NEARP) {
+            const float t = (NEARP - d1) / (d2 - d1);
+            d1 += (d2 - d1) * t; o1 += (o2 - o1) * t; u1 += (u2 - u1) * t;
+        } else if (d2 < NEARP) {
+            const float t = (NEARP - d2) / (d1 - d2);
+            d2 += (d1 - d2) * t; o2 += (o1 - o2) * t; u2 += (u1 - u2) * t;
+        }
+
+        /* The mirrored band: waterline down to the fade floor (or the
+         * mirrored wall top, whichever is higher). */
+        const float zi_top = r->plane_h;
+        float zi_bot = 2.0f * r->plane_h - r->ztop;
+        if (zi_bot < r->plane_h - REFL_WALL_FADE)
+            zi_bot = r->plane_h - REFL_WALL_FADE;
+        if (zi_bot >= zi_top) continue;
+
+        /* Texture rows, mirrored: the image of world z samples row
+         * ztex - (2H - z'), so the waterline row continues seamlessly
+         * into its reflection. One 32-row tile from there down. */
+        const int texh = r->tex->height;
+        float t_top = r->ztex - 2.0f * r->plane_h + zi_top;
+        float t_bot = r->ztex - 2.0f * r->plane_h + zi_bot;
+        /* Rebase into the texture so the upload window is meaningful. */
+        {
+            const float wrap = rf_floorf(t_top / (float)texh) * (float)texh;
+            t_top -= wrap; t_bot -= wrap;
+        }
+        int win0 = (int)t_top;
+        if (win0 < 0) win0 = 0;
+        if (win0 > texh - 1) win0 = texh - 1;
+        int win1 = win0 + 32 > texh ? texh : win0 + 32;
+
+        const int tw = r->tex->width < 64 ? r->tex->width : 64;
+        rdpq_texparms_t tp = {0};
+        tp.s.repeats = REPEAT_INFINITE;
+        dt64_upload_tile(TILE0, r->tex, &tp, 0, win0, tw, win1);
+        stat_uploads++;
+
+        const float eh  = cam->z - r->plane_h;
+        const float iw1 = 1.0f / d1, iw2 = 1.0f / d2;
+        const float xl  = cx + o1 * cam->focal_x * iw1;
+        const float xr  = cx + o2 * cam->focal_x * iw2;
+
+        /* Corner rows: [x,y, r,g,b,a, s,t, invw, z]. Perspective-correct
+         * s via invw; the alpha fade to zero at the band's foot is what
+         * reads as water. */
+        float v[4][10];
+        const float za[2] = { zi_top, zi_bot };
+        const float ta[2] = { t_top,  t_bot  };
+        const float aa[2] = { 0.45f,
+            0.45f * (zi_bot - (r->plane_h - REFL_WALL_FADE))
+                  * (1.0f / REFL_WALL_FADE) };
+        for (int c = 0; c < 4; c++) {
+            const int side = (c == 1 || c == 2);      /* right column */
+            const int row  = (c >= 2);                /* bottom edge  */
+            const float d  = side ? d2 : d1;
+            const float o_ = side ? o2 : o1;  (void)o_;
+            const float iw = side ? iw2 : iw1;
+            const float zi = za[row];
+            v[c][0] = side ? xr : xl;
+            v[c][1] = cy - (zi - cam->z) * cam->focal_y * iw;
+            v[c][2] = r->sr; v[c][3] = r->sg; v[c][4] = r->sb;
+            v[c][5] = aa[row];
+            v[c][6] = side ? u2 : u1;
+            v[c][7] = ta[row];
+            v[c][8] = iw;
+            {
+                const float dc = d * eh / (cam->z - zi);
+                float z = 1.0f - R_FLAT_NEAR / dc - (1.0f / 64.0f);
+                if (z < 0.0f) z = 0.0f;
+                v[c][9] = z;
+            }
+        }
+        r_tri_quad(&TRIFMT_SPR, v[0], v[1], v[2], v[3]);
+        r_tri_spr += 2;
+    }
+    numrwrefl = 0;
+}
+#endif /* R_REFLECT && D_DYNLIGHT */
