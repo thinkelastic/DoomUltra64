@@ -284,12 +284,14 @@ N64_CFLAGS += -DR_FUSESPLIT=$(FUSESPLIT)
 
 # FASTNARROW=1 steps clip_narrow's per-column window edges by constant
 # deltas instead of re-deriving the lerp each column (~14 cycles/column).
-# OFF by default and deliberately so: iterated adds round differently from
-# the recomputed lerp -- inside the window's one-pixel outward rounding by
-# ~5e-3 px over a full span, but not provably bit-identical, so it stays an
-# opt-in experiment until a hardware soak at doorway/window poses blesses
-# it. Every skip/reseed boundary re-derives exactly.
-FASTNARROW ?= 0
+# The iterated adds round differently from the recomputed lerp -- by
+# ~5e-3 px over a full span, inside the window's one-pixel outward
+# rounding -- so this shipped opt-in until soaked. Soaked Aug 11 2026:
+# `abdiff.sh -- FASTNARROW=1` over both demo routes (e1m1 144/144,
+# e2m2 143/143 fingerprints, per-side clean builds) -- every frame
+# hashes identical, so the drift never crosses a pixel edge in
+# practice. Every skip/reseed boundary re-derives exactly.
+FASTNARROW ?= 1
 N64_CFLAGS += -DR_FASTNARROW=$(FASTNARROW)
 
 # VAPOR=0 removes the liquid-vapor pass: the translucent noise layer that
