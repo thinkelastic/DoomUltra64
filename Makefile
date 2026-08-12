@@ -344,6 +344,14 @@ N64_CFLAGS += -DD_CI4FLATS=$(CI4FLATS)
 RUMBLE ?= 1
 N64_CFLAGS += -DD_RUMBLE=$(RUMBLE)
 
+# FORCERUMBLE=1 is a DIAGNOSTIC: drive the motor without the accessory
+# handshake, self-pulsing every four seconds -- for third-party pads with
+# built-in rumble that never identify as a Rumble Pak. Never a default:
+# the motor command writes into pak address space, and a Controller Pak
+# sitting in a real controller would be corrupted by it.
+FORCERUMBLE ?= 0
+N64_CFLAGS += -DD_FORCERUMBLE=$(FORCERUMBLE)
+
 # ZCHECK=1 proves the z-only node refresh reproduces the full pass exactly:
 # it runs both on every refresh and asserts every field of every node matches.
 # Costs far more than the work it is checking -- for validation only.

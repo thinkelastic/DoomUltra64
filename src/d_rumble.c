@@ -29,6 +29,15 @@ void D_RumbleAdd(float amount)
 
 void D_RumbleFrame(void)
 {
+#if D_FORCERUMBLE
+    /* Diagnostic build: drive the motor without asking the controller
+     * whether it has one, and self-pulse every four seconds so no game
+     * event is needed. For third-party pads with built-in rumble that
+     * skip the accessory handshake. NEVER a default: the motor command
+     * writes into pak address space, and a Controller Pak sitting there
+     * would be corrupted. */
+    { static int fr; if (++fr >= 240) fr = 0; if (fr == 1) D_RumbleAdd(0.9f); }
+#else
     if (!joypad_get_rumble_supported(JOYPAD_PORT_1)) {
         /* Pak pulled mid-game: make sure the state machine lets go. */
         if (motor_on) {
@@ -38,6 +47,7 @@ void D_RumbleFrame(void)
         level = acc = 0.0f;
         return;
     }
+#endif
 
     /* ~180 ms half-life at 60 fps: a single hit thumps and releases, a
      * rocket volley sustains. */
