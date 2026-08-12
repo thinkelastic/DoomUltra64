@@ -520,7 +520,7 @@ int main(int argc, char **argv)
         r_flat_begin();
         for (int i = 0; i < 4; i++)
             { static const float white[3] = {1.0f,1.0f,1.0f};
-              r_flat_add(cells[i], 4, 0.0f, 255, &flat, 0.0f, white, 0); }
+              r_flat_add(cells[i], 4, 0.0f, 255, &flat, 0.0f, white, 0, 0); }
         r_flat_flush(&views[0].cam);
 
         printf("\nflats: 4 cells, 1 texture -> uploads=%d tris=%d oob=%d\n",

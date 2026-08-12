@@ -515,21 +515,36 @@ void r_reflect_flush(const r_camera_t *cam)
             const float y_bot = cy - (zi_lo - cam->z) * j->scale_y;
             if (y_bot < 0.0f || y_top > (float)SCREEN_H) continue;
 
-            /* Ray-plane crossing depth per edge. The bias below must beat
-             * not quantisation but the POOL'S OWN approximation: the flat
-             * pass interpolates z linearly across each depth band, sagging
-             * under the true hyperbola by up to ~2^-7 near the camera at
-             * the shipped band ratio -- a 2^-9 bias lost to it and the
-             * mask ate the whole image. 2^-6 dominates the sag; it cannot
-             * leak onto the banks, whose surfaces sit at ~0.4x the
-             * crossing depth on the same pixel rows (an enormous z gap),
-             * leaving only a potential one-pixel seam at the silhouette. */
+            /* Ray-plane crossing depth per edge; one tile spans little
+             * enough screen that the hyperbola-vs-linear error stays
+             * inside the margins. The bias is +2^-6: reflective flats
+             * draw pushed 2^-5 deeper (r_flat.c REFL_PLANE_PUSH), so a
+             * ghost lands between the true plane and the pushed surface
+             * -- it wins exactly the pixels the mirroring flat wrote and
+             * loses same-height non-reflective neighbours, which the
+             * crossing depth alone cannot tell apart. Both margins are
+             * double the flat pass's worst banding sag (~2^-7). */
             const float dc_hi = j->depth * eh / (cam->z - zi_hi);
             const float dc_lo = j->depth * eh / (cam->z - zi_lo);
-            float z_hi = 1.0f - R_FLAT_NEAR / dc_hi - (1.0f / 64.0f);
-            float z_lo = 1.0f - R_FLAT_NEAR / dc_lo - (1.0f / 64.0f);
+            float z_hi = 1.0f - R_FLAT_NEAR / dc_hi + (1.0f / 64.0f);
+            float z_lo = 1.0f - R_FLAT_NEAR / dc_lo + (1.0f / 64.0f);
+            if (z_hi > 1.0f) z_hi = 1.0f;
+            if (z_lo > 1.0f) z_lo = 1.0f;
             if (z_hi < 0.0f) z_hi = 0.0f;
             if (z_lo < 0.0f) z_lo = 0.0f;
+
+            /* Depth fade, like the walls: the image dims as it reaches
+             * down, dying REFL_FADE_T units below the plane -- water's
+             * own look, and the soft cap on how far anything ghosts. */
+            #define REFL_FADE_T 64.0f
+            float a_hi = 0.55f * (zi_hi - (j->plane_h - REFL_FADE_T))
+                               * (1.0f / REFL_FADE_T);
+            float a_lo = 0.55f * (zi_lo - (j->plane_h - REFL_FADE_T))
+                               * (1.0f / REFL_FADE_T);
+            if (a_hi > 0.55f) a_hi = 0.55f;
+            if (a_lo > 0.55f) a_lo = 0.55f;
+            if (a_hi <= 0.0f) continue;
+            if (a_lo < 0.0f) a_lo = 0.0f;
 
             for (int s0 = 0; s0 < w; s0 += tw) {
                 const int s1 = s0 + tw > w ? w : s0 + tw;
@@ -546,10 +561,11 @@ void r_reflect_flush(const r_camera_t *cam)
                 const float ss[4] = { (float)s0, (float)s1, (float)s1, (float)s0 };
                 const float ts[4] = { (float)t1, (float)t1, (float)t0, (float)t0 };
                 const float zs[4] = { z_hi, z_hi, z_lo, z_lo };
+                const float as[4] = { a_hi, a_hi, a_lo, a_lo };
                 for (int i = 0; i < 4; i++) {
                     v[i][0] = xs[i]; v[i][1] = ys[i];
                     v[i][2] = j->sr; v[i][3] = j->sg; v[i][4] = j->sb;
-                    v[i][5] = 0.55f;
+                    v[i][5] = as[i];
                     v[i][6] = ss[i]; v[i][7] = ts[i];
                     v[i][8] = iw;
                     v[i][9] = zs[i];
@@ -586,7 +602,7 @@ void r_reflect_flush(const r_camera_t *cam)
 typedef struct {
     dt64_tex_t *tex;
     float x1, y1, x2, y2;
-    float ztop;              /* wall top; the mirrored band hangs from H */
+    float zbot, ztop;        /* wall extent; the image is its mirror */
     float ztex;              /* world height of texture row 0 */
     float u0, len;
     float plane_h;
@@ -613,6 +629,7 @@ void r_reflect_wall_add(const r_wall_t *w)
     r->tex  = w->tex;
     r->x1 = w->x1; r->y1 = w->y1;
     r->x2 = w->x2; r->y2 = w->y2;
+    r->zbot    = w->zbot;
     r->ztop    = w->ztop;
     r->ztex    = w->ztex;
     r->u0      = w->u0;
@@ -654,17 +671,24 @@ static void reflect_walls_emit(const r_camera_t *cam)
             d2 += (d1 - d2) * t; o2 += (o1 - o2) * t; u2 += (u1 - u2) * t;
         }
 
-        /* The mirrored band: waterline down to the fade floor (or the
-         * mirrored wall top, whichever is higher). */
-        const float zi_top = r->plane_h;
+        /* The mirrored band starts at the image of the wall's own BOTTOM
+         * -- the waterline only for a wall standing in the surface. An
+         * elevated step riser images deeper, with a gap at the plane;
+         * anchoring every ghost at the waterline drew staircases at the
+         * wrong height with rows sampled below their own bottom edge --
+         * the stacked "occluded surface" artifact. With the depth fade
+         * this also approximates mirror-world occlusion: a riser 16
+         * units up ghosts faint and deep, one past the fade not at all. */
+        const float zi_raw = 2.0f * r->plane_h - r->zbot;
+        const float zi_top = zi_raw < r->plane_h ? zi_raw : r->plane_h;
         float zi_bot = 2.0f * r->plane_h - r->ztop;
         if (zi_bot < r->plane_h - REFL_WALL_FADE)
             zi_bot = r->plane_h - REFL_WALL_FADE;
         if (zi_bot >= zi_top) continue;
 
         /* Texture rows, mirrored: the image of world z samples row
-         * ztex - (2H - z'), so the waterline row continues seamlessly
-         * into its reflection. One 32-row tile from there down. */
+         * ztex - (2H - z'), so a wall base continues seamlessly into
+         * its reflection. One 32-row tile from there down. */
         const int texh = r->tex->height;
         float t_top = r->ztex - 2.0f * r->plane_h + zi_top;
         float t_bot = r->ztex - 2.0f * r->plane_h + zi_bot;
@@ -695,7 +719,11 @@ static void reflect_walls_emit(const r_camera_t *cam)
         float v[4][10];
         const float za[2] = { zi_top, zi_bot };
         const float ta[2] = { t_top,  t_bot  };
-        const float aa[2] = { 0.45f,
+        /* Both edges fade with image depth, not just the foot: an
+         * elevated wall's whole band sits deep and starts already dim. */
+        const float aa[2] = {
+            0.45f * (zi_top - (r->plane_h - REFL_WALL_FADE))
+                  * (1.0f / REFL_WALL_FADE),
             0.45f * (zi_bot - (r->plane_h - REFL_WALL_FADE))
                   * (1.0f / REFL_WALL_FADE) };
         for (int c = 0; c < 4; c++) {
@@ -713,8 +741,11 @@ static void reflect_walls_emit(const r_camera_t *cam)
             v[c][7] = ta[row];
             v[c][8] = iw;
             {
+                /* +2^-6, between the true plane and the reflective
+                 * flat's 2^-5 push -- see the thing emitter. */
                 const float dc = d * eh / (cam->z - zi);
-                float z = 1.0f - R_FLAT_NEAR / dc - (1.0f / 64.0f);
+                float z = 1.0f - R_FLAT_NEAR / dc + (1.0f / 64.0f);
+                if (z > 1.0f) z = 1.0f;
                 if (z < 0.0f) z = 0.0f;
                 v[c][9] = z;
             }

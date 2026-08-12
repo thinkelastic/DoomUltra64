@@ -768,7 +768,8 @@ static void render_flats_inner(const subsector_t *ss)
                     * adds exactly zero at every vertex, so the fan skips
                     * its per-vertex queries with identical output. */
                    r_light_reaches_box((float)rg->bx0, (float)rg->by0,
-                                       (float)rg->bx1, (float)rg->by1, fh));
+                                       (float)rg->bx1, (float)rg->by1, fh),
+                   R_REFLECT && D_FlatReflective(sec->floorpic));
         /* Glowing liquids grow their vapor layer: haze over the sludge,
          * smoke over the lava. Same polygon, a few units up, translucent. */
         if (fglow > 0.0f)
@@ -786,10 +787,10 @@ static void render_flats_inner(const subsector_t *ss)
         float ctint[3];
         D_FlatGlowRGB(sec->ceilingpic, ctint);
         r_flat_add(pts, rg->numpts, ch, light, p_level_texture(sec->ceilingpic),
-                   D_FlatGlow(sec->ceilingpic), ctint, clit);
+                   D_FlatGlow(sec->ceilingpic), ctint, clit, 0);
 #else
         r_flat_add(pts, rg->numpts, ch, light, p_level_texture(sec->ceilingpic),
-                   0.0f, ftint, clit);
+                   0.0f, ftint, clit, 0);
 #endif
     }
 #endif

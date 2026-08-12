@@ -31,8 +31,15 @@ void r_flat_begin(void);
 /* `lit` is nonzero when a dynamic light can reach the surface (the caller
  * tests its region box against the light spheres); zero lets the fan skip
  * every per-vertex light query with identical output. */
+/* `reflective` pushes the surface a hair deeper in Z (floors that mirror:
+ * pools, polished plate). The reflection pass biases its ghosts between
+ * the true plane and that push, so the z-buffer itself becomes the
+ * stencil: ghosts pass only where the reflective flat owns the pixel and
+ * fail on same-height non-reflective neighbours. Zero for everything
+ * else, and the push compiles to nothing for it. */
 void r_flat_add(const r_polypt_t *pts, int npts, float height, int lightlevel,
-                dt64_tex_t *tex, float glow, const float tint[3], int lit);
+                dt64_tex_t *tex, float glow, const float tint[3], int lit,
+                int reflective);
 
 /* Bind each distinct texture once and draw everything that uses it. */
 void r_flat_flush(const r_camera_t *cam);
