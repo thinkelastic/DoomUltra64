@@ -10,13 +10,64 @@
 
 #include "dt64.h"
 
-#define SCREEN_W 320
+#ifndef D_DYNLIGHT
+#define D_DYNLIGHT 0
+#endif
+
+/* Doom's own frame width, and the reference for everything that is authored
+ * in screen space rather than derived from the viewport: UI art, psprites,
+ * and the vertical projection scale. */
+#define SCREEN_BASE_W 320
+
+/* R_WIDE=1 selects the N64's 640x240 mode: twice the horizontal sampling
+ * rate, the same 240 scanlines, no interlace. See the note on focal_x/focal_y
+ * below for why doubling width and not height is the cheap direction. */
+#ifndef R_WIDE
+#define R_WIDE 0
+#endif
+
+#if R_WIDE
+#define SCREEN_W 640
+#else
+#define SCREEN_W SCREEN_BASE_W
+#endif
 #define SCREEN_H 240
+
+/* Horizontal magnification for art authored in Doom's 320-wide frame: the UI,
+ * the weapon, and the automap.
+ *
+ * Vertical is 1:1 in every mode because SCREEN_H never changes, so this is a
+ * pure horizontal double -- which is exactly what makes the wide UI identical
+ * in apparent size and shape to the 320 one, since a 640x240 pixel is half as
+ * wide as it is tall.
+ *
+ * COPY mode survives this. It cannot filter, but it does step S by DSDX per
+ * output pixel (libdragon's RSP fixup pre-multiplies by 4 for the copy
+ * pipeline's 4-pixels-per-clock), so a destination twice as wide simply
+ * point-doubles each texel and still moves four texels per clock. Scaled
+ * rectangles are explicitly supported in copy mode; only the FLIP variant is
+ * not. */
+#define UI_XSCALE (SCREEN_W / SCREEN_BASE_W)
 
 typedef struct {
     float x, y, z;     /* Doom convention: x/y is the floor plane, z is up */
     float angle;       /* radians; 0 looks along +x */
-    float focal;       /* projection plane distance, in pixels */
+
+    /* Projection plane distance, in pixels, per axis.
+     *
+     * Square-pixel modes have focal_x == focal_y. 640x240 has pixels half as
+     * wide as they are tall, so focal_x doubles while focal_y stays put: the
+     * field of view is unchanged and only the horizontal sampling rate rises.
+     *
+     * Holding focal_y fixed is not just about aspect. Projected Y is never
+     * clipped here -- only clamped against RDP_Y_GUARD (see r_wall.c), and
+     * that clamp collapses quad edges, which is a known source of visible
+     * artefacts on near geometry. Near walls already project to y = -3360 at
+     * 320 wide; scaling Y too would double every such value and drive far
+     * more geometry into the clamp. Wide mode leaves the entire vertical
+     * pipeline bit-identical to the 320 build. */
+    float focal_x;
+    float focal_y;
 } r_camera_t;
 
 typedef struct {
@@ -47,6 +98,20 @@ typedef struct {
     /* Two-sided masked mid (fence, grate): alpha-cut against the texture's
      * transparent index, and never merged or tiled past one texture height. */
     uint8_t masked;
+
+    /* Light spilling up from an emissive floor -- sludge, lava, blood. glow is
+     * how much it adds at the waterline, glowz the world height of that floor.
+     * Zero for the overwhelming majority of walls, and the whole term compiles
+     * out with DYNLIGHT off. Carried per wall rather than looked up per corner
+     * because the sector is known once, where the wall is built. */
+#if D_DYNLIGHT
+    float   glow;
+    float   glowz;
+    /* Colour of the emissive floor's light (max channel 1.0, from the
+     * flat's own art via D_FlatGlowRGB); {1,1,1} when glow is zero. Feeds
+     * the per-quad tint -- brightness stays per-corner via `glow`. */
+    float   glow_rgb[3];
+#endif
 } r_wall_t;
 
 /* Set the render mode up for wall drawing and start a new batch. Call once per
@@ -62,6 +127,23 @@ void r_set_view(const r_camera_t *cam);
 /* The cached basis itself, for the other per-frame consumers (flats, sprites,
  * BSP traversal). Valid after r_set_view until the camera moves. */
 extern float r_view_cs, r_view_sn;
+
+/* Light-diminishing falloff, shared by walls, flats and sprites: fraction
+ * of a surface's light that survives to the eye at `depth`. `inv` comes
+ * from r_fog_inv[sector light]: with FOGSCALE=1 the far distance scales
+ * with sector brightness (vanilla's diminishing behaviour); entry 255 is
+ * bit-identical to the legacy fixed 512..3500 ramp. Built by
+ * r_setup_walls; 1 KB of BSS. */
+extern float r_fog_inv[256];
+#define R_FOG_NEAR 512.0f
+
+static inline float r_vis(float depth, float inv)
+{
+    float fog = (depth - R_FOG_NEAR) * inv;
+    if (fog < 0.0f) fog = 0.0f;
+    if (fog > 1.0f) fog = 1.0f;
+    return 1.0f - fog;
+}
 
 /* Project and clip one wall, appending its tiles to the batch. Nothing reaches
  * the RDP until r_flush_walls. */

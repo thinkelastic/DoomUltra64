@@ -48,10 +48,30 @@ extern r_ssdata_t *r_ssdata;
 extern r_polypt_t *r_polypts;
 extern int         r_numpolypts;
 
-/* Per-seg world length, precomputed at load: seg geometry never moves, and
- * the traversal was paying a sqrtf per visible seg per frame for it. Indexed
- * by seg number, like Doom's own parallel arrays. */
-extern float *r_seglen;
+/* Per-seg float mirror of everything STATIC the walk reads, one 32-byte
+ * record (two D-cache lines: hot = endpoints for the backface/projection,
+ * cold = wall-build constants and index links). The seg loop used to chase
+ * v1/v2 into scattered 24-byte vertex_t records and redo four fixed-to-
+ * float conversions per visited seg per frame, then chase four more
+ * pointers out of seg_t; with the mirror, Doom's seg_t and vertex_t are
+ * untouched by the frame loop entirely. Values are bit-identical to what
+ * the loop computed (same expressions, static inputs). Dynamic state --
+ * sector heights, sidedef offsets, linedef flags -- is NOT mirrored: those
+ * reads stay live through the index links. lineidx == 0xFFFF marks a seg
+ * the walk must skip (null linedef/sidedef/frontsector). */
+typedef struct {
+    float    ax, ay, bx, by;   /* hot line */
+    float    len;              /* world length (was r_seglen) */
+    float    u0seg;            /* fx(seg offset): texel start along the line */
+    uint16_t frontsec, backsec;    /* backsec 0xFFFF = one-sided */
+    uint16_t sideidx, lineidx;     /* lineidx 0xFFFF = skip this seg */
+} r_segf_t;
+
+extern r_segf_t *r_segf;
+
+/* Build r_segf; called from R_BuildSegRenderData at the end of P_LoadSegs,
+ * when segs/vertexes/sides/lines/sectors are all resolved. */
+void R_BuildSegFloatMirror(void);
 
 /* Merged flat region: adjacent same-sector subsector polygons whose union
  * stayed convex, unioned once at load. BSP splitting fragments each sector
@@ -84,10 +104,34 @@ typedef struct {
 
 extern r_nodef_t *r_nodef;
 
-/* Recompute the per-child height ranges (doors and lifts move sectors).
- * Cheap -- one pass over the tree -- and called only on frames where some
- * sector height actually changed. */
+/* Both children of each node, packed (children[0] << 16) | children[1].
+ * With this and r_nodef, the per-frame walk never touches Doom's node_t at
+ * all -- the walk read a 16-byte line of it per visit for two u16s. */
+extern uint32_t *r_nodekids;
+
+/* Per-subsector flat gate: the merged-region index for drawable cells,
+ * 0xFFFF for cells that can never queue a flat (degenerate polygon or no
+ * sector). One dense u16 load replaces the r_ssdata_t straddling-record
+ * probe plus the sector-pointer null check in the walk's hottest reject. */
+extern uint16_t *r_ss_flatgate;
+
+/* Recompute the per-child height ranges (doors and lifts move sectors). */
+/* Load time: full subtree geometry, including the xy cull boxes. */
+void R_BuildNodeGeo(void);
+/* The full z-only tree walk; the consume's fallback for savegame loads and
+ * level builds. See the note in r_ssdata.c for why the rest of the full
+ * pass is provably dead on a refresh. */
 void R_RefreshNodeZ(void);
+
+/* Incremental refresh: the mark hooks record WHICH sectors' heights
+ * changed (T_MovePlane per mover tic, D_InterpEnd per presented lerp
+ * frame, P_UnArchiveWorld marks all), and the render's consume bubbles
+ * only those sectors' leaf ranges up the tree with an equality early-out.
+ * A moving door touches tens of slots instead of walking every node at
+ * frame rate. NODEZCHECK=1 proves incremental == full walk every frame. */
+void R_NodeZMarkSector(int secnum);
+void R_NodeZMarkAll(void);
+void R_NodeZConsume(void);
 
 /* Build from the level Doom's P_SetupLevel has just loaded. Allocates from the
  * zone with PU_LEVEL, so a level change frees it automatically. */

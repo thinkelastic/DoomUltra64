@@ -54,9 +54,14 @@ extern boolean d_level_resident_set(boolean v);
 void D_LevelPreSetup(void)
 {
     void p_level_reset_assets(void);
+    void D_LightsInvalidate(void);
     d_level_resident_set(false);
     void W_N64_DropCache(void);
     void R_InitSkyFlat(void);
+
+    /* The dynamic-light cache keys on gametic, which keeps counting across
+     * a level change while the thinker list it was built from is destroyed. */
+    D_LightsInvalidate();
 
     /* The frame tail is pipelined: the RDP may still be rasterising from
      * textures in the arena this teardown resets. Drain it first. */

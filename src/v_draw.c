@@ -27,6 +27,7 @@
 
 #include <libdragon.h>
 #include <stdio.h>
+#include <string.h>
 
 void       *p_level_resolve_ptr(const char *name, const char *prefix);
 lumpindex_t W_LumpForPointer(const void *ptr);
@@ -79,7 +80,29 @@ void V_RestoreBuffer(void)
 void V_BeginUI(void)
 {
     ui_active = true;
+#if UI_XSCALE == 1
     rdpq_set_mode_copy(true);
+#else
+    /* COPY mode cannot magnify.
+     *
+     * It moves four texels per clock, and DSDX steps S once per four-pixel
+     * GROUP -- which is why libdragon's RSP fixup multiplies it by 4. At 1:1
+     * that is exactly four consecutive texels per four pixels and the blit is
+     * perfect. Ask for a 2x destination and the group boundaries quantise the
+     * sampling instead of doubling each texel: every one-pixel feature ghosts
+     * and gaps, which on the status bar turns "BULL 40/200" into a row of
+     * split glyphs. Verified in ares (paraLLEl-RDP).
+     *
+     * Standard mode scales correctly, at one pixel per clock instead of four.
+     * The UI is a few tens of thousands of pixels a frame, so that trade buys
+     * a correct full-width HUD for a cost that stays in the noise -- and it
+     * is paid only in wide mode. */
+    rdpq_set_mode_standard();
+    rdpq_mode_combiner(RDPQ_COMBINER1((0, 0, 0, TEX0), (0, 0, 0, TEX0)));
+    rdpq_mode_alphacompare(1);        /* same transparent-index cutout */
+    rdpq_mode_filter(FILTER_POINT);   /* palette art: never interpolate */
+    rdpq_mode_zbuf(false, false);     /* overlay; modes persist, so be explicit */
+#endif
     rdpq_mode_tlut(TLUT_RGBA16);
 }
 
@@ -104,10 +127,57 @@ static int v_xshift;
 
 void V_SetXShift(int shift) { v_xshift = shift; }
 
+/* --- status-bar compositing ---------------------------------------------
+ *
+ * The bar redrew ~40 patch upload+rectangle pairs every frame though its
+ * content changes on well under a third of frames even in combat (the idle
+ * face rerolls at ~2 Hz). Instead: the vendored ST code still "draws"
+ * every frame, but into a capture list of (texture, x, y) commands; when
+ * the list -- or the palette bank, which an RGBA16 composite bakes in --
+ * differs from the committed one, the list is replayed once into a
+ * persistent offscreen surface, and every frame re-blits that surface as a
+ * handful of full-TMEM tiles. Correct by construction: any visual change
+ * in the bar necessarily changes the command list or the bank. */
+typedef struct { const dt64_tex_t *tex; int16_t x, y; } v_barcmd_t;
+_Static_assert(sizeof(v_barcmd_t) == 8, "capture entry packs to 8 bytes");
+#define V_BARCMD_MAX 64          /* worst real case ~47 (netgame+deathmatch) */
+#define V_BAR_H      32          /* == ST_HEIGHT */
+static v_barcmd_t bar_cur[V_BARCMD_MAX], bar_prev[V_BARCMD_MAX];
+static int  bar_cur_n, bar_prev_n = -1;   /* -1 forces the first composite */
+static int  bar_prev_bank = -1;
+static bool bar_capture, bar_surf_valid, bar_legacy;
+static surface_t bar_surf;
+
+static void v_blit_at(const dt64_tex_t *tex, float ox, float oy);
+
 static void v_blit(const dt64_tex_t *tex, float ox, float oy)
 {
+    /* ox/oy stay in Doom's 320-wide frame right through the tile loop; only
+     * the destination rectangle is scaled, at the point it is emitted. The
+     * safe-area inset is a 320-frame quantity too, so it is applied here,
+     * before scaling. */
     ox += (float)v_xshift;
     oy += (float)(v_bufmode ? V_STBAR_DEST : v_yshift);
+
+    if (bar_capture) {
+        /* Coordinates are integral here (integer math upstream), so the
+         * int16 record is lossless. A draw poking above the bar strip
+         * cannot be composited; vanilla art never does, but fail safe. */
+        if (bar_cur_n < V_BARCMD_MAX && oy >= (float)V_STBAR_DEST) {
+            bar_cur[bar_cur_n].tex = tex;
+            bar_cur[bar_cur_n].x   = (int16_t)ox;
+            bar_cur[bar_cur_n].y   = (int16_t)oy;
+            bar_cur_n++;
+        } else {
+            bar_legacy = true;
+        }
+        return;
+    }
+    v_blit_at(tex, ox, oy);
+}
+
+static void v_blit_at(const dt64_tex_t *tex, float ox, float oy)
+{
     const int w = tex->width, h = tex->height;
     const int tw = w < DT64_TILE_W ? w : DT64_TILE_W;
     const int th = h < DT64_TILE_H ? h : DT64_TILE_H;
@@ -117,14 +187,19 @@ static void v_blit(const dt64_tex_t *tex, float ox, float oy)
         for (int s0 = 0; s0 < w; s0 += tw) {
             const int s1 = s0 + tw > w ? w : s0 + tw;
 
-            const float x0 = ox + (float)s0, y0 = oy + (float)t0;
-            const float x1 = ox + (float)s1, y1 = oy + (float)t1;
+            const float x0 = (ox + (float)s0) * UI_XSCALE;
+            const float x1 = (ox + (float)s1) * UI_XSCALE;
+            const float y0 = oy + (float)t0, y1 = oy + (float)t1;
             if (x1 < 0.0f || x0 > (float)SCREEN_W) continue;
             if (y1 < 0.0f || y0 > (float)SCREEN_H) continue;
 
             dt64_upload_tile(TILE0, tex, NULL, s0, t0, s1, t1);
-            rdpq_texture_rectangle(TILE0, x0, y0, x1, y1,
-                                   (float)s0, (float)t0);
+            /* Scaled form even at 1x, where it is the same rectangle: one
+             * code path, and the S range is stated explicitly rather than
+             * implied by the destination width. */
+            rdpq_texture_rectangle_scaled(TILE0, x0, y0, x1, y1,
+                                          (float)s0, (float)t0,
+                                          (float)s1, (float)t1);
             r_tri_spr++;
         }
     }
@@ -149,6 +224,88 @@ static struct {
 void V_DrawResetCache(void)
 {
     for (int i = 0; i < V_TEXCACHE; i++) v_texcache[i].patch = NULL;
+    /* The bar composite is invalid across a level swap for the same reason
+     * this cache is: the next level can rebake different art at the same
+     * arena addresses, so pointer-equal capture entries must not count as
+     * clean. The surface allocation itself survives. */
+    bar_prev_n = -1;
+    bar_prev_bank = -1;
+    bar_surf_valid = false;
+    bar_legacy = false;
+}
+
+/* Begin recording the bar's draws instead of emitting them. */
+void V_BarCaptureBegin(void)
+{
+    bar_capture = true;
+    bar_cur_n = 0;
+}
+
+/* Stop recording; returns true when the composite must be rebuilt (the
+ * command list or the palette bank -- which an RGBA16 composite bakes in --
+ * changed). Commits the captured list either way. */
+int V_BarCaptureEnd(void)
+{
+    bar_capture = false;
+    const int bank = dt64_palette();
+    const bool clean = bar_surf_valid && !bar_legacy &&
+                       bar_cur_n == bar_prev_n && bank == bar_prev_bank &&
+                       memcmp(bar_cur, bar_prev,
+                              (size_t)bar_cur_n * sizeof *bar_cur) == 0;
+    memcpy(bar_prev, bar_cur, (size_t)bar_cur_n * sizeof *bar_cur);
+    bar_prev_n    = bar_cur_n;
+    bar_prev_bank = bank;
+    return !clean;
+}
+
+int V_BarValid(void) { return bar_surf_valid && !bar_legacy; }
+
+/* Replay the committed list once into the persistent offscreen strip.
+ * Runs at the frame loop's no-attach point (the same slot r_wipe_start's
+ * blit proved out); rdpq_detach enqueues the SYNC_FULL that orders these
+ * writes before the frame's re-blit reads. */
+void V_BarComposite(void)
+{
+    if (bar_legacy) return;
+
+    if (!bar_surf.buffer) {
+        bar_surf = surface_alloc(FMT_RGBA16, SCREEN_W, V_BAR_H);
+        if (!bar_surf.buffer) { bar_legacy = true; return; }
+        /* Stale dirty lines from allocation would write back over RDP
+         * pixels; once, here -- the CPU never touches the buffer again. */
+        data_cache_hit_writeback_invalidate(bar_surf.buffer,
+                                            (size_t)bar_surf.stride * V_BAR_H);
+    }
+
+    rdpq_attach(&bar_surf, NULL);
+    rdpq_clear(RGBA32(0, 0, 0, 255));   /* no uninitialized texel survives */
+    dt64_bind_tlut();
+    V_BeginUI();
+    for (int i = 0; i < bar_prev_n; i++)
+        v_blit_at(bar_prev[i].tex,
+                  (float)bar_prev[i].x,
+                  (float)(bar_prev[i].y - V_STBAR_DEST));
+    V_EndUI();
+    rdpq_detach();
+    bar_surf_valid = true;
+}
+
+/* Re-blit the composited strip: a handful of full-TMEM RGBA16 tiles in
+ * place of the ~40 per-patch pairs the bar used to cost every frame. */
+void V_BarBlit(void)
+{
+    /* RGBA16 must not sample through the TLUT, and the 4 KB tiles clobber
+     * the TLUT half of TMEM -- rebind for the CI8 text that follows. */
+    rdpq_mode_tlut(TLUT_NONE);
+    for (int tx = 0; tx < SCREEN_W; tx += 64) {
+        surface_t t = surface_make_sub(&bar_surf, tx, 0, 64, V_BAR_H);
+        rdpq_tex_upload(TILE0, &t, NULL);
+        rdpq_texture_rectangle(TILE0, tx, V_STBAR_DEST,
+                               tx + 64, V_STBAR_DEST + V_BAR_H, 0, 0);
+        r_tri_spr++;
+    }
+    dt64_bind_tlut();
+    rdpq_mode_tlut(TLUT_RGBA16);
 }
 
 /* Find the baked art for a cached patch. */
@@ -185,8 +342,10 @@ void V_DrawFlatFill(const char *flatname)
         (const dt64_tex_t *)p_level_resolve_ptr(flatname, "f_");
     if (!tex) return;
 
+    /* In UI coordinates: v_blit scales the destination, so tiling the 320
+     * frame covers the whole viewport at any width. */
     for (int y = 0; y < 200; y += tex->height)
-        for (int x = 0; x < SCREEN_W; x += tex->width)
+        for (int x = 0; x < SCREEN_BASE_W; x += tex->width)
             v_blit(tex, (float)x, (float)y);
 }
 

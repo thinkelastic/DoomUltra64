@@ -26,13 +26,19 @@ void mem_init(void)
     assertf(is_memory_expanded(),
             "This build requires the Expansion Pak (8 MB).\n"
             "Detected %d MB of RDRAM.\n"
-            "The per-level texture working set reaches ~1.3 MB, which does not\n"
+            "The per-level texture working set reaches ~1.7 MB, which does not\n"
             "fit 4 MB alongside the zone heap and framebuffers.",
             get_memory_size() / (1024 * 1024));
 
     for (int i = 0; i < MEM_ARENA_COUNT; i++) {
-        arenas[i].base = memalign(16, arenas[i].capacity);
-        assertf(arenas[i].base, "cannot reserve %s arena (%u KB)",
+        /* A zero-capacity arena reserves nothing. malloc(0) is allowed to
+         * return either NULL or a free-able pointer, so neither outcome can
+         * be treated as failure -- skip it instead. mem_alloc still refuses
+         * every request against it, naming the arena. */
+        arenas[i].base = arenas[i].capacity ? memalign(16, arenas[i].capacity)
+                                            : NULL;
+        assertf(arenas[i].base || !arenas[i].capacity,
+                "cannot reserve %s arena (%u KB)",
                 arenas[i].name, (unsigned)(arenas[i].capacity / 1024));
         arenas[i].used = 0;
         arenas[i].peak = 0;

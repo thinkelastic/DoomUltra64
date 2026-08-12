@@ -89,6 +89,47 @@ void dt64_load_tlut(const char *path)
  * reds, 9-12 pickup golds, 13 the radiation-suit green. (Invulnerability's
  * white-out is a colormap effect, not a palette, and is not covered here.)
  * st_stuff picks the bank; this just latches it for the next bind. */
+/* Rebuild all palette banks from a runtime PLAYPAL lump, replacing the
+ * baked ones. The baked playpal.tlut ships whichever IWAD the ROM was built
+ * against; with EXTWAD the player can drop in any WAD, and its damage,
+ * bonus and radsuit palettes may differ. The conversion reproduces the
+ * build tool's exactly -- truncating 8->5 bit channels, alpha set except
+ * the transparency key, index 255 forced to transparent black in every
+ * bank -- and native big-endian uint16 stores match the baked file's
+ * byte order, so a rebuild from the same PLAYPAL bytes is bit-identical
+ * to the shipped banks. Falls back to the baked data on any failure. */
+void dt64_build_tluts(const uint8_t *playpal, int nbytes)
+{
+    int npals = nbytes / 768;
+    if (npals > 14) npals = 14;
+    if (npals < 1) return;                      /* keep baked banks */
+
+    uint16_t *banks = memalign(16, (size_t)npals * 512);
+    if (!banks) return;                         /* keep baked banks */
+
+    for (int p = 0; p < npals; p++)
+        for (int i = 0; i < 256; i++) {
+            uint8_t r = playpal[p * 768 + i * 3 + 0];
+            uint8_t g = playpal[p * 768 + i * 3 + 1];
+            uint8_t b = playpal[p * 768 + i * 3 + 2];
+            uint16_t a = 1;
+            if (i == 255) { r = g = b = 0; a = 0; }  /* transparency key */
+            banks[p * 256 + i] = (uint16_t)(((r >> 3) << 11) |
+                                            ((g >> 3) << 6)  |
+                                            ((b >> 3) << 1)  | a);
+        }
+
+    free(tlut_banks);
+    tlut_banks  = banks;
+    tlut_nbanks = npals;
+    tlut_bank   = 0;
+    /* Re-stage bank 0: the per-frame bind uploads the staging buffer, and
+     * its current contents came from the baked banks just replaced. */
+    memcpy(tlut, banks, 512);
+}
+
+int dt64_palette(void) { return tlut_bank; }
+
 void dt64_set_palette(int bank)
 {
     if (!tlut_banks || bank < 0 || bank >= tlut_nbanks) bank = 0;

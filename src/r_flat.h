@@ -24,9 +24,15 @@
 void r_flat_begin(void);
 
 /* Queue one subsector surface. `pts` must outlive the frame -- it points into
- * the level arena, which is stable, so nothing is copied. */
-void r_flat_add(const r_polypt_t *pts, int npts, float height, float shade,
-                dt64_tex_t *tex);
+ * the level arena, which is stable, so nothing is copied. `lightlevel` is the
+ * sector light already clamped to 0..255: the byte is what the job record
+ * stores (24 -> 16 bytes against an 8 KB D-cache), and the flush rebuilds the
+ * exact float shade with the same * (1/255.0f) the callers used to apply. */
+/* `lit` is nonzero when a dynamic light can reach the surface (the caller
+ * tests its region box against the light spheres); zero lets the fan skip
+ * every per-vertex light query with identical output. */
+void r_flat_add(const r_polypt_t *pts, int npts, float height, int lightlevel,
+                dt64_tex_t *tex, float glow, const float tint[3], int lit);
 
 /* Bind each distinct texture once and draw everything that uses it. */
 void r_flat_flush(const r_camera_t *cam);

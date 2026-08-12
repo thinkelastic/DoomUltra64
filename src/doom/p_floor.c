@@ -51,6 +51,17 @@ T_MovePlane
 {
     boolean	flag;
     fixed_t	lastpos;
+
+    // DoomN64: every gradual sector-height change in the game funnels
+    // through this function, which makes it the one choke point where the
+    // renderer's node height ranges can learn WHICH sector went stale --
+    // the alternative was an every-frame checksum over all sectors. Marks
+    // accumulate across however many tics run per frame; the renderer
+    // consumes them. (Savegame loads write heights directly and mark all
+    // in P_UnArchiveWorld; interpolation re-marks presented sectors in
+    // D_InterpEnd.)
+    { extern void R_NodeZMarkSector(int);
+      R_NodeZMarkSector((int)(sector - sectors)); }
 	
     switch(floorOrCeiling)
     {

@@ -41,6 +41,8 @@ void *p_level_thing_sprite(int type);
 #include "doom/d_main.h"
 #include "doom/umapinfo.h"
 #include "doom/sounds.h"
+
+#include "r_light.h"
 #include "doom/am_map.h"
 #include "dt64.h"
 #include "doom/w_wad.h"
@@ -81,12 +83,117 @@ void R_InitSkyFlat(void)
     skyflatnum = p_level_resolve("F_SKY1", "f_");
 }
 
+/* --- emissive flats ---------------------------------------------------- */
+
+/* Doom's sludge, lava and blood read as light sources but are lit like any
+ * other floor: a nukage pool in a dim room comes out as dark as the concrete
+ * around it. Nothing in the WAD marks them, so they are recognised by name --
+ * the same way Doom itself recognises F_SKY1.
+ *
+ * Recorded by resolved index rather than by name, because the name is gone by
+ * the time anything draws: the loader resolves flats to indices once and the
+ * renderer only ever sees the index. A level uses one or two of these, so the
+ * lookup is a scan of a table that is nearly always length 0, 1 or 2.
+ */
+#if D_DYNLIGHT
+/* Storage for the inline queries in d_glow.h; the writers below own it. */
+#include "d_glow.h"
+#define GLOW_MAX D_GLOW_MAX
+int16_t d_glow_pic[D_GLOW_MAX];
+float   d_glow_amt[D_GLOW_MAX];
+float   d_glow_rgb[D_GLOW_MAX][3];      /* light colour, from the art */
+uint8_t d_glow_have_rgb[D_GLOW_MAX];
+int     d_num_glow;
+#define glow_pic      d_glow_pic
+#define glow_amt      d_glow_amt
+#define glow_rgb      d_glow_rgb
+#define glow_have_rgb d_glow_have_rgb
+#define num_glow      d_num_glow
+
+dt64_tex_t *p_level_texture(int index);
+
+/* The light's colour, averaged from the flat's own texels.
+ *
+ * Hand-picked tints would be a guess about art I cannot see; the average of
+ * what the surface actually shows is the same information the player is
+ * looking at. Computed once per flat per level, off the first frame that draws
+ * it -- the texture is demand-loaded, so it does not exist when the name is
+ * resolved.
+ *
+ * NORMALISED so the brightest channel is full, which is the point worth being
+ * careful about: the tint multiplies an intensity, so what is wanted is the
+ * HUE and not the brightness. Averaged raw, a dark blood flat would come out
+ * near-black and dim the very light it is supposed to be casting. Scaling to
+ * the brightest channel keeps green nukage green and red blood red while
+ * leaving the intensity to glow_amt, where it belongs. */
+void d_glow_bake_rgb(int slot, int picnum)
+{
+    glow_have_rgb[slot] = 1;
+    glow_rgb[slot][0] = glow_rgb[slot][1] = glow_rgb[slot][2] = 1.0f;
+
+    const dt64_tex_t *t = p_level_texture(picnum);
+    if (!t || !t->texels || t->width <= 0 || t->height <= 0) return;
+
+    uint32_t ar = 0, ag = 0, ab = 0;
+    const int n = t->width * t->height;
+    for (int i = 0; i < n; i++) {
+        const uint16_t c = dt64_tlut_color(t->texels[i]);   /* RGBA5551 */
+        ar += (c >> 11) & 31;
+        ag += (c >>  6) & 31;
+        ab += (c >>  1) & 31;
+    }
+
+    const uint32_t mx = ar > ag ? (ar > ab ? ar : ab) : (ag > ab ? ag : ab);
+    if (!mx) return;                       /* pure black flat: leave it white */
+    glow_rgb[slot][0] = (float)ar / (float)mx;
+    glow_rgb[slot][1] = (float)ag / (float)mx;
+    glow_rgb[slot][2] = (float)ab / (float)mx;
+}
+
+/* D_FlatGlow / D_FlatGlowRGB are inline in d_glow.h now -- the queries sit
+ * in the BSP walk and the registry is a handful of entries. */
+
+void D_FlatGlowReset(void)
+{
+    num_glow = 0;
+    for (int i = 0; i < GLOW_MAX; i++) glow_have_rgb[i] = 0;
+}
+
+
+static float glow_for_name(const char *n)
+{
+    /* Prefix matches: the WAD numbers the animation frames (NUKAGE1..3,
+     * LAVA1..4), and every frame of one animation glows the same. */
+    if (!strncasecmp(n, "NUKAGE", 6)) return 0.55f;   /* the green sludge */
+    if (!strncasecmp(n, "LAVA",   4)) return 0.70f;
+    if (!strncasecmp(n, "SLIME",  5)) return 0.45f;
+    if (!strncasecmp(n, "BLOOD",  5)) return 0.30f;
+    if (!strncasecmp(n, "FWATER", 6)) return 0.25f;
+    return 0.0f;
+}
+#endif /* D_DYNLIGHT */
+
 int R_FlatNumForName(const char *name)
 {
     /* Flats are converted to their own prefixed set on the host: they are
      * 64x64 in the WAD but downsampled here, and share no namespace with wall
      * textures despite Doom treating both as "pics". */
-    return p_level_resolve(name, "f_");
+    const int idx = p_level_resolve(name, "f_");
+
+#if D_DYNLIGHT
+    const float g = glow_for_name(name);
+    if (g > 0.0f && idx >= 0 && num_glow < GLOW_MAX) {
+        bool seen = false;
+        for (int i = 0; i < num_glow; i++)
+            if (glow_pic[i] == (int16_t)idx) { seen = true; break; }
+        if (!seen) {
+            glow_pic[num_glow] = (int16_t)idx;
+            glow_amt[num_glow] = g;
+            num_glow++;
+        }
+    }
+#endif
+    return idx;
 }
 
 int R_CheckTextureNumForName(const char *name)
@@ -97,9 +204,16 @@ int R_CheckTextureNumForName(const char *name)
 /* --- renderer: load-time precomputation the RDP does not need ---------- */
 
 /* Doom builds per-seg and per-sector render caches at load because its
- * software renderer walks them every frame. Ours submits triangles to the RDP
- * and reads the level structures directly, so there is nothing to cache. */
-void R_BuildSegRenderData(void) { }
+ * software renderer walks them every frame. This port has its own version
+ * of the same idea: the per-seg float mirror the BSP walk reads instead of
+ * chasing vertex/sector pointers and reconverting fixed-point every frame.
+ * P_LoadSegs calls this at the exact moment segs/vertexes/sides/lines are
+ * all resolved. */
+void R_BuildSegRenderData(void)
+{
+    void R_BuildSegFloatMirror(void);
+    R_BuildSegFloatMirror();
+}
 void R_BuildBSPRenderData(void) { }
 
 /* Sprite rotation tables and the texture precache are both load-time work for
@@ -376,6 +490,18 @@ void D_InterpEnd(void)
         sec->floorheight   = sec->renderfloorheight;
         sec->ceilingheight = sec->renderceilingheight;
     }
+    /* Re-arm the node height ranges for every sector whose PRESENTED
+     * height this frame lerped: the next frame presents a different
+     * sub-tic height, and when the mover settles the last lerped frame's
+     * mark is what buys the final refresh at true resting heights. Without
+     * this, interp frames rendered with sub-tic-stale cull ranges and the
+     * settle frame stayed one tic of travel stale -- the flag-only design
+     * had exactly that hole. */
+    {
+        extern void R_NodeZMarkSector(int);
+        for (int i = 0; i < numinterpolatedsectors; i++)
+            R_NodeZMarkSector((int)(interpolatedsectors[i] - sectors));
+    }
 }
 
 void D_PlayerView(float *x, float *y, float *z, float *angle)
@@ -546,9 +672,11 @@ void D_SetSky(int episode)
  * against a shared TLUT: a flash is a 512-byte TLUT swap rather than anything
  * per-pixel.
  *
- * Not wired up yet. The build tool converts only PLAYPAL's first palette, so
- * there is nothing to switch to; emitting all fourteen and selecting between
- * them here is the remaining work, and it is small.
+ * Wired end to end: the build tool emits all fourteen palettes, dt64 keeps
+ * them as selectable banks (rebuilt from the runtime WAD's PLAYPAL at boot,
+ * so EXTWAD IWAD swaps flash with their own colours), and ST_doPaletteStuff
+ * drives the selection below every frame. A flash is a 512-byte bank copy
+ * plus the TLUT upload the frame was paying anyway.
  */
 void I_SetPalette(byte *palette)
 {
@@ -937,6 +1065,114 @@ void D_SoundTic(void)
     void S_UpdateSounds(mobj_t *listener);
     if (players[consoleplayer].mo)
         S_UpdateSounds(players[consoleplayer].mo);
+}
+
+/* Collect this frame's moving lights. Called from the frame loop before the
+ * BSP walk, because the walk is what emits the geometry that queries them.
+ *
+ * Doom has no light entities, so the sources are inferred from what the world
+ * already contains: the weapon's flash psprite, and the projectile mobjs that
+ * are lit objects by their nature. Nothing is added to the game state and
+ * nothing here can affect it -- this reads the simulation and writes only to
+ * the renderer's list, so a build with DYNLIGHT off plays identically. */
+#if D_DYNLIGHT
+/* Lights are tic-quantized by construction -- everything the scan below
+ * reads is simulation state that only a game tic can change -- so frames
+ * within one tic rebuild an identical list. Cache by gametic and skip the
+ * whole thinker walk on the repeat frames (at 60 fps and 35 Hz tics, nearly
+ * every other frame). Invalidated on level (re)load, when the thinker list
+ * is rebuilt while gametic keeps counting. */
+static int lights_gametic = -1;
+
+void D_LightsInvalidate(void)
+{
+    lights_gametic = -1;
+}
+#else
+void D_LightsInvalidate(void) { }
+#endif
+
+void D_LightsUpdate(void)
+{
+#if D_DYNLIGHT
+    {
+        extern int gametic;
+        if (gametic == lights_gametic) return;
+        lights_gametic = gametic;
+    }
+
+    r_light_reset();
+
+    const player_t *pl = &players[consoleplayer];
+    if (!pl->mo) return;
+
+    const float px = (float)pl->mo->x / 65536.0f;
+    const float py = (float)pl->mo->y / 65536.0f;
+
+    /* Anything this far from the eye cannot reach geometry the player is
+     * looking at closely enough to matter, and the list is small. */
+    const float CULL = 1400.0f;
+
+    /* The weapon's flash. ps_flash carries a state only while the frame that
+     * shows the muzzle is up, which is exactly the window the light wants --
+     * no timer of our own, and it stays in step with the weapon's animation
+     * however the player's fire rate changes. */
+    if (pl->psprites[ps_flash].state)
+        r_light_add(px, py, (float)pl->mo->z / 65536.0f + 32.0f, 512.0f, 1.0f,
+                    1.00f, 0.93f, 0.78f);          /* warm gunpowder white */
+
+    for (thinker_t *th = thinkercap.next; th != &thinkercap; th = th->next) {
+        if (th->function.acp1 != (actionf_p1)P_MobjThinker) continue;
+        const mobj_t *mo = (const mobj_t *)th;
+
+        /* Each projectile lights in its own colour -- the art's own hue,
+         * saturated enough to read on grey stone but shy of pure primaries,
+         * which posterize against the 16-bit framebuffer. */
+        float radius, intensity, cr, cg, cb;
+        switch (mo->type) {
+            case MT_ROCKET:      radius = 384.0f; intensity = 0.90f;
+                                 cr = 1.00f; cg = 0.62f; cb = 0.30f; break;
+            case MT_PLASMA:      radius = 288.0f; intensity = 0.75f;
+                                 cr = 0.45f; cg = 0.65f; cb = 1.00f; break;
+            case MT_BFG:         radius = 576.0f; intensity = 1.00f;
+                                 cr = 0.50f; cg = 1.00f; cb = 0.45f; break;
+            case MT_TROOPSHOT:   radius = 320.0f; intensity = 0.80f;
+                                 cr = 1.00f; cg = 0.52f; cb = 0.28f; break;
+            case MT_HEADSHOT:    radius = 320.0f; intensity = 0.80f;
+                                 cr = 1.00f; cg = 0.55f; cb = 0.30f; break;
+            case MT_BRUISERSHOT: radius = 320.0f; intensity = 0.80f;
+                                 cr = 0.55f; cg = 1.00f; cb = 0.40f; break;
+            default: continue;
+        }
+
+        const float mx = (float)mo->x / 65536.0f;
+        const float my = (float)mo->y / 65536.0f;
+        const float dx = mx - px, dy = my - py;
+        if (dx * dx + dy * dy > CULL * CULL) continue;
+
+        /* Height of the projectile's middle, so a fireball lights the floor
+         * under it and the ceiling above rather than the plane it sits on. */
+        const float mz = (float)mo->z / 65536.0f
+                       + (float)mo->height / 65536.0f * 0.5f;
+        r_light_add(mx, my, mz, radius, intensity, cr, cg, cb);
+    }
+
+#if D_HWSTAT
+    /* Harvest line for the capture rig: the route is tic-keyed, so any tic
+     * printed here can be replayed exactly with FREEZE=<tic> to pin a
+     * frame with that light live -- how lit poses are found for pixel
+     * validation. Once per lit stretch, not per frame. */
+    {
+        extern int leveltime;
+        static int was_lit;
+        const int lit = r_light_count() > 0;
+        if (lit && !was_lit)
+            debugf("lights: lit from leveltime=%d n=%d\n",
+                   leveltime, r_light_count());
+        was_lit = lit;
+    }
+#endif
+#endif
 }
 
 /* The view is always the full screen here: there is no status bar inset to

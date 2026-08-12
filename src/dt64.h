@@ -45,6 +45,11 @@ typedef struct dt64_tex_s {
 /* Load the shared 256-entry PLAYPAL TLUT into RAM. */
 void dt64_load_tlut(const char *path);
 
+/* Rebuild every palette bank from a runtime PLAYPAL lump (14 x 768 bytes of
+ * RGB): EXTWAD players can swap IWADs, and flash palettes belong to the WAD
+ * actually playing. Bit-identical to the baked banks for identical bytes. */
+void dt64_build_tluts(const uint8_t *playpal, int nbytes);
+
 /* Upload the current palette into the upper half of TMEM. Call once per frame,
  * before drawing: it is a single 512-byte command, and re-binding per frame is
  * what makes Doom's palette effects (damage red, item pickup, invulnerability)
@@ -53,6 +58,7 @@ void dt64_bind_tlut(void);
 
 /* Select which PLAYPAL palette the next bind uploads (0 = normal). */
 void dt64_set_palette(int bank);
+int  dt64_palette(void);      /* the bank currently selected */
 
 /* Live palette entry (current bank), RGBA5551. */
 uint16_t dt64_tlut_color(int idx);

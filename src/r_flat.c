@@ -19,6 +19,8 @@
  * through a doorway, which is common. They are depth-buffered instead.
  */
 #include "r_flat.h"
+#include "r_fastmath.h"
+#include "r_light.h"
 #include "r_tri.h"
 
 #include <math.h>
@@ -109,6 +111,10 @@ typedef struct { float d, o, wx, wy; } fvtx_t;
 
 static int clip_depth(const fvtx_t *in, int n, fvtx_t *out, float d0, bool keep_far);
 static int clip_side(const fvtx_t *in, int n, fvtx_t *out, float k, bool keep_left);
+#if R_FUSESPLIT
+static void split_depth(const fvtx_t *in, int n, fvtx_t *near_out, int *out_nn,
+                        fvtx_t *far_out, int *out_fn, float d0);
+#endif
 static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
                      float dz, float shade, float sorg, float torg);
 
@@ -116,11 +122,26 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
  * polygons live in the level arena and do not move. */
 typedef struct {
     const r_polypt_t *pts;
-    dt64_tex_t     *tex;
     float           height;
-    float           shade;
+    /* Byte, not float: the flush rebuilds the shade with the callers' own
+     * * (1/255.0f), bit-identically. The tex pointer that used to sit here
+     * was written and never read (jobtex[] is what the flush binds), and
+     * together the two cuts take the record from 24 to 16 bytes -- one
+     * D-cache line per job instead of two. */
+    uint8_t         shade_ll;
     uint8_t         npts;
     uint8_t         texidx;
+    /* Nonzero when a light can reach the surface (caller's sphere-vs-box
+     * test): the fan skips every per-vertex query otherwise. Occupies what
+     * was the record's one pad byte. */
+    uint8_t         lit;
+#if D_DYNLIGHT
+    /* Emissive contribution and its colour, as bytes: this array is 256 jobs
+     * against an 8 KB D-cache, and four floats here would cost 4 KB of it for
+     * a value that only ever drives a light. */
+    uint8_t         glow;
+    uint8_t         tint[3];
+#endif
 } flatjob_t;
 
 /* A dense view of a real level queues well under this; E1M1 peaks near 90. */
@@ -131,6 +152,23 @@ static flatjob_t   jobs[FLAT_MAX_JOBS];
 static int         numjobs;
 static dt64_tex_t *jobtex[FLAT_MAX_TEXTURES];
 static int         numjobtex;
+
+#if D_DYNLIGHT
+/* The job currently being emitted. emit_fan runs once per depth band of a
+ * single job, so these are set per job rather than threaded through the band
+ * macros -- the alternative is four extra arguments down two layers of macro
+ * for a value that is constant across every band of the surface. */
+static float cur_glow;
+static float cur_tint[3] = { 1.0f, 1.0f, 1.0f };
+static int   cur_lit;         /* job's light-reach flag; gates the queries */
+#endif
+#if R_FOGSCALE
+/* Distance-falloff LUT entry for the job being emitted, same per-job
+ * pattern as the glow above. Flats previously had NO diminishing at all --
+ * a floor at 3000 units sat full-bright beside a near-black wall; with the
+ * scaled fog they fall off exactly as the walls beside them do. */
+static float cur_fog_inv;
+#endif
 
 static int stat_flats;
 static int stat_uploads;
@@ -162,8 +200,8 @@ int r_flat_emit_us(void) { return (int)stat_emit_us; }
 int r_flat_bind_us(void) { return (int)stat_bind_us; }
 int r_flat_dropped(void) { return stat_dropped; }
 
-void r_flat_add(const r_polypt_t *pts, int npts, float height, float shade,
-                dt64_tex_t *tex)
+void r_flat_add(const r_polypt_t *pts, int npts, float height, int lightlevel,
+                dt64_tex_t *tex, float glow, const float tint[3], int lit)
 {
     if (!tex || npts < 3 || npts > FLAT_MAX_PTS) return;
     if (numjobs >= FLAT_MAX_JOBS) { stat_dropped++; return; }
@@ -178,10 +216,18 @@ void r_flat_add(const r_polypt_t *pts, int npts, float height, float shade,
     }
 
     flatjob_t *j = &jobs[numjobs++];
-    j->pts    = pts;
-    j->tex    = tex;
-    j->height = height;
-    j->shade  = shade;
+    j->pts      = pts;
+    j->height   = height;
+    j->shade_ll = (uint8_t)lightlevel;
+    j->lit      = (uint8_t)(lit != 0);
+#if D_DYNLIGHT
+    j->glow    = (uint8_t)(glow < 0.0f ? 0.0f : (glow > 1.0f ? 255.0f : glow * 255.0f));
+    j->tint[0] = (uint8_t)(tint[0] * 255.0f);
+    j->tint[1] = (uint8_t)(tint[1] * 255.0f);
+    j->tint[2] = (uint8_t)(tint[2] * 255.0f);
+#else
+    (void)glow; (void)tint;
+#endif
     j->npts   = (uint8_t)npts;
     j->texidx = (uint8_t)ti;
 }
@@ -226,9 +272,20 @@ void r_flat_flush(const r_camera_t *cam)
 #if D_HWSTAT
         stat_bind_us += TICKS_TO_US(TICKS_SINCE(t_));
 #endif
-        for (int i = head[t]; i >= 0; i = next[i])
+        for (int i = head[t]; i >= 0; i = next[i]) {
+#if R_FOGSCALE
+            cur_fog_inv = r_fog_inv[jobs[i].shade_ll];
+#endif
+#if D_DYNLIGHT
+            cur_glow    = jobs[i].glow    * (1.0f / 255.0f);
+            cur_tint[0] = jobs[i].tint[0] * (1.0f / 255.0f);
+            cur_tint[1] = jobs[i].tint[1] * (1.0f / 255.0f);
+            cur_tint[2] = jobs[i].tint[2] * (1.0f / 255.0f);
+            cur_lit     = jobs[i].lit;
+#endif
             draw_one(cam, jobs[i].pts, jobs[i].npts, jobs[i].height,
-                     jobs[i].shade);
+                     (float)jobs[i].shade_ll * (1.0f / 255.0f));
+        }
     }
     numjobs   = 0;
     numjobtex = 0;
@@ -337,12 +394,12 @@ static void draw_one(const r_camera_t *cam, const r_polypt_t *pts, int npts,
      * depth distribution is untouched; see emit_fan. */
     float dmin_v = FLAT_CLIP_NEAR;
     if (fabsf(dz) > 1e-3f) {
-        const float dv = fabsf(dz) * cam->focal /
+        const float dv = fabsf(dz) * cam->focal_y /
                          ((float)SCREEN_H * 0.5f + 16.0f);
         if (dv > dmin_v) dmin_v = dv;
     }
 
-    const float kx = GUARD / cam->focal;
+    const float kx = GUARD / cam->focal_x;
 
     /* Most polygons lie entirely inside the guard region, and running three
      * Sutherland-Hodgman passes over them just copies every vertex unchanged.
@@ -392,8 +449,8 @@ static void draw_one(const r_camera_t *cam, const r_polypt_t *pts, int npts,
         if (sx < smin) smin = sx;
         if (ty < tmin) tmin = ty;
     }
-    const float sorg = floorf(smin / FLAT_PERIOD) * FLAT_PERIOD;
-    const float torg = floorf(tmin / FLAT_PERIOD) * FLAT_PERIOD;
+    const float sorg = rf_floorf(smin / FLAT_PERIOD) * FLAT_PERIOD;
+    const float torg = rf_floorf(tmin / FLAT_PERIOD) * FLAT_PERIOD;
 
     /* --- depth banding --------------------------------------------------
      * Split the polygon into bands of bounded depth ratio before projecting,
@@ -412,7 +469,7 @@ static void draw_one(const r_camera_t *cam, const r_polypt_t *pts, int npts,
          * that covers few pixels needs none however deep it runs. The vertical
          * extent at the near end is the bound: dz*focal/dmin. Without this a
          * distant floor strip a few pixels tall still paid for four bands. */
-        const float extent = fabsf(dz) * cam->focal / dmin;
+        const float extent = fabsf(dz) * cam->focal_y / dmin;
 
         if (extent < 24.0f && dmax <= dmin * FLAT_MAX_DEPTH_RATIO) {
             edge[bands++] = dmin;
@@ -440,22 +497,41 @@ static void draw_one(const r_camera_t *cam, const r_polypt_t *pts, int npts,
      * becomes the source for the next band in place. */
     fvtx_t bandbuf[2][FLAT_CLIP_MAX], near[FLAT_CLIP_MAX];
     int cur = 0, rn = m;
+#if R_FUSESPLIT
+    /* The first band reads the caller's polygon directly -- the up-front
+     * copy existed only to seed the alternating buffers, and single-band
+     * surfaces (most of them) never needed the buffers at all. */
+    const fvtx_t *restp = src;
+#else
     for (int i = 0; i < m; i++) bandbuf[0][i] = src[i];
+#endif
 
     for (int b = 0; b < bands && rn >= 3; b++) {
+#if R_FUSESPLIT
+        const fvtx_t *rest = restp;
+#else
         const fvtx_t *rest = bandbuf[cur];
+#endif
         if (b == bands - 1) {                       /* last band: all of it */
             EMIT_TIMED(rest, rn);
             break;
         }
 
+#if R_FUSESPLIT
+        int nn, fn;
+        split_depth(rest, rn, near, &nn, bandbuf[cur ^ 1], &fn, edge[b + 1]);
+#else
         const int nn = clip_depth(rest, rn, near, edge[b + 1], false);
         const int fn = clip_depth(rest, rn, bandbuf[cur ^ 1], edge[b + 1], true);
+#endif
 
         if (nn >= 3) EMIT_TIMED(near, nn);
 
         rn = fn;
         cur ^= 1;
+#if R_FUSESPLIT
+        restp = bandbuf[cur];
+#endif
     }
     stat_flats++;
 }
@@ -471,8 +547,16 @@ static int clip_side(const fvtx_t *in, int n, fvtx_t *out, float k, bool right)
     if (n < 3) return 0;
 
     int m = 0;
+    /* Rolling pair rather than in[(i+1) % n].
+     *
+     * n is a runtime value, so the modulo is a real VR4300 integer divide --
+     * 37 cycles with mfhi interlocks -- executed once per edge of every
+     * clipped polygon, which is a couple of thousand iterations a frame across
+     * the flat pipeline. Carrying the previous vertex forward also halves the
+     * loads: each vertex is read once instead of twice. */
+    fvtx_t a = in[0];
     for (int i = 0; i < n; i++) {
-        const fvtx_t a = in[i], b = in[(i + 1) % n];
+        const fvtx_t b = (i + 1 < n) ? in[i + 1] : in[0];
         const float sa = right ? (a.d * k - a.o) : (a.o + a.d * k);
         const float sb = right ? (b.d * k - b.o) : (b.o + b.d * k);
 
@@ -487,19 +571,81 @@ static int clip_side(const fvtx_t *in, int n, fvtx_t *out, float k, bool right)
             out[m].wy = a.wy + (b.wy - a.wy) * t;
             m++;
         }
+        a = b;
     }
     return m;
 }
 
 /* Clip a view-space polygon by a plane of constant depth. */
+#if R_FUSESPLIT
+/* Both halves of a depth cut in ONE edge walk. Each side keeps clip_depth's
+ * boundary predicates and interpolant operands VERBATIM (near still tests
+ * and divides on the negated distances), so every emitted vertex -- and
+ * every >=0 boundary duplication -- is bit-identical to the two-pass form;
+ * only the duplicated vertex loads, distance computations and loop overhead
+ * are gone. Proven route-identical by the FUSESPLIT abdiff lever. */
+static void split_depth(const fvtx_t *in, int n,
+                        fvtx_t *near_out, int *out_nn,
+                        fvtx_t *far_out, int *out_fn, float d0)
+{
+    int mn = 0, mf = 0;
+
+    if (n >= 3) {
+        fvtx_t a  = in[0];
+        float  ua = a.d - d0;
+        for (int i = 0; i < n; i++) {
+            const fvtx_t b  = (i + 1 < n) ? in[i + 1] : in[0];
+            const float  ub = b.d - d0;
+
+            /* far side (clip_depth with sgn = +1, verbatim) */
+            if (ua >= 0.0f) {
+                if (mf < FLAT_CLIP_MAX) far_out[mf++] = a;
+                else r_drop_clipofl++;
+            }
+            if ((ua > 0.0f) != (ub > 0.0f) && mf < FLAT_CLIP_MAX) {
+                const float t = ua / (ua - ub);
+                far_out[mf].d  = a.d  + (b.d  - a.d ) * t;
+                far_out[mf].o  = a.o  + (b.o  - a.o ) * t;
+                far_out[mf].wx = a.wx + (b.wx - a.wx) * t;
+                far_out[mf].wy = a.wy + (b.wy - a.wy) * t;
+                mf++;
+            }
+
+            /* near side (sgn = -1, verbatim) */
+            const float na = -ua, nb = -ub;
+            if (na >= 0.0f) {
+                if (mn < FLAT_CLIP_MAX) near_out[mn++] = a;
+                else r_drop_clipofl++;
+            }
+            if ((na > 0.0f) != (nb > 0.0f) && mn < FLAT_CLIP_MAX) {
+                const float t = na / (na - nb);
+                near_out[mn].d  = a.d  + (b.d  - a.d ) * t;
+                near_out[mn].o  = a.o  + (b.o  - a.o ) * t;
+                near_out[mn].wx = a.wx + (b.wx - a.wx) * t;
+                near_out[mn].wy = a.wy + (b.wy - a.wy) * t;
+                mn++;
+            }
+
+            a = b; ua = ub;
+        }
+    }
+
+    *out_nn = mn;
+    *out_fn = mf;
+}
+#endif /* R_FUSESPLIT */
+
 static int clip_depth(const fvtx_t *in, int n, fvtx_t *out, float d0, bool keep_far)
 {
     if (n < 3) return 0;
     const float sgn = keep_far ? 1.0f : -1.0f;
 
     int m = 0;
+    /* Rolling pair, for the reason given in clip_side: the modulo on a
+     * runtime n is a 37-cycle integer divide per edge. */
+    fvtx_t a = in[0];
     for (int i = 0; i < n; i++) {
-        const fvtx_t a = in[i], b = in[(i + 1) % n];
+        const fvtx_t b = (i + 1 < n) ? in[i + 1] : in[0];
         const float sa = sgn * (a.d - d0), sb = sgn * (b.d - d0);
 
         if (sa >= 0.0f) {
@@ -513,6 +659,7 @@ static int clip_depth(const fvtx_t *in, int n, fvtx_t *out, float d0, bool keep_
             out[m].wy = a.wy + (b.wy - a.wy) * t;
             m++;
         }
+        a = b;
     }
     return m;
 }
@@ -529,18 +676,177 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
      * camera focal length was being fetched through a pointer and multiplied
      * by dz on every vertex of every band, and the texel scale recomputed
      * twice each time. */
-    const float focal = cam->focal;
-    const float dzf   = dz * focal;
+    const float focal_x = cam->focal_x;
+    const float dzf     = dz * cam->focal_y;
     const float tscale = 1.0f / FLAT_UNITS_PER_TEXEL;
+#if D_DYNLIGHT
+    /* Loop-invariant pieces of the lit path, hoisted by hand: the glow
+     * products and the query height do not vary per vertex, and spelling
+     * that out here does not depend on the compiler proving that the sv
+     * stores cannot alias the statics they read. The height keeps the SAME
+     * expression (dz + cam->z) the per-vertex code used, so the sum is
+     * bit-identical. */
+    const float lz = dz + cam->z;
+    const float glow_r = cur_glow * cur_tint[0];
+    const float glow_g = cur_glow * cur_tint[1];
+    const float glow_b = cur_glow * cur_tint[2];
+#endif
 
+#ifdef R_TRI_DIRECT
+    /* Direct submission: each vertex is converted in registers and written
+     * straight into an RSP slot -- no sv[][10] staging array built only to
+     * be re-read and converted a second time by the generic fmt-driven
+     * path. The arithmetic below is tri_vertex's, expression for
+     * expression, so the pixels are identical; only the staging is gone.
+     * The group-leading fan still routes its first triangle through
+     * rdpq_triangle (see r_tri.h on autosync), and that path consumes the
+     * SAME per-vertex expressions via the 10-float rows. */
+    if (m >= 3) {
+        /* One vertex: compute, convert exactly as tri_vertex does, write. */
+#define FAN_VTX(slot_, p_) do {                                             \
+        const fvtx_t *p = (p_);                                             \
+        const float iw = 1.0f / p->d;                                       \
+        const float sx = cx + p->o * focal_x * iw;                          \
+        const float sy = cy - dzf * iw;                                     \
+        FAN_SHADE_DECL(p)                                                   \
+        const int16_t xi = (int16_t)rf_floor_i32(sx * 4.0f);                \
+        const int16_t yi = (int16_t)rf_floor_i32(sy * 4.0f);                \
+        const int16_t si = (int16_t)((p->wx * tscale - sorg_t) * 32.0f);    \
+        const int16_t ti = (int16_t)((p->wy * tscale - torg_t) * 32.0f);    \
+        float zv = 1.0f - FLAT_Z_NEAR * iw;                                 \
+        if (zv < 0.0f) zv = 0.0f;                                           \
+        const int16_t zi = (int16_t)(zv * 0x7FFF);                          \
+        r_tri_slot((slot_), (xi << 16) | (yi & 0xFFFF), (zi << 16), rgba,   \
+                   (si << 16) | (ti & 0xFFFF),                              \
+                   r_tri_s16_16(1.0f / iw), r_tri_s16_16(iw));              \
+    } while (0)
+/* Distance falloff per vertex -- the depth is already in hand (it is what
+ * the projection inverts), so this is one multiply-clamp against the job's
+ * LUT entry. Clamp-then-fog, matching lit_shade's order on walls. */
+#if R_FOGSCALE
+#define FAN_VIS_DECL(p)  const float vis = r_vis((p)->d, cur_fog_inv);
+#else
+#define FAN_VIS_DECL(p)  const float vis = 1.0f;
+#endif
+#if D_DYNLIGHT
+        /* Base light and white point lights stay neutral; only the emissive
+         * term carries the surface's own colour (see the note at the old
+         * staging loop's home: tinting the whole vertex would recolour
+         * neighbouring concrete and double-tint the sludge). Shade fans out
+         * per channel; alpha is 255 as sv[5]=1.0f always produced. */
+#define FAN_SHADE_DECL(p)                                                   \
+        float la[3];                                                        \
+        if (cur_lit) r_light_at_rgb((p)->wx, (p)->wy, lz, la);              \
+        else         la[0] = la[1] = la[2] = 0.0f;                          \
+        FAN_VIS_DECL(p)                                                     \
+        float rr = shade + la[0] + glow_r;                                  \
+        float gg = shade + la[1] + glow_g;                                  \
+        float bb = shade + la[2] + glow_b;                                  \
+        if (rr > 1.0f) rr = 1.0f;                                           \
+        if (gg > 1.0f) gg = 1.0f;                                           \
+        if (bb > 1.0f) bb = 1.0f;                                           \
+        rr *= vis; gg *= vis; bb *= vis;                                    \
+        const uint32_t rgba = ((uint32_t)(rr * 255.0f) << 24) |             \
+                              ((uint32_t)(gg * 255.0f) << 16) |             \
+                              ((uint32_t)(bb * 255.0f) << 8) | 255u;
+#else
+#define FAN_SHADE_DECL(p)                                                   \
+        FAN_VIS_DECL(p)                                                     \
+        const uint32_t cs = (uint32_t)(shade * vis * 255.0f);               \
+        const uint32_t rgba = (cs << 24) | (cs << 16) | (cs << 8) | 255u;
+#endif
+        /* The texel origins are loop constants; s/t stay well inside the
+         * int16 texel range by the sorg/torg rebase. */
+        const float sorg_t = sorg, torg_t = torg;
+
+        if (!r_tri_group_reg) {
+            /* Group-leading fan: expand only the three vertices
+             * rdpq_triangle reads, with the exact expressions the staging
+             * loop used, so registration and direct paths stay
+             * bit-identical. */
+            float x3[3][10];
+            for (int i = 0; i < 3; i++) {
+                const float iw = 1.0f / c[i].d;
+                x3[i][0] = cx + c[i].o * focal_x * iw;
+                x3[i][1] = cy - dzf * iw;
+                FAN_VIS_DECL(&c[i])
+#if D_DYNLIGHT
+                float la[3];
+                if (cur_lit) r_light_at_rgb(c[i].wx, c[i].wy, lz, la);
+                else         la[0] = la[1] = la[2] = 0.0f;
+                float r = shade + la[0] + glow_r;
+                float g = shade + la[1] + glow_g;
+                float b = shade + la[2] + glow_b;
+                x3[i][2] = (r > 1.0f ? 1.0f : r) * vis;
+                x3[i][3] = (g > 1.0f ? 1.0f : g) * vis;
+                x3[i][4] = (b > 1.0f ? 1.0f : b) * vis;
+#else
+                x3[i][2] = x3[i][3] = x3[i][4] = shade * vis;
+#endif
+                x3[i][5] = 1.0f;
+                x3[i][6] = c[i].wx * tscale - sorg;
+                x3[i][7] = c[i].wy * tscale - torg;
+                x3[i][8] = iw;
+                float zv = 1.0f - FLAT_Z_NEAR * iw;
+                x3[i][9] = zv < 0.0f ? 0.0f : zv;
+            }
+            rdpq_triangle(&TRIFMT_FLAT, x3[0], x3[1], x3[2]);
+            r_tri_group_reg = 1;
+        } else {
+            FAN_VTX(0, &c[0]);
+            FAN_VTX(1, &c[1]);
+            FAN_VTX(2, &c[2]);
+            r_tri_slots_issue(&TRIFMT_FLAT);
+        }
+
+        /* c[0] stays in slot 0 for the whole fan; each further triangle
+         * shares its previous neighbour, alternating into the slot the
+         * triangle before last used -- the r_tri_fan pattern. */
+        for (int i = 3; i < m; i++) {
+            FAN_VTX((i & 1) ? 1 : 2, &c[i]);
+            r_tri_slots_issue(&TRIFMT_FLAT);
+        }
+#undef FAN_VTX
+#undef FAN_SHADE_DECL
+#undef FAN_VIS_DECL
+    }
+    r_tri_flat += m - 2;
+#else /* !R_TRI_DIRECT: reference/host path, staged exactly as before */
     float sv[FLAT_CLIP_MAX][10];
     for (int i = 0; i < m; i++) {
         const float iw = 1.0f / c[i].d;
         /* Bounded by the clipping above, so no clamping is needed -- and
          * none may be applied, since that is what deformed the polygon. */
-        sv[i][0] = cx + c[i].o * focal * iw;
+        sv[i][0] = cx + c[i].o * focal_x * iw;
         sv[i][1] = cy - dzf * iw;
-        sv[i][2] = sv[i][3] = sv[i][4] = shade;
+        /* Per vertex, which costs nothing structural: the fan already carries
+         * a colour per vertex and was simply being handed the same value at
+         * each. The world position is right here -- wx/wy are retained for the
+         * flat's texture coordinates, and the plane's height is dz above the
+         * eye. Without this a floor lights uniformly across a whole subsector,
+         * which reads as the room changing brightness rather than a light in
+         * it. */
+#if R_FOGSCALE
+        const float vis = r_vis(c[i].d, cur_fog_inv);
+#else
+        const float vis = 1.0f;
+#endif
+#if D_DYNLIGHT
+        /* Point lights carry their own colour per channel; the emissive
+         * term still carries the surface's own tint. The sector base stays
+         * neutral so a pool's neighbour keeps its concrete grey. */
+        float la[3];
+        if (cur_lit) r_light_at_rgb(c[i].wx, c[i].wy, lz, la);
+        else         la[0] = la[1] = la[2] = 0.0f;
+        float r = shade + la[0] + glow_r;
+        float g = shade + la[1] + glow_g;
+        float b = shade + la[2] + glow_b;
+        sv[i][2] = (r > 1.0f ? 1.0f : r) * vis;
+        sv[i][3] = (g > 1.0f ? 1.0f : g) * vis;
+        sv[i][4] = (b > 1.0f ? 1.0f : b) * vis;
+#else
+        sv[i][2] = sv[i][3] = sv[i][4] = shade * vis;
+#endif
         sv[i][5] = 1.0f;
         sv[i][6] = c[i].wx * tscale - sorg;
         sv[i][7] = c[i].wy * tscale - torg;
@@ -555,4 +861,5 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
 
     r_tri_fan(&TRIFMT_FLAT, (const float (*)[10])sv, m);
     r_tri_flat += m - 2;
+#endif /* R_TRI_DIRECT */
 }

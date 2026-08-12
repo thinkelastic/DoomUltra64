@@ -120,6 +120,18 @@ void rdpq_texture_rectangle(rdpq_tile_t tile, float x0, float y0,
     stat_rects++;
 }
 
+/* Counted, not rasterised, for the same reason as the 1:1 form: the only
+ * callers here are the UI and weapon passes, and the harness has no game
+ * layer to hand them anything to draw (D_PSpriteGet below returns none). */
+void rdpq_texture_rectangle_scaled(rdpq_tile_t tile, float x0, float y0,
+                                   float x1, float y1,
+                                   float s0, float t0, float s1, float t1)
+{
+    (void)tile; (void)x0; (void)y0; (void)x1; (void)y1;
+    (void)s0; (void)t0; (void)s1; (void)t1;
+    stat_rects++;
+}
+
 /* r_sprite.c's weapon pass asks the game layer for psprites; the harness has
  * no game layer and draws none. */
 int D_PSpriteGet(int i, void **tex, int *x, int *y)
@@ -367,9 +379,15 @@ int main(int argc, char **argv)
      * visible), a diagonal corner view (steep depth gradients), and one hard
      * against a wall (exercises the near-plane clip). */
     const struct { const char *name; r_camera_t cam; } views[] = {
-        { "front",  { 0.0f,    0.0f,   EYE_Z, 0.0f,       160.0f } },
-        { "corner", { -190.0f, -190.0f, EYE_Z, 0.7853982f, 160.0f } },
-        { "close",  { 0.0f,   -220.0f, EYE_Z, 1.5707963f, 160.0f } },
+        /* Focals derived exactly as main.c derives them, so `make test
+         * WIDE=1` exercises the real wide-mode projection -- in particular
+         * the s11.2 vertex-range check, which is what doubling screen X
+         * could break. */
+#define CAM_FX (SCREEN_W * 0.5f)
+#define CAM_FY (SCREEN_BASE_W * 0.5f)
+        { "front",  { 0.0f,    0.0f,   EYE_Z, 0.0f,       CAM_FX, CAM_FY } },
+        { "corner", { -190.0f, -190.0f, EYE_Z, 0.7853982f, CAM_FX, CAM_FY } },
+        { "close",  { 0.0f,   -220.0f, EYE_Z, 1.5707963f, CAM_FX, CAM_FY } },
     };
 
     int failures = 0;
@@ -501,7 +519,8 @@ int main(int argc, char **argv)
         r_set_view(&views[0].cam);
         r_flat_begin();
         for (int i = 0; i < 4; i++)
-            r_flat_add(cells[i], 4, 0.0f, 1.0f, &flat);
+            { static const float white[3] = {1.0f,1.0f,1.0f};
+              r_flat_add(cells[i], 4, 0.0f, 255, &flat, 0.0f, white, 0); }
         r_flat_flush(&views[0].cam);
 
         printf("\nflats: 4 cells, 1 texture -> uploads=%d tris=%d oob=%d\n",
@@ -538,7 +557,8 @@ int main(int argc, char **argv)
         for (int i = 0; i < 3; i++) {
             r_thing_t t = { .x = 100.0f + 40.0f * i, .y = -20.0f + 20.0f * i,
                             .z = 0.0f, .spr = &spr };
-            r_sprite_add(&views[0].cam, &t, 1.0f);
+            { const float sh[3] = { 1.0f, 1.0f, 1.0f };
+              r_sprite_add(&views[0].cam, &t, sh, -1); }
         }
         r_sprite_flush();
 
@@ -558,7 +578,8 @@ int main(int argc, char **argv)
         r_sprite_begin();
         {
             r_thing_t t = { .x = 100.0f, .y = 0.0f, .z = -2000.0f, .spr = &spr };
-            r_sprite_add(&views[0].cam, &t, 1.0f);
+            { const float sh[3] = { 1.0f, 1.0f, 1.0f };
+              r_sprite_add(&views[0].cam, &t, sh, -1); }
         }
         r_sprite_flush();
         printf("sprites: off-screen instance     -> uploads=%d tris=%d\n",

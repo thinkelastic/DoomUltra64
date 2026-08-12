@@ -27,7 +27,11 @@
 
 #include "r_wall.h"          /* SCREEN_W / SCREEN_H */
 
-#define WIPE_STRIP   4
+/* Strip width scales with the horizontal sampling rate so the melt looks the
+ * same on screen: at 640x240 a pixel is half as wide, so 8 framebuffer
+ * columns cover the same distance 4 do at 320. That also keeps WIPE_COLS --
+ * and the melt's random walk -- identical between modes. */
+#define WIPE_STRIP   (4 * (SCREEN_W / SCREEN_BASE_W))
 #define WIPE_COLS    (SCREEN_W / WIPE_STRIP)
 
 /* Doom's melt, per strip instead of per column: a negative offset is a
@@ -58,18 +62,34 @@ void r_wipe_start(const surface_t *from)
         saved = surface_alloc(FMT_RGBA16, SCREEN_W, SCREEN_H);
         if (!saved.buffer) return;                  /* no memory: no wipe */
         saved_valid = true;
+        /* The allocation can arrive with stale dirty lines whose eventual
+         * writeback would land on top of RDP-written pixels. Once, here:
+         * after this the CPU never touches the buffer again. */
+        data_cache_hit_writeback_invalidate(saved.buffer,
+                                            (size_t)saved.stride * SCREEN_H);
     }
 
-    /* One copy of the outgoing frame. The framebuffer is written by the
-     * RDP, so make sure what is in memory is what was drawn before it is
-     * read back through the CPU's cache. */
-    rspq_wait();
-    for (int y = 0; y < SCREEN_H; y++)
-        memcpy((uint8_t *)saved.buffer + (size_t)y * saved.stride,
-               (const uint8_t *)from->buffer + (size_t)y * from->stride,
-               (size_t)SCREEN_W * 2);
-    data_cache_hit_writeback_invalidate(saved.buffer,
-                                        (size_t)saved.stride * SCREEN_H);
+    /* Copy the outgoing frame with the RDP, not the CPU. The memcpy this
+     * replaces sat behind a full rspq_wait and dragged 150 KB through the
+     * D-cache -- a guaranteed ~10 ms hitch frame at every game-state
+     * transition, the longest stall left in the game. Enqueued COPY-mode
+     * blits need no wait at all: queue order already puts them after the
+     * commands that finished drawing `from`, and scanout reading the same
+     * finished buffer sees consistent pixels. 64x32 RGBA16 tiles fill TMEM
+     * exactly (4 KB, no TLUT) and DMA as 32 rows of 128 bytes -- far
+     * kinder to RDRAM than the melt's own tall thin strips. */
+    rdpq_attach(&saved, NULL);
+    rdpq_set_mode_copy(false);
+    for (int ty = 0; ty < SCREEN_H; ty += 32)
+        for (int tx = 0; tx < SCREEN_W; tx += 64) {
+            const int w = tx + 64 > SCREEN_W ? SCREEN_W - tx : 64;
+            const int h = ty + 32 > SCREEN_H ? SCREEN_H - ty : 32;
+            surface_t tile =
+                surface_make_sub((surface_t *)from, tx, ty, w, h);
+            rdpq_tex_upload(TILE0, &tile, NULL);
+            rdpq_texture_rectangle(TILE0, tx, ty, tx + w, ty + h, 0, 0);
+        }
+    rdpq_detach();
 
     col_y[0] = -(wipe_rand() % 16);
     for (int i = 1; i < WIPE_COLS; i++) {
@@ -116,7 +136,17 @@ void r_wipe_draw(void)
 
         const int x0 = i * WIPE_STRIP;
         const int h  = SCREEN_H - (y > 0 ? y : 0);
-        if (h <= 0) continue;
+        /* Two rows, not one.
+         *
+         * A single-scanline strip is drawn correctly -- tile and rectangle
+         * are both 4x1 and the texel it samples is in range -- but COPY mode
+         * makes the RDP's rectangle coordinates inclusive, so YL == YH, and
+         * the command validator reads that as a zero-height rect and reports
+         * an access at t = -1 on every one. The strip is the last row of an
+         * already-melted column and is about to vanish; dropping it costs
+         * nothing visible and keeps DEBUG=1 logs free of an error that is
+         * not one. */
+        if (h <= 1) continue;
 
         surface_t strip = surface_make_sub(&saved, x0, 0, WIPE_STRIP, h);
         rdpq_tex_upload(TILE0, &strip, NULL);

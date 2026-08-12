@@ -28,7 +28,14 @@
 
 #define ZONEID 0x1d4a11
 #define MINFRAGMENT 64
-#define ZONE_ALIGN 8
+// DoomN64: 16, up from 8 -- the VR4300's D-cache line. Every hot zone
+// array the renderer walks (the node mirror's 64-byte records, the seg
+// mirror's 32, the flat regions' 16, Doom's own segs and sectors) is one
+// coin-flip from a permanent extra-line-per-record tax at 8; line
+// alignment makes the record-stride arithmetic those layouts were sized
+// around hold by construction. Costs the pad fields below plus up to 8
+// bytes per allocation, out of a multi-megabyte zone.
+#define ZONE_ALIGN 16
 #define ZONE_ALIGN_MASK (ZONE_ALIGN - 1)
 
 typedef struct memblock_s {
@@ -38,12 +45,14 @@ typedef struct memblock_s {
     int                id;      // ZONEID
     struct memblock_s *next;
     struct memblock_s *prev;
+    uint64_t           pad_align;   // DoomN64: header to 32 = 2 lines
 } memblock_t;
 
 typedef struct {
     int         size;           // total bytes in zone
     memblock_t  blocklist;      // sentinel (head of circular list)
     memblock_t *rover;
+    uint32_t    pad_align;      // DoomN64: see memblock_t
 } memzone_t;
 
 static memzone_t *mainzone;

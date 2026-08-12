@@ -8,36 +8,26 @@
 
 #include <math.h>
 
-/* The RSP keeps three vertex slots, each ROUND_UP((2+1+1+3)*4, 16) bytes
- * apart. Mirrors TRI_DATA_LEN in libdragon's rdpq_tri.c; a mismatch would
- * scatter vertices across the wrong slots, so it is checked below against
- * the same expression rather than pasted as a bare 32. */
-#define TRI_DATA_LEN (((2 + 1 + 1 + 3) * 4 + 15) & ~15)
+/* R_TRI_NEAR comes from r_tri.h now: push-time quantization computes the
+ * same depth mapping outside this file. */
 
-/* Near constant for the depth value. Walls and flats share it (NEAR_PLANE
- * and R_FLAT_NEAR are the same number), and clamping at zero matches what
- * the flat path already did; a wall nearer than the near plane is clipped
- * long before it reaches here. */
-#define R_TRI_NEAR 4.0f
-_Static_assert(TRI_DATA_LEN == 32, "RSP triangle slot stride changed");
-
-/* Float to s16.16, clamped exactly as rdpq does: trunc.w.s raises an
- * unimplemented-operation exception on overflow, which would land in the
- * exception handler rather than merely producing a wrong pixel. */
-static inline int32_t f_to_s16_16(float f)
-{
-    if (f >= 32768.0f)  return 0x7FFFFFFF;
-    if (f < -32768.0f)  return (int32_t)0x80000000;
-    return (int32_t)floorf(f * 65536.0f);
-}
+/* floorf() is a libm CALL on this toolchain, not an instruction -- the
+ * conversion helpers live in r_fastmath.h (native floor.w.s via inline asm,
+ * one FPU op) and r_tri.h (r_tri_s16_16, the clamped s16.16), shared with
+ * the per-vertex emitters that inline them. R_FASTFLOOR=0 restores the libm
+ * calls; there is no output difference to weigh -- identical integers -- so
+ * it is a speed switch only. */
+#define TRI_DATA_LEN  R_TRI_DATA_LEN
+#define tri_floor_i32 rf_floor_i32
+#define f_to_s16_16   r_tri_s16_16
 
 /* Convert one vertex and place it in an RSP slot. The conversion is a
  * transcription of rdpq_triangle_rsp's inner loop -- deliberately, so the
  * two paths produce bit-identical vertex data and can be A/B'd. */
 static inline void tri_vertex(const rdpq_trifmt_t *fmt, int slot, const float *v)
 {
-    const int16_t x = floorf(v[fmt->pos_offset + 0] * 4.0f);
-    const int16_t y = floorf(v[fmt->pos_offset + 1] * 4.0f);
+    const int16_t x = tri_floor_i32(v[fmt->pos_offset + 0] * 4.0f);
+    const int16_t y = tri_floor_i32(v[fmt->pos_offset + 1] * 4.0f);
 
     int16_t z = 0;
     if (fmt->z_offset >= 0)
@@ -87,19 +77,27 @@ static inline void tri_issue(const rdpq_trifmt_t *fmt)
 
 /* Cleared by r_tri_group_begin, set once the group's autosync is on
  * record. Only the first primitive after a tile or TMEM change has to go
- * through rdpq_triangle to register it. */
-static int group_registered;
+ * through rdpq_triangle to register it. Exported (r_tri.h) so per-vertex
+ * emitters can take the direct slot path themselves. */
+int r_tri_group_reg;
+#define group_registered r_tri_group_reg
 
 void r_tri_group_begin(void) { group_registered = 0; }
 
 /* One vertex straight from the batch's six floats. Same arithmetic
  * rdpq performs, minus the ten-float layout it would have been copied
  * into and read back out of. */
+/* w is 1/iw, passed in rather than computed here: a wall quad's four corners
+ * carry only TWO distinct depths (both left corners share iwa, both right
+ * corners share iwb -- see the set_vtx calls in r_wall.c), so computing it per
+ * vertex did the same 29-cycle div.s twice for nothing. The caller reuses it
+ * where the depths compare equal and divides otherwise, so the saving does not
+ * depend on that invariant holding. */
 static inline void tri_vertex6(const rdpq_trifmt_t *fmt, int slot,
-                               const float *v)
+                               const float *v, float w)
 {
-    const int16_t x = floorf(v[0] * 4.0f);
-    const int16_t y = floorf(v[1] * 4.0f);
+    const int16_t x = tri_floor_i32(v[0] * 4.0f);
+    const int16_t y = tri_floor_i32(v[1] * 4.0f);
 
     const float iw = v[5];
     float zf = 1.0f - R_TRI_NEAR * iw;
@@ -118,7 +116,7 @@ static inline void tri_vertex6(const rdpq_trifmt_t *fmt, int slot,
                (z << 16),
                rgba,
                (s << 16) | (t & 0xFFFF),
-               f_to_s16_16(1.0f / iw),
+               f_to_s16_16(w),
                f_to_s16_16(iw));
     (void)fmt;
 }
@@ -127,9 +125,11 @@ void r_tri_quad6(const rdpq_trifmt_t *fmt, const float v[4][6])
 {
     if (!group_registered) {
         /* First primitive since the tile changed: through rdpq, so the
-         * autosync requirement is recorded for everything that follows. */
-        float x[4][10];
-        for (int k = 0; k < 4; k++) {
+         * autosync requirement is recorded for everything that follows.
+         * Only the three vertices rdpq_triangle reads are expanded -- v3
+         * goes through tri_vertex6 below and never needs the 10-float row. */
+        float x[3][10];
+        for (int k = 0; k < 3; k++) {
             x[k][0] = v[k][0]; x[k][1] = v[k][1];
             x[k][2] = x[k][3] = x[k][4] = v[k][2];
             x[k][5] = 1.0f;
@@ -139,16 +139,100 @@ void r_tri_quad6(const rdpq_trifmt_t *fmt, const float v[4][6])
         }
         rdpq_triangle(fmt, x[0], x[1], x[2]);
         group_registered = 1;
-        tri_vertex6(fmt, 1, v[3]);
+        tri_vertex6(fmt, 1, v[3], 1.0f / v[3][5]);
         tri_issue(fmt);
         return;
     }
 
-    tri_vertex6(fmt, 0, v[0]);
-    tri_vertex6(fmt, 1, v[1]);
-    tri_vertex6(fmt, 2, v[2]);
+    /* Two divides, not four: v[3] shares v[0]'s depth and v[2] shares v[1]'s
+     * on every wall quad. The equality test is a c.eq.s (~3 cycles) guarding a
+     * div.s (~29), so it wins even in the case it is protecting against. */
+    const float w0 = 1.0f / v[0][5];
+    const float w1 = 1.0f / v[1][5];
+    tri_vertex6(fmt, 0, v[0], w0);
+    tri_vertex6(fmt, 1, v[1], w1);
+    tri_vertex6(fmt, 2, v[2], (v[2][5] == v[1][5]) ? w1 : 1.0f / v[2][5]);
     tri_issue(fmt);
-    tri_vertex6(fmt, 1, v[3]);      /* slots read {v0,v3,v2} */
+    tri_vertex6(fmt, 1, v[3], (v[3][5] == v[0][5]) ? w0 : 1.0f / v[3][5]);
+    tri_issue(fmt);
+}
+
+/* Tinted variant of tri_vertex6: the scalar shade multiplies three channel
+ * factors (0..255 scale) instead of replicating. shade <= 1 keeps every
+ * product inside a byte, so no clamps. */
+static inline void tri_vertex6t(const rdpq_trifmt_t *fmt, int slot,
+                                const float *v, float w,
+                                float tr, float tg, float tb)
+{
+    const int16_t x = tri_floor_i32(v[0] * 4.0f);
+    const int16_t y = tri_floor_i32(v[1] * 4.0f);
+
+    const float iw = v[5];
+    float zf = 1.0f - R_TRI_NEAR * iw;
+    if (zf < 0.0f) zf = 0.0f;
+    const int16_t z = zf * 0x7FFF;
+
+    const uint32_t r = (uint32_t)(v[2] * tr);
+    const uint32_t g = (uint32_t)(v[2] * tg);
+    const uint32_t b = (uint32_t)(v[2] * tb);
+    const int32_t rgba = (int32_t)((r << 24) | (g << 16) | (b << 8) | 255u);
+
+    const int16_t s = v[3] * 32.0f;
+    const int16_t t = v[4] * 32.0f;
+
+    rspq_write(RDPQ_OVL_ID, RDPQ_CMD_TRIANGLE_DATA,
+               TRI_DATA_LEN * slot,
+               (x << 16) | (y & 0xFFFF),
+               (z << 16),
+               rgba,
+               (s << 16) | (t & 0xFFFF),
+               f_to_s16_16(w),
+               f_to_s16_16(iw));
+    (void)fmt;
+}
+
+void r_tri_quad6t(const rdpq_trifmt_t *fmt, const float v[4][6],
+                  uint32_t tint)
+{
+    /* 0..255-scale channel factors for the byte path; 0..1 for the
+     * registration expansion, whose rdpq conversion multiplies by 255
+     * itself. The two round within 1 LSB of each other -- the same class
+     * the group-leading/following split already carries. */
+    const float tr  = (float)((tint >> 16) & 0xFF);
+    const float tg  = (float)((tint >> 8) & 0xFF);
+    const float tb  = (float)(tint & 0xFF);
+
+    if (!group_registered) {
+        const float trf = tr * (1.0f / 255.0f);
+        const float tgf = tg * (1.0f / 255.0f);
+        const float tbf = tb * (1.0f / 255.0f);
+        float x[3][10];
+        for (int k = 0; k < 3; k++) {
+            x[k][0] = v[k][0]; x[k][1] = v[k][1];
+            x[k][2] = v[k][2] * trf;
+            x[k][3] = v[k][2] * tgf;
+            x[k][4] = v[k][2] * tbf;
+            x[k][5] = 1.0f;
+            x[k][6] = v[k][3]; x[k][7] = v[k][4]; x[k][8] = v[k][5];
+            float z = 1.0f - R_TRI_NEAR * v[k][5];
+            x[k][9] = z < 0.0f ? 0.0f : z;
+        }
+        rdpq_triangle(fmt, x[0], x[1], x[2]);
+        group_registered = 1;
+        tri_vertex6t(fmt, 1, v[3], 1.0f / v[3][5], tr, tg, tb);
+        tri_issue(fmt);
+        return;
+    }
+
+    const float w0 = 1.0f / v[0][5];
+    const float w1 = 1.0f / v[1][5];
+    tri_vertex6t(fmt, 0, v[0], w0, tr, tg, tb);
+    tri_vertex6t(fmt, 1, v[1], w1, tr, tg, tb);
+    tri_vertex6t(fmt, 2, v[2], (v[2][5] == v[1][5]) ? w1 : 1.0f / v[2][5],
+                 tr, tg, tb);
+    tri_issue(fmt);
+    tri_vertex6t(fmt, 1, v[3], (v[3][5] == v[0][5]) ? w0 : 1.0f / v[3][5],
+                 tr, tg, tb);
     tri_issue(fmt);
 }
 

@@ -17,6 +17,7 @@
  * levels with no sky at all.
  */
 #include "r_sky.h"
+#include "r_tri.h"
 
 #include <math.h>
 
@@ -131,40 +132,53 @@ void r_sky_draw(const r_camera_t *cam)
         const float sa = src_s + (ca - (float)col);
         const float sb = src_s + (cb - (float)col);
 
+        /* Tile row OUTER, vertical repeat INNER: the repeat loop re-drew the
+         * same TMEM tile at each wrapped band, so iterating it inside means
+         * one upload per (column, tile row) instead of one per band drawn --
+         * a wide sky repeated twice was uploading everything twice. The
+         * quads tile the screen without overlap at one shared depth, so
+         * draw order cannot change a pixel. r_tri_quad sends the second
+         * triangle as one slot write instead of a full second conversion. */
         const float band_px = (float)texh * px_per_row;
-        for (float ybase = 0.0f; ybase < (float)SCREEN_H; ybase += band_px)
         for (int t0 = 0; t0 < texh; t0 += tile_h) {
             const int t1 = t0 + tile_h > texh ? texh : t0 + tile_h;
+            bool resident = false;
 
-            const float y0 = ybase + (float)t0 * px_per_row;
-            const float y1 = ybase + (float)t1 * px_per_row;
-            if (y0 >= (float)SCREEN_H) continue;
+            for (float ybase = 0.0f; ybase < (float)SCREEN_H; ybase += band_px) {
+                const float y0 = ybase + (float)t0 * px_per_row;
+                const float y1 = ybase + (float)t1 * px_per_row;
+                if (y0 >= (float)SCREEN_H) continue;
 
-            dt64_upload_tile(TILE0, tex, NULL,
-                             src_s, t0, src_s + tile_w > texw ? texw
-                                                              : src_s + tile_w,
-                             t1);
+                if (!resident) {
+                    dt64_upload_tile(TILE0, tex, NULL,
+                                     src_s, t0,
+                                     src_s + tile_w > texw ? texw
+                                                           : src_s + tile_w,
+                                     t1);
+                    resident = true;
+                }
 
-            /* Screen-space quad. Every vertex shares 1/w, so the mapping is
-             * affine whatever the perspective bit says. */
-            float v[4][10];
-            const float xs[4] = { x0, x1, x1, x0 };
-            const float ys[4] = { y0, y0, y1, y1 };
-            const float ss[4] = { sa, sb, sb, sa };
-            const float ts[4] = { (float)t0, (float)t0, (float)t1, (float)t1 };
-            for (int i = 0; i < 4; i++) {
-                v[i][0] = xs[i];
-                v[i][1] = ys[i];
-                v[i][2] = v[i][3] = v[i][4] = 1.0f;
-                v[i][5] = 1.0f;
-                v[i][6] = ss[i];
-                v[i][7] = ts[i];
-                v[i][8] = 1.0f;
-                v[i][9] = SKY_DEPTH;
+                /* Screen-space quad. Every vertex shares 1/w, so the mapping
+                 * is affine whatever the perspective bit says. */
+                float v[4][10];
+                const float xs[4] = { x0, x1, x1, x0 };
+                const float ys[4] = { y0, y0, y1, y1 };
+                const float ss[4] = { sa, sb, sb, sa };
+                const float ts[4] = { (float)t0, (float)t0,
+                                      (float)t1, (float)t1 };
+                for (int i = 0; i < 4; i++) {
+                    v[i][0] = xs[i];
+                    v[i][1] = ys[i];
+                    v[i][2] = v[i][3] = v[i][4] = 1.0f;
+                    v[i][5] = 1.0f;
+                    v[i][6] = ss[i];
+                    v[i][7] = ts[i];
+                    v[i][8] = 1.0f;
+                    v[i][9] = SKY_DEPTH;
+                }
+                r_tri_quad(&TRIFMT_SKY, v[0], v[1], v[2], v[3]);
+                r_tri_sky += 2;
             }
-            rdpq_triangle(&TRIFMT_SKY, v[0], v[1], v[2]);
-            rdpq_triangle(&TRIFMT_SKY, v[0], v[2], v[3]);
-            r_tri_sky += 2;
         }
     }
 

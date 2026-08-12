@@ -24,6 +24,28 @@
 #include "r_wipe.h"
 #include "scene.h"
 
+#if D_RSPQPROF
+/* Not reached from libdragon.h. Brings RSPQ_PROFILE in with it. */
+#include <rspq_profile.h>
+#if !RSPQ_PROFILE
+#error "RSPQPROF=1 needs a libdragon built with RSPQ_PROFILE=1. Build with \
+./build.sh RSPQPROF=1, which selects the profiling toolchain image. Against \
+the stock one every rspq_profile_* call is an empty stub: the ROM would link, \
+run, and report a confident zero for every counter."
+#endif
+/* RCP ticks, not the CPU's: the profiler counts in the RCP's clock domain and
+ * RCP_TICKS_TO_USECS is private to libdragon's own dump. */
+#define RSPQPROF_US(t) ((unsigned long)(((uint64_t)(t) * 1000000ULL) / RCP_FREQUENCY))
+#endif
+
+#if D_RSPIDLE
+#include "rspidle.h"
+#endif
+
+#if D_POSEHASH
+#include "posehash.h"
+#endif
+
 #define MAPNAME "E1M1"
 
 /* The IWAD this cartridge was baked from, for the message shown when it
@@ -102,7 +124,11 @@ static void scene_init(void)
     cam.y = 0.0f;
     cam.z = EYE_Z;
     cam.angle = 0.0f;
-    cam.focal = SCREEN_W * 0.5f;      /* 90 degree horizontal FOV, as in Doom */
+    /* 90 degree horizontal FOV, as in Doom. focal_y is pinned to the 320-wide
+     * frame so wide mode changes the horizontal sampling rate only; see the
+     * note in r_wall.h. */
+    cam.focal_x = SCREEN_W * 0.5f;
+    cam.focal_y = SCREEN_BASE_W * 0.5f;
 
     /* --- real level geometry ------------------------------------------
      * Path B: keep Doom's data and BSP, replace its renderer. This proves the
@@ -170,6 +196,20 @@ static void scene_init(void)
          * branches on gamemode in a dozen places, and every one of them was
          * taking the Doom branch regardless of which IWAD had been opened. */
         { void D_IdentifyGame(void); D_IdentifyGame(); }
+
+        /* Flash palettes from the WAD actually playing, not the one the ROM
+         * was built against -- an EXTWAD player can drop in any IWAD, and
+         * its PLAYPAL owns the damage reds and pickup golds. Bit-identical
+         * to the baked banks when the WADs match. */
+        {
+            int W_CheckNumForName(const char *name);
+            int W_LumpLength(int lump);
+            void *W_CacheLumpNum(int lump, int tag);
+            const int pp = W_CheckNumForName("PLAYPAL");
+            if (pp >= 0)
+                dt64_build_tluts(W_CacheLumpNum(pp, 1 /* PU_STATIC */),
+                                 W_LumpLength(pp));
+        }
 
         /* And establish player one, which D_CheckNetGame would have done. */
         { void D_SinglePlayerSetup(void); D_SinglePlayerSetup(); }
@@ -328,17 +368,31 @@ static bool demo_use_pending;
  * The route is deliberately not a list of map coordinates: it walks forward,
  * notices when it has stopped making progress, and turns away. That explores a
  * level it knows nothing about and stays valid when geometry changes. */
+/* EVERY piece of walker state below is keyed to leveltime, never to call
+ * count. This function runs once per RENDERED FRAME, and the frame rate is
+ * exactly what differs between two builds being A/B'd -- the warmup, door
+ * timer and turn duration used to be frame-counted, so a faster ROM exited
+ * warmup at an earlier tic, turned for less game time, and walked a
+ * DIFFERENT ROUTE. That divergence is what made whole-route comparisons
+ * (POSEHASH, the abdiff harness) report differences for provably identical
+ * renderers: the two ROMs were not looking at the same scenes. Tic-keyed,
+ * the route is a pure function of simulation time and identical across
+ * builds of any speed. (With interpolation on, the progress probe below
+ * reads a sub-tic view position, which can flip a knife-edge stuck test
+ * between builds -- measurement runs use INTERP=0, where it is exact.) */
 static void demo_drive(float *fwd, float *turn, bool *use)
 {
     static float px, py, dir = 1.0f;
-    static int   stuck, turning, warmup, tick;
+    static int   stuck, turn_until = -1, last_check;
+    extern int leveltime;
 
     *use = false;
-    if (warmup < 30) { warmup++; *fwd = 0.0f; *turn = 0.0f; return; }
+    if (leveltime < 15) { *fwd = 0.0f; *turn = 0.0f; return; }   /* settle */
 
-    /* Try a door every few seconds: E1M1 is gated by one, and an attract mode
-     * that never opens it only ever benchmarks the first room. */
-    if (++tick % 100 == 0) *use = true;
+    /* Try a door every ~2.7 s: E1M1 is gated by one, and an attract mode
+     * that never opens it only ever benchmarks the first room. The whole
+     * tic sees *use high; the tic builder samples it once. */
+    if (leveltime % 96 == 0) *use = true;
 
     /* Progress is measured on the actor, not the old player struct: movement
      * goes through Doom's collision now and that struct no longer moves. */
@@ -346,21 +400,18 @@ static void demo_drive(float *fwd, float *turn, bool *use)
     float ax = px, ay = py, az, aang;
     D_PlayerView(&ax, &ay, &az, &aang);
 
-    if (turning > 0) {
-        turning--;
+    if (leveltime < turn_until) {
         *fwd  = 0.15f;            /* keep creeping so corners unstick */
         *turn = 0.045f * dir;
         return;
     }
 
     /* Progress judged over game TIME, not frames. Per-frame displacement
-     * halves whenever the frame rate doubles, so at a real 60 fps the old
+     * halves whenever the frame rate doubles, so at a real 60 fps a
      * per-frame test read normal walking as "stuck" on every frame and the
      * route spun into the nearest corner -- on hardware, every time. Eight
      * tics is ~230 ms: a walker covers ~60 units in that; well under 20
      * means something is in the way. */
-    extern int leveltime;
-    static int last_check;
     if (leveltime - last_check >= 8) {
         const float dx = ax - px, dy = ay - py;
         const float moved2 = dx * dx + dy * dy;
@@ -369,9 +420,11 @@ static void demo_drive(float *fwd, float *turn, bool *use)
 
         if (moved2 < 20.0f * 20.0f) {
             if (++stuck > 1) {
-                stuck   = 0;
-                turning = 24 + (tick & 31);
-                dir     = -dir;
+                stuck      = 0;
+                /* 12-27 tics of turning, the duration itself a function of
+                 * simulation time only. */
+                turn_until = leveltime + 12 + (leveltime & 15);
+                dir        = -dir;
             }
         } else {
             stuck = 0;
@@ -442,6 +495,26 @@ static void run_game_tics(uint32_t frame_us)
     while (carry_us >= 28571u && guard < 4) {
         carry_us -= 28571u;
         guard++;
+#if R_DEMO
+        /* The walker is sampled once PER TIC, here, not only once per
+         * rendered frame: a frame covering several tics used to feed one
+         * frame-sampled input to all of them, so where the tic boundaries
+         * fell -- a pure function of build speed -- steered the route, and
+         * two builds of different speed still walked apart even after the
+         * walker's own state went tic-keyed. Evaluated at the leveltime of
+         * the tic about to run, the route is a function of simulation state
+         * alone. demo_drive's state transitions all key on leveltime, so
+         * the per-frame evaluation in handle_input (kept for the pad and
+         * menu paths) re-deriving the same values is idempotent. */
+        if (level_loaded) {
+            void D_PlayerInput(float fwd, float strafe, float turn, int run,
+                               int attack, int use);
+            float dfwd = 0.0f, dturn = 0.0f;
+            bool  duse = false;
+            demo_drive(&dfwd, &dturn, &duse);
+            D_PlayerInput(dfwd, 0.0f, dturn, 0, 0, duse);
+        }
+#endif
         /* Chocolate's RunTic, in order: a pending page/demo advance first,
          * then the local command is published for this tic, the menu ticks,
          * and G_Ticker runs the gameaction machine plus whichever gamestate
@@ -561,7 +634,9 @@ void D_UI_DrawText(int x, int y, const char *s);
  * blocking rdpq_detach_wait produced -- same span, measured without making
  * the CPU sit through the RDP's tail. */
 static volatile uint32_t frame_total_us;
-static uint32_t          submit_us;
+#if D_HWSTAT
+static uint32_t          submit_us;    /* CPU submit span; HWSTAT telemetry only */
+#endif
 
 static void frame_done_cb(void *arg)
 {
@@ -571,7 +646,20 @@ static void frame_done_cb(void *arg)
 
 int main(void)
 {
-    display_init(RESOLUTION_320x240, DEPTH_16_BPP, 3, GAMMA_NONE, FILTERS_RESAMPLE);
+    /* Wide mode costs one extra framebuffer's worth of RDRAM per buffer:
+     * 640x240x2 is 300 KB against 150, so three buffers plus the z-buffer go
+     * from ~600 KB to ~1.2 MB. That is affordable on the 8 MB this build
+     * already requires, and keeping three buffers preserves the frame
+     * pipelining that rdpq_detach_show gives us. */
+    /* FILTERS_RESAMPLE only at 320. The VI always scales the framebuffer to a
+     * 640-wide virtual output, so at 320 the resample filter is what smooths
+     * that 2x upscale -- worth having. At 640 there is no horizontal resize
+     * left to do, and running a bilinear kernel over 1:1 content only smears
+     * it: the extra columns we just paid fill rate for get averaged away.
+     * Disabled there so wide mode actually shows the resolution. */
+    display_init(R_WIDE ? RESOLUTION_640x240 : RESOLUTION_320x240,
+                 DEPTH_16_BPP, 3, GAMMA_NONE,
+                 R_WIDE ? FILTERS_DISABLED : FILTERS_RESAMPLE);
 
     /* Audio before the arenas claim the heap. audio_init reserves DMA buffers
      * the AI reads directly; starting it with the heap nearly full does not
@@ -609,6 +697,23 @@ int main(void)
 #endif
 
     scene_init();
+
+#if D_RSPQPROF
+    /* Started here, not at rdpq_init, for two reasons. The profiler only
+     * accumulates slots it has a name for, and it collects those names when it
+     * starts -- from the overlays registered by then, which means every
+     * subsystem's ucode has to be up first (rdpq's, and the mixer's from
+     * I_Sound_Init) or its time silently vanishes from the totals and reads
+     * back as RSP idle: precisely the number being measured. And starting
+     * after scene_init keeps the level load out of the first window. */
+    rspq_profile_start();
+#endif
+
+#if D_RSPIDLE
+    /* Same reasoning about placement: start sampling once the level is up, so
+     * the first window measures the game rather than the load. */
+    rspidle_init();
+#endif
 
 #if DEBUG_RDP
     /* Dump the first frame's worth of wall tiles, then go quiet. */
@@ -676,9 +781,20 @@ int main(void)
         prev_ticks = now_ticks;
 
         const uint32_t t_start = TICKS_READ();
+#if D_RSPQPROF
+        /* Frame boundary for the profiler's per-frame averages. Before the
+         * attach, so a frame's samples cover the whole of its RDP work. */
+        rspq_profile_next_frame();
+#endif
         /* Attach WITHOUT clearing: what needs clearing depends on what the
          * BSP walk finds (see below), and the walk is pure CPU work that
          * queues geometry without touching the RDP. */
+        /* Status-bar composite maintenance, at the no-attach point: the
+         * capture costs ~40 recorded entries; the replay into the offscreen
+         * strip happens only on frames the bar (or palette bank) actually
+         * changed. */
+        { void D_UI_UpdateBar(void); if (level_loaded) D_UI_UpdateBar(); }
+
         rdpq_attach(fb, display_get_zbuf());
 
         /* Full clear, unconditionally -- colour and depth.
@@ -702,6 +818,12 @@ int main(void)
         r_sprite_begin();
         r_setup_walls();
         r_sky_span_reset();
+#if D_DYNLIGHT
+        /* Before the walk: the walk emits the geometry that queries the list,
+         * so a light collected after it would not be seen until the next
+         * frame -- which on a two-tic muzzle flash is most of its life. */
+        { void D_LightsUpdate(void); D_LightsUpdate(); }
+#endif
         {
             int D_InLevel(void);
             int D_AutomapActive(void);
@@ -782,7 +904,11 @@ int main(void)
              * a rendering fault and reading x,y,angle off the screen is what
              * VIEWLOCK needs to reproduce it in the emulator. */
             char hud[80];
-            snprintf(hud, sizeof hud, "f%2u.%01u c%2u.%01u %s %d,%d,%d",
+            /* Build tag first, so it survives a long pose tail and is the
+             * first thing legible in a photograph of the screen. */
+            const int hud_n =
+            snprintf(hud, sizeof hud, D_TAG "%sf%2u.%01u c%2u.%01u %s %d,%d,%d",
+                     D_TAG[0] ? " " : "",
                      (unsigned)(frame_total_us / 1000),
                      (unsigned)((frame_total_us % 1000) / 100),
                      (unsigned)(submit_us / 1000),
@@ -791,6 +917,20 @@ int main(void)
                      (int)cam.x, (int)cam.y,
                      (int)(cam.angle * 1000.0f));
 
+#if D_RSPIDLE
+            /* r<rsp idle>/<rdp busy>, appended rather than given its own row:
+             * one line of COPY-mode text is already drawn, and these only
+             * change once every 120 frames. Same self-reporting idea as the
+             * pose -- the console can be read without a host attached. */
+            if (hud_n > 0 && (size_t)hud_n < sizeof hud) {
+                unsigned rsp_idle, rdp_busy;
+                rspidle_last(&rsp_idle, &rdp_busy);
+                snprintf(hud + hud_n, sizeof hud - (size_t)hud_n,
+                         " r%u/%u", rsp_idle, rdp_busy);
+            }
+#else
+            (void)hud_n;
+#endif
 #endif
 
             V_BeginUI();
@@ -801,6 +941,12 @@ int main(void)
             }
             D_UI_Draw();
 #if D_HWSTAT
+            /* Stamp the submit span BEFORE drawing the instrumentation
+             * line: those ~40 glyph blits are measurement apparatus, and
+             * letting them inside the span inflated the c-number every
+             * finding gets priced against by ~1.5%. The debug text is the
+             * only thing this excludes; game UI above is still counted. */
+            submit_us = TICKS_TO_US(TICKS_SINCE(t_start));
             D_UI_DrawText(8, 8, hud);
 #endif
             /* Whatever the card's root holds, when music could not open. */
@@ -842,11 +988,20 @@ int main(void)
 
         if (r_wipe_active()) r_wipe_draw();
 
-        submit_us = TICKS_TO_US(TICKS_SINCE(t_start));
+        /* submit_us is stamped inside the HWSTAT bracket above, before the
+         * instrumentation text -- not here, where it would time the ruler. */
 
-#if DEBUG_RDP
+#if DEBUG_RDP || D_POSEHASH
         /* Blocking in the validator build: the debug workflow reads the
-         * CPU/RDP split and wants deterministic frame boundaries. */
+         * CPU/RDP split and wants deterministic frame boundaries.
+         *
+         * POSEHASH needs it for a sharper reason. The pipelined tail below
+         * returns while the RDP is still rasterising, so a fingerprint taken
+         * there covers a half-drawn frame -- and how much of it is drawn
+         * depends on how fast that particular ROM runs. Two builds then
+         * disagree on almost every frame for reasons that have nothing to do
+         * with what is being tested, which is exactly the false regression
+         * this harness exists to rule out. */
         rdpq_detach_wait();
         frame_total_us = TICKS_TO_US(TICKS_SINCE(t_start));
         display_show(fb);
@@ -859,6 +1014,11 @@ int main(void)
          * iteration is the only throttle, three framebuffers deep. */
         rdpq_sync_full(frame_done_cb, (void *)(uintptr_t)t_start);
         rdpq_detach_show();
+#endif
+#if D_POSEHASH
+        /* After the submit, while fb is still the frame just drawn. Drains the
+         * RDP itself -- see posehash.c. */
+        posehash_frame(fb);
 #endif
         prev_fb = fb;
 
@@ -905,14 +1065,19 @@ int main(void)
 
         /* Periodic stats over USB: on hardware this is how frame numbers
          * reach the host without reading them off the television. Outside
-         * the measured span, so it perturbs nothing. The drop counters are
-         * the "why is a surface missing" telemetry: every path that can
-         * decline to draw something is counted, so a hole on screen can be
-         * attributed from the log instead of guessed at. dq = wall quads
-         * dropped (batch full), df = flat jobs dropped, ofl = flat clip
-         * buffer overflow, dsp = sprite jobs dropped. */
+         * the measured span, so it perturbs nothing there -- but debugf over
+         * an undrained USB link can stall for milliseconds, so the whole
+         * block is measurement-build only: HWSTAT owns the stats, and the
+         * profiler flags keep just their own reports on the same cadence.
+         * The drop counters are the "why is a surface missing" telemetry:
+         * every path that can decline to draw something is counted, so a
+         * hole on screen can be attributed from the log instead of guessed
+         * at. dq = wall quads dropped (batch full), df = flat jobs dropped,
+         * ofl = flat clip buffer overflow, dsp = sprite jobs dropped. */
+#if D_HWSTAT || D_RSPQPROF || D_RSPIDLE
         {
             static int statctr;
+#if D_HWSTAT
             static int acc_dq, acc_df, acc_dsp, acc_nd;
 
             /* Accumulated since boot: the per-frame counters reset every
@@ -922,12 +1087,13 @@ int main(void)
             acc_df  += r_flat_dropped();
             acc_dsp += r_sprite_dropped();
             acc_nd  += r_drop_npts + r_drop_depth + r_drop_side;
+#endif
 
             if (++statctr % 120 == 0)
                 {
+#if D_HWSTAT
                     int D_FlowState(int *ga);
                     int ga, gs = D_FlowState(&ga);
-#if D_HWSTAT
                     { extern uint32_t r_ph_cull_us, r_ph_seg_us, r_ph_flat_us;
                       debugf("walk: cull=%lu segs=%lu flatq=%lu\n",
                              (unsigned long)r_ph_cull_us,
@@ -942,7 +1108,12 @@ int main(void)
                            (unsigned long)ph_sprite_us);
                     ph_walk_us = ph_wallflush_us = 0;
                     ph_flatflush_us = ph_sprite_us = 0;
-#endif
+                    /* Arena high-water marks during play, not just at load.
+                     * The load-time report fires before the first level's
+                     * textures and every sprite frame is demand-loaded, so it
+                     * reads 0 and says nothing about the real peak -- which is
+                     * the number the reservations in mem.h have to cover. */
+                    mem_report("in play");
                     debugf("hwstat: f=%lu c=%lu worst=%lu dq=%d df=%d "
                            "ofl=%d dsp=%d nd=%d gs=%d ga=%d pose=%d,%d,%d,%d\n",
                            (unsigned long)frame_total_us,
@@ -952,8 +1123,69 @@ int main(void)
                            gs, ga,
                            (int)cam.x, (int)cam.y, (int)cam.z,
                            (int)(cam.angle * 1000.0f));
+#endif /* D_HWSTAT */
+#if D_RSPQPROF
+                    /* Where the RSP's time goes. wait_cpu is what this build
+                     * exists to read: RSP time spent stalled waiting for the
+                     * CPU to hand it commands. Large means there is slack to
+                     * move submit work onto the RSP; near zero means it is
+                     * already saturated, and an overlay would move the queue
+                     * rather than the frame time.
+                     *
+                     * Shares are of the profiled window, which is the same
+                     * thing as the per-frame share. Integer percentages: %f
+                     * would drag newlib's float printf into the ROM for a
+                     * debug line, the same reason the HUD above avoids it. */
+                    {
+                        rspq_profile_data_t pd;
+                        rspq_profile_get_data(&pd);
+                        if (pd.frame_count && pd.total_ticks) {
+                            const uint64_t tot  = pd.total_ticks;
+                            const uint64_t wcpu =
+                                pd.slots[RSPQ_PROFILE_CSLOT_WAIT_CPU].total_ticks;
+                            const uint64_t wrdp =
+                                pd.slots[RSPQ_PROFILE_CSLOT_WAIT_RDP].total_ticks
+                              + pd.slots[RSPQ_PROFILE_CSLOT_WAIT_RDP_SYNCFULL].total_ticks
+                              + pd.slots[RSPQ_PROFILE_CSLOT_WAIT_RDP_SYNCFULL_MULTI].total_ticks;
+                            const uint64_t swi  =
+                                pd.slots[RSPQ_PROFILE_CSLOT_OVL_SWITCH].total_ticks;
+                            uint64_t work = 0;
+                            for (int i = 0; i < RSPQ_MAX_OVERLAYS; i++)
+                                work += pd.slots[i].total_ticks;
+
+                            debugf("rspqprof: frames=%lu frame=%luus work=%lu%% "
+                                   "wait_cpu=%lu%% wait_rdp=%lu%% ovlsw=%lu%% "
+                                   "rdp_busy=%lu%%\n",
+                                   (unsigned long)pd.frame_count,
+                                   RSPQPROF_US(tot / pd.frame_count),
+                                   (unsigned long)((work * 100) / tot),
+                                   (unsigned long)((wcpu * 100) / tot),
+                                   (unsigned long)((wrdp * 100) / tot),
+                                   (unsigned long)((swi  * 100) / tot),
+                                   (unsigned long)((pd.rdp_busy_ticks * 100) / tot));
+
+                            /* Which ucode owns the work, so an offload can be
+                             * costed against what the RSP already runs:
+                             * rdpq's triangle setup against the mixer's. */
+                            for (int i = 0; i < RSPQ_MAX_OVERLAYS; i++)
+                                if (pd.slots[i].name && pd.slots[i].total_ticks)
+                                    debugf("  rspqovl %-16s %lu%% %luus/frame\n",
+                                           pd.slots[i].name,
+                                           (unsigned long)((pd.slots[i].total_ticks * 100) / tot),
+                                           RSPQPROF_US(pd.slots[i].total_ticks / pd.frame_count));
+                        }
+                        /* Per-window like the phase accumulators above. A
+                         * running average since boot would bury whatever the
+                         * route is doing now under the title screen. */
+                        rspq_profile_reset();
+                    }
+#endif
+#if D_RSPIDLE
+                    rspidle_report();
+#endif
                 }
         }
+#endif /* D_HWSTAT || D_RSPQPROF || D_RSPIDLE */
 
         /* Keep the mixer fed. It fills whatever room the audio buffers have,
          * so this self-regulates against the frame rate. */

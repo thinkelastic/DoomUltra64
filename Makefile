@@ -133,19 +133,209 @@ N64_CFLAGS += -DR_DEMO=$(DEMO)
 INTERP ?= 1
 N64_CFLAGS += -DD_INTERP=$(INTERP)
 
+# WIDE=1 renders at 640x240 instead of 320x240: twice the horizontal sampling
+# rate, the same 240 scanlines, no interlace (the N64's 480-line modes are
+# interlaced and flicker on a CRT).
+#
+# The point of this flag is that it moves ONE variable. Geometry, CPU submit
+# cost and TMEM uploads are all unchanged -- upload count is driven by which
+# tiles are on screen, not by how many pixels they cover, and LOD selection is
+# deliberately pinned to the vertical scale so it picks the same mips as the
+# 320 build. What doubles is fill rate, RDRAM bandwidth, and the framebuffers
+# (~600 KB -> ~1.2 MB for three buffers plus z).
+#
+# So an A/B of `f` in the HWSTAT line answers exactly one question: is there
+# spare RDP capacity at 320x240? Build both, run the same demo route, compare
+# medians. Vertical projection is bit-identical between the two by design.
+WIDE ?= 0
+N64_CFLAGS += -DR_WIDE=$(WIDE)
+
 # HWSTAT=1 draws the frame-time/pose line at the top of the screen and emits
 # the USB telemetry. Off for normal play; the debugging workflow described in
 # the project notes turns it on.
 HWSTAT ?= 0
 N64_CFLAGS += -DD_HWSTAT=$(HWSTAT)
 
+# TAG=<short string> stamps the HUD line so a photograph of the television says
+# which build produced it.
+#
+# Learned the hard way: an A/B pair was measured on console and the screenshots
+# came back indistinguishable, because two builds that differ only in a compiler
+# flag draw byte-identical HUDs. The numbers were real and unusable.
+TAG ?=
+N64_CFLAGS += -DD_TAG=\"$(TAG)\"
+
+# RSPQPROF=1 reports, with the periodic telemetry, where the RSP's time goes:
+# running ucode, waiting for the CPU to hand it commands, or waiting for the
+# RDP. That middle number is the one worth building for. The frame is CPU-bound
+# in the submit path on hardware, and moving submit work onto the RSP only pays
+# if the RSP is idle waiting for us -- if it is already saturated, an overlay
+# moves the queue rather than the frame time.
+#
+# Requires ./build.sh RSPQPROF=1: the counters are sampled by libdragon's RSP
+# microcode, so this needs a libdragon built with RSPQ_PROFILE=1 and therefore
+# its own toolchain image (see the Dockerfile). Against the stock one the
+# profiler is a set of empty stubs that would report a plausible-looking zero,
+# so src/main.c refuses to compile instead.
+#
+# Not free: the sampling perturbs what it measures. Read the ratios, and take
+# absolute frame times from an ordinary HWSTAT=1 build.
+#
+# DOES NOT BUILD against the pinned libdragon, and the reason is structural
+# rather than a missing flag. Profiling adds resident code to the RSP queue,
+# and every overlay has to fit in what is left of the RSP's 4 KB of IMEM
+# alongside it -- rdpq's own microcode then overflows rom_imem by 112 bytes and
+# libdragon will not link. Nothing tunable buys that back: RSPQ_DEBUG, the
+# obvious candidate, gates no microcode at all (it is C-side only), and rdpq is
+# the one overlay this renderer cannot do without. Dropping libdragon's H.264
+# overlays clears the same overflow for THEM, which the Dockerfile does, but
+# rdpq is still over on its own.
+#
+# So the flag is wired end to end and left switched off, against a libdragon
+# upgrade making it usable. The compile-time check in src/main.c is what keeps
+# that honest: with a non-profiling libdragon every rspq_profile_* call is an
+# empty stub, so the build fails rather than reporting a confident zero.
+# Measuring RSP occupancy on this libdragon needs a different mechanism.
+RSPQPROF ?= 0
+N64_CFLAGS += -DD_RSPQPROF=$(RSPQPROF)
+
+# RSPIDLE=1 answers the same question RSPQPROF was meant to, from the CPU side,
+# and does build. When rspq's queue runs dry the ucode executes `break` and the
+# RSP HALTS (RSPQCmd_WaitNewInput in rsp_queue.inc), so SP_STATUS's halted bit
+# is a true "nothing to do" signal rather than an inference. A timer interrupt
+# samples it, and DP_STATUS alongside it, and the periodic telemetry reports
+# both as a duty cycle. See src/rspidle.h.
+#
+# Separate from HWSTAT on purpose: this adds a 4 kHz interrupt, and HWSTAT
+# builds are where the demo-route frame-time medians come from. Never read
+# absolute frame times from a build with this on -- read the ratios.
+RSPIDLE ?= 0
+N64_CFLAGS += -DD_RSPIDLE=$(RSPIDLE)
+
+# R_FASTFLOOR=0 goes back to calling floorf in the vertex conversion.
+#
+# floorf is a libm CALL here, not an instruction: GCC's MIPS backend has no
+# pattern that lowers it to the VR4300's floor.w.s, and n64.mk's -ftrapping-math
+# means -fno-trapping-math does not unlock one. Every vertex needs four (x, y,
+# and both halves of the s16.16 pair), so a wall quad was paying sixteen calls
+# in the innermost submit loop -- the path the frame is CPU-bound in.
+#
+# The replacement is trunc plus a one-step correction, which is floorf's exact
+# result for every finite input in int32 range. Output is bit-identical, so
+# this is purely a speed switch; the flag exists to A/B it on hardware, which
+# is the only place the difference can be read.
+R_FASTFLOOR ?= 1
+N64_CFLAGS += -DR_FASTFLOOR=$(R_FASTFLOOR)
+
+# DYNLIGHT=1 adds moving point lights -- muzzle flash, fireballs, rockets.
+#
+# Doom's lighting model has no way to express these: a sector has one light
+# level and that is the whole of it. This adds a per-vertex term on top, which
+# costs no TMEM and no combiner stage -- the RDP is already interpolating a
+# shade across every surface, so the only change is what value each vertex is
+# handed. That is what makes it affordable when higher-resolution art is not.
+#
+# Brightness only, not colour: the batch vertex carries one shade float which
+# the flush fans out to r=g=b, so hue would mean widening the batch or carrying
+# a per-quad tint. See src/r_light.h.
+#
+# ON by default as of the sludge work: emissive flats are the reason. A muzzle
+# flash is two tics and easy to miss, but a nukage pool is always there, and
+# lighting it (and the walls it laps against) changes how a room reads rather
+# than adding a flicker.
+#
+# It is not free -- the frame is CPU-bound in the submit path, and this adds a
+# per-corner query on walls and a per-vertex one on flats. DYNLIGHT=0 still
+# compiles every query to a constant zero and returns the shade expressions to
+# exactly what they were, byte for byte, if that cost ever needs reclaiming.
+DYNLIGHT ?= 1
+N64_CFLAGS += -DD_DYNLIGHT=$(DYNLIGHT)
+
+# FOGSCALE=1 scales the light-diminishing range by sector brightness, the
+# way vanilla's diminishing tables do: bright sectors see far, dim sectors
+# fall off close. Light-255 sectors are bit-identical to FOGSCALE=0 (the
+# scale factor is exactly 1.0 there), so bright areas cannot regress; flats
+# gain the same falloff walls have (they previously had none), which is the
+# one deliberate look change. FOGSCALE=0 restores the fixed 512..3500 ramp.
+FOGSCALE ?= 1
+N64_CFLAGS += -DR_FOGSCALE=$(FOGSCALE)
+
+# NODEZCHECK=1 proves the incremental node-height refresh bit-identical to
+# the full tree walk EVERY frame (snapshot, rerun reference, compare) -- a
+# debug build for door/lift routes; costs more than the work it checks.
+NODEZCHECK ?= 0
+N64_CFLAGS += -DD_NODEZ_CHECK=$(NODEZCHECK)
+
+# QUANT=0 restores the float wall batch and flush-time conversion. The
+# default stores RSP-format integers at push (where depth and its
+# reciprocal are live) and the flush is a pure copy of command words --
+# same stream by construction, which `./abdiff.sh QUANT=0 -- QUANT=1`
+# proves over a whole route. Ignored by TRIFAST=0 and the host build.
+QUANT ?= 1
+N64_CFLAGS += -DR_TRI_QUANT=$(QUANT)
+
+# FUSESPLIT=0 restores the two-pass depth-band peel (near clip + far clip
+# over the same polygon). The default classifies each edge once and emits
+# both sides in one pass, with each side's boundary predicates and
+# interpolants kept verbatim -- `./abdiff.sh FUSESPLIT=0 -- FUSESPLIT=1`
+# proves route identity.
+FUSESPLIT ?= 1
+N64_CFLAGS += -DR_FUSESPLIT=$(FUSESPLIT)
+
+# FASTNARROW=1 steps clip_narrow's per-column window edges by constant
+# deltas instead of re-deriving the lerp each column (~14 cycles/column).
+# OFF by default and deliberately so: iterated adds round differently from
+# the recomputed lerp -- inside the window's one-pixel outward rounding by
+# ~5e-3 px over a full span, but not provably bit-identical, so it stays an
+# opt-in experiment until a hardware soak at doorway/window poses blesses
+# it. Every skip/reseed boundary re-derives exactly.
+FASTNARROW ?= 0
+N64_CFLAGS += -DR_FASTNARROW=$(FASTNARROW)
+
+# ZCHECK=1 proves the z-only node refresh reproduces the full pass exactly:
+# it runs both on every refresh and asserts every field of every node matches.
+# Costs far more than the work it is checking -- for validation only.
+ZCHECK ?= 0
+N64_CFLAGS += -DD_ZREFRESH_CHECK=$(ZCHECK)
+
+# POSEHASH=n fingerprints one frame every n tics and prints the hash, so two
+# builds can be compared over a whole route instead of at one vantage point.
+# ./abdiff.sh drives it. See src/posehash.h for why the ROM hashes its own
+# framebuffer rather than the host capturing the screen.
+#
+# INTERP=0 is not a suggestion here: with interpolation on, where the camera
+# sits inside a tic depends on when the frame happened to render, so the same
+# tic in two builds is not the same picture and every hash differs for reasons
+# unrelated to whatever is being tested. Enforced rather than documented,
+# because the failure looks exactly like a real regression.
+POSEHASH ?= 0
+N64_CFLAGS += -DD_POSEHASH=$(POSEHASH)
+ifneq ($(POSEHASH),0)
+ifneq ($(INTERP),0)
+$(error POSEHASH needs INTERP=0: with interpolation on, the pose within a tic \
+depends on render timing, so two builds hash different pictures at the same \
+tic and every frame reads as a regression)
+endif
+endif
+# The source is added to `src` after the list is assigned, further down: a
+# `src +=` up here would be silently discarded by the `src =` that follows.
+
 # O3=1 compiles the three hottest renderer files -O3 instead of the global
 # -O2: an A/B experiment for hardware demo-route medians only. The VR4300's
 # 16 KB I-cache can turn the extra inlining into a net loss, so this is
 # never the default; measure before adopting.
 ifeq ($(O3),1)
-$(BUILD_DIR)/src/r_wall.o $(BUILD_DIR)/src/r_flat.o $(BUILD_DIR)/src/r_bsp.o: N64_CFLAGS += -O3
+$(BUILD_DIR)/src/r_wall.o $(BUILD_DIR)/src/r_flat.o $(BUILD_DIR)/src/r_bsp.o $(BUILD_DIR)/src/r_tri.o $(BUILD_DIR)/src/r_ssdata.o: N64_CFLAGS += -O3
 endif
+
+# R_BATCH_CDE=0 goes back to plain stores for wall-batch appends. The default
+# issues the VR4300's Create Dirty Exclusive cache op on each of a quad's
+# seven D-cache lines before filling it: a store miss normally FETCHES the
+# line from RDRAM first (~40+ cycles) only to overwrite all of it; CDE
+# allocates the line dirty with no fetch. Safe because every pushed quad
+# fully overwrites its record. See batch_push in r_wall.c.
+R_BATCH_CDE ?= 1
+N64_CFLAGS += -DR_BATCH_CDE=$(R_BATCH_CDE)
 
 # Cartridge save RAM: 128 KB of SRAM, which the SC64 menu persists to a .sav
 # beside the ROM. Two 64 KB savegame slots live in it; see i_n64.c.
@@ -192,6 +382,33 @@ N64_MKDFS_ROOT = $(FS)
 # a cartridge, and the runtime loads only the ones a level actually names.
 
 src = src/main.c src/mem.c src/dt64.c src/r_wall.c src/wad.c src/p_level.c src/r_bsp.c src/r_flat.c src/r_sky.c src/r_sprite.c src/r_am.c src/r_tri.c src/r_pvs.c src/r_wipe.c
+
+# Only compiled when asked for, so an ordinary ROM carries none of it. See the
+# RSPIDLE comment above.
+ifeq ($(RSPIDLE),1)
+src += src/rspidle.c
+endif
+ifneq ($(POSEHASH),0)
+src += src/posehash.c
+endif
+ifeq ($(DYNLIGHT),1)
+src += src/r_light.c
+endif
+
+# floorf/ceilf as instructions instead of libm calls, for the WHOLE link.
+#
+# Always compiled in, and deliberately not behind a flag: it replaces the
+# library's definitions rather than adding a call site, so there is nothing to
+# switch off at the point of use. Project objects are resolved before -lm is
+# searched, so the archive members are never pulled in and every caller
+# rebinds -- including prebuilt libdragon, whose rdpq triangle setup pays two
+# floorf per vertex and which no edit of this project could otherwise reach.
+# Same linker behaviour the patched flashcart driver relies on.
+src += src/r_fastmath.c
+# -fno-builtin or GCC recognises the body as floorf and emits a call to floorf,
+# which is that function. It compiles cleanly and recurses until the stack is
+# gone, so this line is load-bearing.
+$(BUILD_DIR)/src/r_fastmath.o: N64_CFLAGS += -fno-builtin
 
 # Doom's own game code, vendored under src/doom and compiled unmodified. The
 # platform services it expects (lumps, zone, I_Error) are supplied by the
@@ -329,7 +546,13 @@ $(FS)/doom.wad: $(WAD)
 #
 # The flag set is written to a file whenever it changes, and every object
 # depends on that file.
-FLAGSIG := $(N64_CFLAGS)
+# Per-file overrides have to be in the signature too, not just the global set.
+# O3 adds -O3 to three renderer objects through a target-specific variable,
+# which never appears in N64_CFLAGS -- so a plain `make` after `make O3=1` saw
+# an unchanged signature, rebuilt nothing, and relinked the -O3 objects into a
+# ROM claiming to be the baseline. That is the exact failure this mechanism
+# exists to prevent, reintroduced through the one door it was not watching.
+FLAGSIG := $(N64_CFLAGS) O3=$(O3)
 $(shell mkdir -p $(BUILD_DIR); \
         [ "$$(cat $(BUILD_DIR)/.flags 2>/dev/null)" = '$(FLAGSIG)' ] || \
         printf '%s' '$(FLAGSIG)' > $(BUILD_DIR)/.flags)
@@ -360,7 +583,7 @@ $(ROM).z64: $(BUILD_DIR)/$(ROM).dfs
 test: $(assets)
 	@mkdir -p $(BUILD_DIR)/shots
 	@echo "    [HOST ] $(BUILD_DIR)/host_render"
-	@$(HOST_CC) -O2 -Wall -Wextra -I tests/shim \
+	@$(HOST_CC) -O2 -Wall -Wextra -I tests/shim -DR_WIDE=$(WIDE) \
 	    -o $(BUILD_DIR)/host_render tests/host_render.c \
 	    src/r_wall.c src/r_flat.c src/r_sprite.c -lm
 	@$(BUILD_DIR)/host_render $(BUILD_DIR)/shots $(FS)

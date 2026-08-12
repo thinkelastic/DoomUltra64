@@ -694,11 +694,16 @@ void mus_update(void)
      * honest about what is happening now: a stream that stopped feeding is not
      * still playing, and reporting otherwise sent me looking in the wrong
      * place. */
-    static int report;
     if (playing) {
         refill(MUS_REFILL_QUANTUM);
+#if D_HWSTAT
+        /* Telemetry builds only: a debugf over an undrained USB link can
+         * stall for milliseconds, which a release build should never risk
+         * for a status line. */
+        static int report;
         if (++report % 120 == 0)
             debugf("music: buffered %d bytes\n", ring_used());
+#endif
     } else if (status == play_status) {
         status = "stopped";
     }

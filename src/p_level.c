@@ -1042,6 +1042,10 @@ void p_level_reset_assets(void)
      * with the arena: the lvl_tex slots get reused by the next level. */
     void V_DrawResetCache(void);
     void R_SpriteFrameReset(void);
+    /* Emissive flats are recorded by resolved INDEX, which is exactly the kind
+     * of stale reference the comment above warns about: keep it and the next
+     * level's flat that lands in slot 7 inherits the last one's glow. */
+    void D_FlatGlowReset(void);
 
     mem_reset(MEM_ARENA_LEVEL);
     dt64_release_all();
@@ -1055,4 +1059,7 @@ void p_level_reset_assets(void)
     order_names = NULL;
     V_DrawResetCache();
     R_SpriteFrameReset();
+#if D_DYNLIGHT
+    D_FlatGlowReset();
+#endif
 }

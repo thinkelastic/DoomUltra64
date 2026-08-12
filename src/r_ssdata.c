@@ -59,8 +59,92 @@ void R_ThingAdd(float x, float y, float z, void *spr)
 r_ssdata_t *r_ssdata;
 r_polypt_t *r_polypts;
 int         r_numpolypts;
-float      *r_seglen;
+
 r_nodef_t  *r_nodef;
+uint32_t   *r_nodekids;
+uint16_t   *r_ss_flatgate;
+r_segf_t   *r_segf;
+
+/* Set by the mark hooks (T_MovePlane, P_UnArchiveWorld, D_InterpEnd);
+ * cleared by r_render_level's consume. Starts dirty so the first rendered
+ * frame of a level always refreshes, whatever wrote the heights. */
+int r_nodez_dirty = 1;
+
+/* Incremental node-Z machinery. Each child code appears exactly once in
+ * the BSP, so a subsector (or node) hangs from exactly one (node, slot)
+ * pair -- the parent tables below are total functions, and a sector's
+ * height change can be bubbled from its subsectors' leaf slots up to the
+ * root, stopping the moment a level's stored range absorbs it. A moving
+ * door touches a handful of slots instead of walking the whole tree at
+ * frame rate. Encoding: (node << 1) | slot; 0xFFFF for none. */
+static uint16_t *r_node_parent;   /* [numnodes] */
+static uint16_t *r_ss_parent;     /* [numsubsectors] */
+static uint16_t *r_sec_ss_first;  /* [numsectors + 1]: prefix sums */
+static uint16_t *r_sec_ss_list;   /* [numsubsectors], grouped by sector */
+static uint32_t *r_nodez_bits;    /* per-sector dirty bitset */
+static int       r_nodez_nwords;
+static int       r_nodez_all;     /* full-walk request */
+#if D_NODEZ_CHECK
+r_nodef_t       *r_nodez_check_buf;
+#endif
+
+void R_NodeZMarkSector(int secnum)
+{
+    if (!r_nodez_bits || (unsigned)secnum >= (unsigned)numsectors) {
+        r_nodez_all = 1; r_nodez_dirty = 1;
+        return;
+    }
+    r_nodez_bits[secnum >> 5] |= 1u << (secnum & 31);
+    r_nodez_dirty = 1;
+}
+
+void R_NodeZMarkAll(void)
+{
+    r_nodez_all = 1;
+    r_nodez_dirty = 1;
+}
+
+/* See r_ssdata.h. Runs at the end of P_LoadSegs, before any render. */
+void R_BuildSegFloatMirror(void)
+{
+    r_segf = Z_Malloc(numsegs * sizeof *r_segf, PU_LEVEL, NULL);
+    for (int i = 0; i < numsegs; i++) {
+        const seg_t *sg = &segs[i];
+        r_segf_t    *sf = &r_segf[i];
+
+        if (!sg->linedef || !sg->sidedef || !sg->frontsector) {
+            /* The walk's old null checks, folded into one sentinel. */
+            sf->ax = sf->ay = sf->bx = sf->by = 0.0f;
+            sf->len = 0.0f; sf->u0seg = 0.0f;
+            sf->frontsec = sf->backsec = 0;
+            sf->sideidx = 0; sf->lineidx = 0xFFFF;
+            continue;
+        }
+
+        /* Exactly the walk's own conversions, evaluated once. */
+        sf->ax = (float)sg->v1->x * (1.0f / FRACUNIT);
+        sf->ay = (float)sg->v1->y * (1.0f / FRACUNIT);
+        sf->bx = (float)sg->v2->x * (1.0f / FRACUNIT);
+        sf->by = (float)sg->v2->y * (1.0f / FRACUNIT);
+
+        /* The r_seglen expression, verbatim, so the value is bit-identical
+         * to what the retired array held. */
+        {
+            const float dx = (float)((sg->v2->x - sg->v1->x) >> FRACBITS);
+            const float dy = (float)((sg->v2->y - sg->v1->y) >> FRACBITS);
+            sf->len = sqrtf(dx * dx + dy * dy);
+        }
+
+        /* Seg offset in texels. fixed_t: P_LoadSegs stores it <<FRACBITS. */
+        sf->u0seg = (float)sg->offset * (1.0f / FRACUNIT);
+
+        sf->frontsec = (uint16_t)(sg->frontsector - sectors);
+        sf->backsec  = sg->backsector
+                     ? (uint16_t)(sg->backsector - sectors) : 0xFFFF;
+        sf->sideidx  = (uint16_t)(sg->sidedef - sides);
+        sf->lineidx  = (uint16_t)(sg->linedef - lines);
+    }
+}
 
 r_flatregion_t *r_flatregion;
 r_polypt_t     *r_regionpts;
@@ -286,11 +370,173 @@ static void node_geo_range(int num, float *lo, float *hi,
     *yh = nf->yh[0] > nf->yh[1] ? nf->yh[0] : nf->yh[1];
 }
 
-void R_RefreshNodeZ(void)
+/* The refresh half of node_geo_range: heights only.
+ *
+ * Everything else that function does is dead on a refresh, and the comment on
+ * the widening above says why -- "the xy extent is static, only heights move".
+ * The seg loop reads vertex coordinates, the box read reads r_ssdata bounds,
+ * and both are load-time constants; the widening that consumes them is a
+ * monotone `if (smaller) assign`, so after the first pass it can never change
+ * anything again. What remains is a no-op that walks the whole tree.
+ *
+ * It is not a cheap no-op. Per subsector it chases sg->v1 and sg->v2 into
+ * vertexes[] -- scattered loads, two per seg -- then four fixed-to-float
+ * conversions and eight compares. On E1M1 that is the difference between
+ * touching ~63 KB and ~8 KB, and it runs at FULL FRAME RATE for the whole
+ * second a door or lift is moving: D_InterpBegin rewrites sector heights every
+ * frame while anything is interpolating, so r_bsp.c's height-sum test sees a
+ * change on every one of them, not once per tic.
+ */
+static void node_z_range(int num, float *lo, float *hi)
+{
+    if (num & NF_SUBSECTOR) {
+        const sector_t *sec = subsectors[num & ~NF_SUBSECTOR].sector;
+        if (!sec) { *lo = 1e9f; *hi = -1e9f; return; }
+        *lo = (float)sec->floorheight * (1.0f / FRACUNIT);
+        *hi = (sec->ceilingpic == skyflatnum)
+            ? 1e6f
+            : (float)sec->ceilingheight * (1.0f / FRACUNIT);
+        return;
+    }
+
+    const node_t *nd = &nodes[num];
+    r_nodef_t *nf = &r_nodef[num];
+    node_z_range(nd->children[0], &nf->zlo[0], &nf->zhi[0]);
+    node_z_range(nd->children[1], &nf->zlo[1], &nf->zhi[1]);
+
+    const float l0 = nf->zlo[0], l1 = nf->zlo[1];
+    const float h0 = nf->zhi[0], h1 = nf->zhi[1];
+    *lo = l0 < l1 ? l0 : l1;
+    *hi = h0 > h1 ? h0 : h1;
+}
+
+/* Load time: the full pass, which is what establishes the xy cull boxes. */
+void R_BuildNodeGeo(void)
 {
     if (!r_nodef || numnodes <= 0) return;
     float lo, hi, xl, yl, xh, yh;
     node_geo_range(numnodes - 1, &lo, &hi, &xl, &yl, &xh, &yh);
+}
+
+void R_RefreshNodeZ(void)
+{
+    if (!r_nodef || numnodes <= 0) return;
+
+#if D_ZREFRESH_CHECK
+    /* Self-check: run the full pass into a scratch copy and prove the z-only
+     * one produced identical bytes for every node. Temporary -- it costs more
+     * than the work it is checking. Boot with a door and a lift in view. */
+    {
+        static r_nodef_t *scratch;
+        if (!scratch) scratch = Z_Malloc(numnodes * sizeof *scratch, PU_LEVEL, NULL);
+        node_z_range(numnodes - 1, &(float){0}, &(float){0});
+        for (int i = 0; i < numnodes; i++) scratch[i] = r_nodef[i];
+
+        float lo, hi, xl, yl, xh, yh;
+        node_geo_range(numnodes - 1, &lo, &hi, &xl, &yl, &xh, &yh);
+
+        for (int i = 0; i < numnodes; i++)
+            for (int ch = 0; ch < 2; ch++)
+                assertf(scratch[i].zlo[ch] == r_nodef[i].zlo[ch] &&
+                        scratch[i].zhi[ch] == r_nodef[i].zhi[ch] &&
+                        scratch[i].xl[ch]  == r_nodef[i].xl[ch]  &&
+                        scratch[i].yl[ch]  == r_nodef[i].yl[ch]  &&
+                        scratch[i].xh[ch]  == r_nodef[i].xh[ch]  &&
+                        scratch[i].yh[ch]  == r_nodef[i].yh[ch],
+                        "node %d child %d diverged on z-only refresh", i, ch);
+        return;
+    }
+#endif
+
+    float lo, hi;
+    node_z_range(numnodes - 1, &lo, &hi);
+}
+
+/* Bubble one sector's height change up the tree. Leaf values use VERBATIM
+ * node_z_range's expressions (same TU, same compiled code), so a level
+ * whose stored range already equals the incoming one has absorbed the
+ * change -- float equality here is bit-identity: the inputs are
+ * (float)fixed products and the 1e6/1e9 sentinels, no NaNs, and fixed zero
+ * converts to +0.0. Each of the sector's subsectors bubbles independently;
+ * a node whose other child changes later is re-walked by that sector's own
+ * bubble, so order between dirty sectors cannot matter. */
+static void nodez_refresh_sector(int secnum)
+{
+    const sector_t *sec = &sectors[secnum];
+    const float lo = (float)sec->floorheight * (1.0f / FRACUNIT);
+    const float hi = (sec->ceilingpic == skyflatnum)
+                   ? 1e6f
+                   : (float)sec->ceilingheight * (1.0f / FRACUNIT);
+
+    const int e = r_sec_ss_first[secnum + 1];
+    for (int k = r_sec_ss_first[secnum]; k < e; k++) {
+        uint16_t at = r_ss_parent[r_sec_ss_list[k]];
+        float nlo = lo, nhi = hi;
+        while (at != 0xFFFF) {
+            r_nodef_t *nf = &r_nodef[at >> 1];
+            const int ch = at & 1;
+            if (nf->zlo[ch] == nlo && nf->zhi[ch] == nhi)
+                break;                   /* absorbed: ancestors already exact */
+            nf->zlo[ch] = nlo;
+            nf->zhi[ch] = nhi;
+            /* Fold for the level above -- node_z_range's fold, verbatim. */
+            const float l0 = nf->zlo[0], l1 = nf->zlo[1];
+            const float h0 = nf->zhi[0], h1 = nf->zhi[1];
+            nlo = l0 < l1 ? l0 : l1;
+            nhi = h0 > h1 ? h0 : h1;
+            at = r_node_parent[at >> 1];
+        }
+    }
+}
+
+/* The render's dirty-consume: full walk when everything is suspect
+ * (savegame, level build), else one bubble per marked sector. Bits are
+ * cleared only here, so marks accumulate across multi-tic bursts and
+ * frames that skip rendering (automap, wipes) by construction. */
+void R_NodeZConsume(void)
+{
+    if (!r_nodef || numnodes <= 0) return;
+
+    if (r_nodez_all || !r_nodez_bits) {
+        r_nodez_all = 0;
+        if (r_nodez_bits)
+            memset(r_nodez_bits, 0, (size_t)r_nodez_nwords * 4);
+        R_RefreshNodeZ();
+        return;
+    }
+
+    for (int w = 0; w < r_nodez_nwords; w++) {
+        uint32_t bits = r_nodez_bits[w];
+        if (!bits) continue;
+        r_nodez_bits[w] = 0;
+        const int base = w << 5;
+        do {
+            nodez_refresh_sector(base + __builtin_ctz(bits));
+            bits &= bits - 1;
+        } while (bits);
+    }
+
+#if D_NODEZ_CHECK
+    /* Prove the incremental result equals the full z-only walk, every
+     * frame: snapshot the slots, rerun node_z_range, compare bit-exactly.
+     * The buffer is allocated eagerly at build (a lazy static would dangle
+     * across level frees). */
+    {
+        extern r_nodef_t *r_nodez_check_buf;
+        for (int i = 0; i < numnodes; i++) r_nodez_check_buf[i] = r_nodef[i];
+        float lo, hi;
+        node_z_range(numnodes - 1, &lo, &hi);
+        for (int i = 0; i < numnodes; i++)
+            for (int ch = 0; ch < 2; ch++)
+                assertf(r_nodez_check_buf[i].zlo[ch] == r_nodef[i].zlo[ch] &&
+                        r_nodez_check_buf[i].zhi[ch] == r_nodef[i].zhi[ch],
+                        "nodez: node %d ch %d have %f/%f want %f/%f",
+                        i, ch,
+                        r_nodez_check_buf[i].zlo[ch],
+                        r_nodez_check_buf[i].zhi[ch],
+                        r_nodef[i].zlo[ch], r_nodef[i].zhi[ch]);
+    }
+#endif
 }
 
 /* --- merged flat regions -------------------------------------------------
@@ -509,6 +755,16 @@ static void build_flat_regions(void)
          * queued, so their region index is never read. */
     }
 
+    /* The walk's flat gate: region index for cells that can draw, 0xFFFF
+     * for the rest. Folds the numpts and sector checks the walk made per
+     * visit into the load it was already paying. */
+    r_ss_flatgate = Z_Malloc(numsubsectors * sizeof *r_ss_flatgate,
+                             PU_LEVEL, NULL);
+    for (int i = 0; i < numsubsectors; i++)
+        r_ss_flatgate[i] =
+            (r_ssdata[i].numpts >= 3 && subsectors[i].sector)
+                ? r_ssdata[i].region : 0xFFFF;
+
     debugf("ssdata: %d flat regions from %d subsectors\n",
            nregions, numsubsectors);
 
@@ -720,28 +976,30 @@ void R_BuildSubsectorData(void)
 {
     if (numsubsectors <= 0 || numnodes <= 0) {
         r_ssdata = NULL; r_polypts = NULL; r_numpolypts = 0;
+        r_node_parent = r_ss_parent = NULL;
+        r_sec_ss_first = r_sec_ss_list = NULL;
+        r_nodez_bits = NULL; r_nodez_nwords = 0;
+        r_nodez_all = 1; r_nodez_dirty = 1;
         return;
     }
 
     r_ssdata = Z_Malloc(numsubsectors * sizeof *r_ssdata, PU_LEVEL, NULL);
     for (int i = 0; i < numsubsectors; i++) r_ssdata[i].numpts = 0;
 
-    /* Seg lengths once, at load. 4 bytes per seg buys back a sqrtf per
-     * visible seg per frame in the traversal. */
-    r_seglen = Z_Malloc(numsegs * sizeof *r_seglen, PU_LEVEL, NULL);
-    for (int i = 0; i < numsegs; i++) {
-        const float dx = (float)((segs[i].v2->x - segs[i].v1->x) >> FRACBITS);
-        const float dy = (float)((segs[i].v2->y - segs[i].v1->y) >> FRACBITS);
-        r_seglen[i] = sqrtf(dx * dx + dy * dy);
-    }
+    /* Seg lengths live in r_segf now, built by R_BuildSegFloatMirror at the
+     * end of P_LoadSegs. */
 
     /* Float mirrors of the nodes, for the traversal's point-side tests and
      * bounding-box culling. Fixed-to-float conversion happens here, once,
-     * instead of at every node visit of every frame. */
+     * instead of at every node visit of every frame. The packed children
+     * ride in their own dense array (not in r_nodef_t: 64 bytes is exactly
+     * four D-cache lines and must stay so). */
     r_nodef = Z_Malloc(numnodes * sizeof *r_nodef, PU_LEVEL, NULL);
+    r_nodekids = Z_Malloc(numnodes * sizeof *r_nodekids, PU_LEVEL, NULL);
     for (int i = 0; i < numnodes; i++) {
         const node_t *nd = &nodes[i];
         r_nodef_t *nf = &r_nodef[i];
+        r_nodekids[i] = ((uint32_t)nd->children[0] << 16) | nd->children[1];
         nf->x  = (float)nd->x  * (1.0f / FRACUNIT);
         nf->y  = (float)nd->y  * (1.0f / FRACUNIT);
         nf->dx = (float)nd->dx * (1.0f / FRACUNIT);
@@ -753,6 +1011,64 @@ void R_BuildSubsectorData(void)
             nf->yh[ch] = (float)nd->bbox[ch][BOXTOP]    * (1.0f / FRACUNIT);
         }
     }
+
+    /* Parent attachments and per-sector subsector lists for the
+     * incremental node-Z refresh. Child node references are 15-bit
+     * (NF_SUBSECTOR claims the top bit), so (node<<1)|slot fits u16. */
+    assertf(numnodes <= 0x7FFF, "node count %d overflows the parent encoding",
+            numnodes);
+    r_node_parent = Z_Malloc(numnodes * sizeof *r_node_parent, PU_LEVEL, NULL);
+    r_ss_parent   = Z_Malloc(numsubsectors * sizeof *r_ss_parent, PU_LEVEL, NULL);
+    for (int i = 0; i < numnodes; i++)      r_node_parent[i] = 0xFFFF;
+    for (int i = 0; i < numsubsectors; i++) r_ss_parent[i]   = 0xFFFF;
+    for (int n = 0; n < numnodes; n++)
+        for (int ch = 0; ch < 2; ch++) {
+            const int c = nodes[n].children[ch];
+            if (c & NF_SUBSECTOR) {
+                const int ssn = c & ~NF_SUBSECTOR;
+                if (ssn < numsubsectors)
+                    r_ss_parent[ssn] = (uint16_t)((n << 1) | ch);
+            } else if (c < numnodes) {
+                r_node_parent[c] = (uint16_t)((n << 1) | ch);
+            }
+        }
+
+    /* sector -> subsectors, counting sort. Null-sector cells are skipped:
+     * their leaf slots hold the constant empty range from the build and
+     * never change. */
+    r_sec_ss_first = Z_Malloc((numsectors + 1) * sizeof *r_sec_ss_first,
+                              PU_LEVEL, NULL);
+    r_sec_ss_list  = Z_Malloc(numsubsectors * sizeof *r_sec_ss_list,
+                              PU_LEVEL, NULL);
+    for (int i = 0; i <= numsectors; i++) r_sec_ss_first[i] = 0;
+    for (int i = 0; i < numsubsectors; i++)
+        if (subsectors[i].sector)
+            r_sec_ss_first[(subsectors[i].sector - sectors) + 1]++;
+    for (int i = 0; i < numsectors; i++)
+        r_sec_ss_first[i + 1] = (uint16_t)(r_sec_ss_first[i + 1] +
+                                           r_sec_ss_first[i]);
+    {
+        uint16_t *cursor = malloc(numsectors * sizeof *cursor);
+        for (int i = 0; i < numsectors; i++) cursor[i] = r_sec_ss_first[i];
+        for (int i = 0; i < numsubsectors; i++)
+            if (subsectors[i].sector)
+                r_sec_ss_list[cursor[subsectors[i].sector - sectors]++] =
+                    (uint16_t)i;
+        free(cursor);
+    }
+
+    /* Dirty set; Z_Malloc does not zero. Everything starts dirty-all so
+     * the first frame refreshes whatever wrote the heights. */
+    r_nodez_nwords = (numsectors + 31) >> 5;
+    r_nodez_bits = Z_Malloc(r_nodez_nwords * sizeof *r_nodez_bits,
+                            PU_LEVEL, NULL);
+    memset(r_nodez_bits, 0, (size_t)r_nodez_nwords * 4);
+    r_nodez_all = 1;
+    r_nodez_dirty = 1;
+#if D_NODEZ_CHECK
+    r_nodez_check_buf = Z_Malloc(numnodes * sizeof *r_nodez_check_buf,
+                                 PU_LEVEL, NULL);
+#endif
 
     r_numpolypts = numsubsectors * PTS_PER_SS;
     r_polypts = Z_Malloc(r_numpolypts * sizeof *r_polypts, PU_LEVEL, NULL);
@@ -809,7 +1125,7 @@ void R_BuildSubsectorData(void)
     }
 
     build_flat_regions();
-    R_RefreshNodeZ();
+    R_BuildNodeGeo();   /* full pass: establishes the xy cull boxes */
 
     int built = 0;
     for (int i = 0; i < numsubsectors; i++) if (r_ssdata[i].numpts) built++;

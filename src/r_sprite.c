@@ -21,6 +21,7 @@
  */
 #include "r_sprite.h"
 #include "r_flat.h"     /* R_FLAT_NEAR: the depth scale walls and flats share */
+#include "r_tri.h"
 
 #include <math.h>
 
@@ -35,8 +36,13 @@ typedef struct {
     dt64_tex_t *tex;
     float       depth;
     float       sx, sy;      /* projected anchor */
-    float       scale;       /* screen pixels per world unit at this depth */
-    float       shade;
+    /* Screen pixels per world unit at this depth, per axis. Equal in a
+     * square-pixel mode; scale_x is twice scale_y at 640x240. */
+    float       scale_x, scale_y;
+    /* Three channels: the RSP vertex always carried independent RGB, so a
+     * coloured light on an actor costs nothing extra per vertex. Fog is
+     * folded in here, once per job. */
+    float       sr, sg, sb;
     uint8_t     mipped;
 } sprjob_t;
 
@@ -61,7 +67,8 @@ int r_sprite_count(void)   { return stat_drawn; }
 int r_sprite_uploads(void) { return stat_uploads; }
 int r_sprite_dropped(void) { return stat_dropped; }
 
-void r_sprite_add(const r_camera_t *cam, const r_thing_t *t, float shade)
+void r_sprite_add(const r_camera_t *cam, const r_thing_t *t,
+                  const float sh[3], int fog_ll)
 {
     if (!t->spr) return;
     if (numjobs >= SPR_MAX_JOBS) { stat_dropped++; return; }
@@ -74,22 +81,23 @@ void r_sprite_add(const r_camera_t *cam, const r_thing_t *t, float shade)
     if (depth < SPR_NEAR) return;
 
     const float offs = dx * sn - dy * cs;
-    const float scale = cam->focal / depth;
+    const float scale_x = cam->focal_x / depth;
+    const float scale_y = cam->focal_y / depth;
 
     /* Reject anything whose billboard falls entirely outside the viewport
      * before it costs a texture upload. */
-    const float sx = SCREEN_W * 0.5f + offs * scale;
+    const float sx = SCREEN_W * 0.5f + offs * scale_x;
     const dt64_tex_t *tspr = (const dt64_tex_t *)t->spr;
-    const float halfw = (float)tspr->width * scale;
+    const float halfw = (float)tspr->width * scale_x;
     if (sx + halfw < 0.0f || sx - halfw > (float)SCREEN_W) return;
 
     /* And vertically: an item the player stands over projects entirely below
      * the screen yet still queued, uploaded its tiles and drew nothing.
      * Common in E1M1's bonus clusters. */
-    const float sy   = SCREEN_H * 0.5f - (t->z - cam->z) * scale;
-    const float top  = sy - (float)tspr->topoffset * scale;
+    const float sy   = SCREEN_H * 0.5f - (t->z - cam->z) * scale_y;
+    const float top  = sy - (float)tspr->topoffset * scale_y;
     if (top > (float)SCREEN_H + 2.0f ||
-        top + (float)tspr->height * scale < -2.0f) return;
+        top + (float)tspr->height * scale_y < -2.0f) return;
 
     sprjob_t *j = &jobs[numjobs++];
 
@@ -97,22 +105,40 @@ void r_sprite_add(const r_camera_t *cam, const r_thing_t *t, float shade)
      * half size: same picture, a quarter of the TMEM tiles and quads. */
     j->tex = (dt64_tex_t *)t->spr;
     j->mipped = 0;
-    if (tspr->mip && scale < 0.5f) { j->tex = tspr->mip; j->mipped = 1; }
+    /* Tested against the vertical scale, which is unchanged by wide mode, so
+     * sprite LOD picks the same level as the 320 build. Same reasoning as the
+     * wall mip test in r_wall.c: keep uploads fixed so a frame-time A/B
+     * isolates fill rate. */
+    if (tspr->mip && scale_y < 0.5f) { j->tex = tspr->mip; j->mipped = 1; }
     j->depth = depth;
     j->sx    = sx;
     j->sy    = sy;
-    j->scale = scale;
-    j->shade = shade;
+    j->scale_x = scale_x;
+    j->scale_y = scale_y;
+    /* Distance falloff, once per job: sprites previously ignored it and
+     * glowed full-bright beside fog-dimmed walls at the far end of a hall.
+     * Vanilla diminishes them like everything else; fullbright frames
+     * (fog_ll < 0) stay exempt. */
+    {
+#if R_FOGSCALE
+        const float k = fog_ll >= 0 ? r_vis(depth, r_fog_inv[fog_ll]) : 1.0f;
+#else
+        const float k = 1.0f; (void)fog_ll;
+#endif
+        j->sr = sh[0] * k;
+        j->sg = sh[1] * k;
+        j->sb = sh[2] * k;
+    }
 }
 
 /* Draw one tile of a sprite. The billboard sits at a single depth, so the
  * mapping across it is affine and the tile grid is a plain screen-space
  * subdivision -- no perspective subdivision needed, unlike walls and floors. */
 static void draw_tile(const sprjob_t *j, int s0, int t0, int s1, int t1,
-                      float sc, float x0, float y0)
+                      float scx, float scy, float x0, float y0)
 {
-    const float x1 = x0 + (float)(s1 - s0) * sc;
-    const float y1 = y0 + (float)(t1 - t0) * sc;
+    const float x1 = x0 + (float)(s1 - s0) * scx;
+    const float y1 = y0 + (float)(t1 - t0) * scy;
 
     if (x1 < 0.0f || x0 > (float)SCREEN_W) return;
     if (y1 < 0.0f || y0 > (float)SCREEN_H) return;
@@ -134,7 +160,7 @@ static void draw_tile(const sprjob_t *j, int s0, int t0, int s1, int t1,
     for (int i = 0; i < 4; i++) {
         v[i][0] = xs[i];
         v[i][1] = ys[i];
-        v[i][2] = v[i][3] = v[i][4] = j->shade;
+        v[i][2] = j->sr; v[i][3] = j->sg; v[i][4] = j->sb;
         v[i][5] = 1.0f;
         v[i][6] = ss[i];
         v[i][7] = ts[i];
@@ -142,8 +168,12 @@ static void draw_tile(const sprjob_t *j, int s0, int t0, int s1, int t1,
         v[i][9] = z;
     }
 
-    rdpq_triangle(&TRIFMT_SPR, v[0], v[1], v[2]);
-    rdpq_triangle(&TRIFMT_SPR, v[0], v[2], v[3]);
+    /* Slot reuse, as walls and flats: the second triangle shares v0 and v2
+     * with the first, so it is one vertex write and an issue word instead
+     * of a full second rdpq_triangle (which reconverts all three). The RSP
+     * Y-sorts each triangle independently, so reordering cannot change
+     * coverage beyond the same ±1-step tie-break class TRIFAST documented. */
+    r_tri_quad(&TRIFMT_SPR, v[0], v[1], v[2], v[3]);
     r_tri_spr += 2;
 }
 
@@ -233,18 +263,20 @@ void r_sprite_flush(void)
 
                     /* Anchor: horizontally the sprite's centre marker,
                      * vertically the feet. Both from the patch header. */
-                    const float sc = j->mipped ? j->scale * 2.0f : j->scale;
-                    const float left = j->sx - (float)tex->leftoffset * sc;
-                    const float top  = j->sy - (float)tex->topoffset  * sc;
-                    const float x0 = left + (float)s0 * sc;
-                    const float y0 = top  + (float)t0 * sc;
+                    const float m   = j->mipped ? 2.0f : 1.0f;
+                    const float scx = j->scale_x * m;
+                    const float scy = j->scale_y * m;
+                    const float left = j->sx - (float)tex->leftoffset * scx;
+                    const float top  = j->sy - (float)tex->topoffset  * scy;
+                    const float x0 = left + (float)s0 * scx;
+                    const float y0 = top  + (float)t0 * scy;
 
                     /* Visibility BEFORE the upload: a (texture, tile) pair
                      * whose every instance is off-screen used to upload 2 KB
                      * and then draw nothing. */
-                    if (x0 + (float)(s1 - s0) * sc < 0.0f ||
+                    if (x0 + (float)(s1 - s0) * scx < 0.0f ||
                         x0 > (float)SCREEN_W ||
-                        y0 + (float)(t1 - t0) * sc < 0.0f ||
+                        y0 + (float)(t1 - t0) * scy < 0.0f ||
                         y0 > (float)SCREEN_H) continue;
 
                     if (!bound) {
@@ -253,7 +285,7 @@ void r_sprite_flush(void)
                         bound = true;
                     }
 
-                    draw_tile(j, s0, t0, s1, t1, sc, x0, y0);
+                    draw_tile(j, s0, t0, s1, t1, scx, scy, x0, y0);
                 }
             }
         }
@@ -301,7 +333,10 @@ void r_psprite_draw(void)
         const int tw = w < DT64_TILE_W ? w : DT64_TILE_W;
         const int th = h < DT64_TILE_H ? h : DT64_TILE_H;
 
-        const float ox = (float)px, oy = (float)(py + PSPRITE_YSHIFT);
+        /* Doom's 320-wide frame; scaled to the viewport at emit, exactly as
+         * v_blit does for menu and status-bar art. */
+        const float ox = (float)px;
+        const float oy = (float)(py + PSPRITE_YSHIFT);
 
         for (int t0 = 0; t0 < h; t0 += th) {
             const int t1 = t0 + th > h ? h : t0 + th;
@@ -309,14 +344,16 @@ void r_psprite_draw(void)
                 const int s1 = s0 + tw > w ? w : s0 + tw;
 
                 /* Cull before the upload, not after it. */
-                const float x0 = ox + (float)s0, y0 = oy + (float)t0;
-                const float x1 = ox + (float)s1, y1 = oy + (float)t1;
+                const float x0 = (ox + (float)s0) * UI_XSCALE;
+                const float x1 = (ox + (float)s1) * UI_XSCALE;
+                const float y0 = oy + (float)t0, y1 = oy + (float)t1;
                 if (x1 < 0.0f || x0 > (float)SCREEN_W) continue;
                 if (y1 < 0.0f || y0 > (float)SCREEN_H) continue;
 
                 dt64_upload_tile(TILE0, tex, NULL, s0, t0, s1, t1);
-                rdpq_texture_rectangle(TILE0, x0, y0, x1, y1,
-                                       (float)s0, (float)t0);
+                rdpq_texture_rectangle_scaled(TILE0, x0, y0, x1, y1,
+                                              (float)s0, (float)t0,
+                                              (float)s1, (float)t1);
                 r_tri_spr++;
             }
         }

@@ -94,6 +94,9 @@ void rdpq_triangle(const rdpq_trifmt_t *fmt,
                    const float *v1, const float *v2, const float *v3);
 void rdpq_texture_rectangle(rdpq_tile_t tile, float x0, float y0,
                             float x1, float y1, float s, float t);
+void rdpq_texture_rectangle_scaled(rdpq_tile_t tile, float x0, float y0,
+                                   float x1, float y1,
+                                   float s0, float t0, float s1, float t1);
 
 /* Sprite/flat sources compile against these too. */
 static inline void rdpq_mode_alphacompare(int threshold) { (void)threshold; }

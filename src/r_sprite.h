@@ -12,7 +12,11 @@
 
 void r_sprite_begin(void);
 void r_psprite_draw(void);
-void r_sprite_add(const r_camera_t *cam, const r_thing_t *t, float shade);
+/* sh[] is the three-channel shade (dynamic lights can colour an actor);
+ * fog_ll is the sector light level for the distance falloff, or -1 for a
+ * fullbright frame, which is exempt exactly as vanilla's colormap-0 was. */
+void r_sprite_add(const r_camera_t *cam, const r_thing_t *t,
+                  const float sh[3], int fog_ll);
 void r_sprite_flush(void);
 
 int  r_sprite_count(void);

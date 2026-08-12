@@ -69,7 +69,58 @@ which is the most useful debugging tool here.
 Useful flags: `DEBUG=1` (RDP command validator), `HWSTAT=1` (on-screen frame
 timing and pose), `DEMO=1` (walks a level unattended, for measurement),
 `MENUTEST=n` (drives the menu at boot for capture), `SAVETEST=1` (reports what
-is in each save slot). `Makefile` documents the rest.
+is in each save slot), `WIDE=1` (640x240, see below). `Makefile` documents the
+rest.
+
+## WIDE=1 — 640x240, and the one question it asks
+
+`WIDE=1` doubles the horizontal sampling rate: 640x240, the same 240
+scanlines, no interlace. The N64's 480-line modes are interlaced and flicker
+on a CRT, and vertical is the expensive direction here for a structural
+reason — projected Y is never clipped, only clamped against `RDP_Y_GUARD`, and
+that clamp collapses quad edges. Near walls already project to y = -3360 at
+320 wide; scaling Y as well would double every such value and drive far more
+geometry into a clamp that is a known source of artefacts.
+
+The flag is built to move **one** variable. Geometry, CPU submit cost and TMEM
+uploads are all unchanged — upload count is set by which tiles are on screen,
+not by how many pixels they cover, and LOD selection is deliberately pinned to
+the vertical scale so both modes pick the same mips. `make test WIDE=1`
+confirms it: identical upload and triangle counts to the 320 build, `oob=0`.
+What doubles is fill rate, RDRAM bandwidth, and the framebuffers.
+
+So an A/B of the `f` and `c` figures in the `HWSTAT` line answers exactly one
+question: **is there spare RDP capacity at 320x240?** If `f` barely moves, the
+RDP was idle and the pixels are nearly free. If it tracks the doubled fill,
+the RDP was already the constraint.
+
+**This measurement only works on hardware.** In ares the frame time is
+entirely CPU submit — `f` and `c` come out within ~0.2 ms of each other in
+both modes, so the emulator reports no RDP cost to compare. Use `./demo.sh`
+on an SC64 and compare medians across the same route; ares can confirm the
+mode renders, nothing more.
+
+The UI, weapon and automap are authored in Doom's 320-wide frame and drawn at
+`UI_XSCALE` — a pure horizontal double, since `SCREEN_H` never changes. A
+640x240 pixel is half as wide as it is tall, so the doubled HUD comes out the
+same apparent size and shape as the 320 one.
+
+That costs the UI its COPY mode, for a reason worth recording: **COPY cannot
+magnify.** It moves four texels per clock and steps S once per four-pixel
+*group* — which is exactly why libdragon's RSP fixup multiplies DSDX by 4. At
+1:1 that is four consecutive texels per four pixels and the blit is perfect;
+ask for a 2x destination and the group boundaries quantise the sampling rather
+than doubling each texel, and every one-pixel feature ghosts and gaps. On the
+status bar it turns `BULL 40/200` into a row of split glyphs. So wide mode
+draws the UI in standard mode at one pixel per clock. A few tens of thousands
+of pixels a frame; 320 keeps COPY untouched.
+
+What wide mode does *not* buy is sharper texture. LOD is pinned, so the extra
+columns give cleaner geometry edges and nothing else. Unpinning it (`focal_y`
+-> `focal_x` in `r_wall.c`) is physically correct at 640 and does sharpen near
+walls, but it holds every surface one mip higher for twice the distance and
+costs TMEM uploads — the resource the whole renderer is built to conserve.
+Measure the cheap version first.
 
 ## Installing on a flashcart
 
@@ -176,11 +227,13 @@ Both games are playable end to end on hardware: menus, attract demos, level
 flow, intermissions, finales, saves, automap, and the screen melt between
 states.
 
-- **The Expansion Pak is required.** The heaviest maps reach a ~1.3 MB texture
-  working set, and fitting that into 4 MB alongside the zone heap and three
-  framebuffers would force mid-level eviction — PI DMA during play, on a bus
-  that manages about 5 MB/s. The build checks at boot and halts with an
-  explanation.
+- **The Expansion Pak is required.** The heaviest maps reach a ~1.7 MB texture
+  working set (E2M2, measured in play — the load-time figure of 1.3 MB this
+  used to quote was taken before the level's textures and its demand-loaded
+  sprite frames had arrived, and understated the peak by a quarter). Fitting
+  that into 4 MB alongside the zone heap and three framebuffers would force
+  mid-level eviction — PI DMA during play, on a bus that manages about
+  5 MB/s. The build checks at boot and halts with an explanation.
 - **A savegame carries no record of which IWAD made it.** The two games use
   separate files (`doom_N.sav`, `doom2_N.sav`); loading one into the wrong game
   is undefined.

@@ -7,6 +7,7 @@
  * frame, the same centring every full-screen UI state uses. */
 #include <libdragon.h>
 #include "dt64.h"
+#include "r_wall.h"          /* UI_XSCALE */
 
 #define AM_YSHIFT 20.0f
 #define AM_HALF   0.6f      /* half-width: one-pixel lines with a little body */
@@ -51,10 +52,16 @@ void r_am_line(int x0, int y0, int x1, int y1, int palette_index)
     const float nx = -dy / len * AM_HALF;
     const float ny =  dx / len * AM_HALF;
 
-    const float v0[] = { ax + nx, ay + ny };
-    const float v1[] = { bx + nx, by + ny };
-    const float v2[] = { bx - nx, by - ny };
-    const float v3[] = { ax - nx, ay - ny };
+    /* The quad is built entirely in Doom's 320-wide frame and only its X
+     * coordinates are scaled on the way out. Widening the line in the scaled
+     * space instead would halve its apparent thickness at 640x240, where a
+     * pixel is half as wide: this way the line is the 320 line, stretched,
+     * and looks the same. */
+    const float k = (float)UI_XSCALE;
+    const float v0[] = { (ax + nx) * k, ay + ny };
+    const float v1[] = { (bx + nx) * k, by + ny };
+    const float v2[] = { (bx - nx) * k, by - ny };
+    const float v3[] = { (ax - nx) * k, ay - ny };
     rdpq_triangle(&TRIFMT_AM, v0, v1, v2);
     rdpq_triangle(&TRIFMT_AM, v0, v2, v3);
 }

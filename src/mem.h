@@ -23,13 +23,23 @@
 
 #define MEM_TOTAL_BYTES     (8 * 1024 * 1024)
 
-/* Composed wall textures and flats for the current level. Sized off the
- * worst observed working set (1334 KB) with room for a heavier PWAD. */
+/* Composed wall textures, flats AND sprite frames for the current level.
+ *
+ * The worst observed working set is 1691 KB (E2M2, measured in play rather
+ * than at load -- see below), leaving ~350 KB of headroom for a heavier PWAD.
+ * The 1334 KB this comment used to quote was a load-time reading, taken
+ * before the level's textures and every demand-loaded sprite frame had
+ * arrived; it understated the real peak by a quarter. */
 #define MEM_TEXTURE_ARENA   (2 * 1024 * 1024)
 
-/* Sprite frames referenced by the current level. The full set across the IWAD
- * is 3.4 MB, but any one level needs a small fraction of it. */
-#define MEM_SPRITE_ARENA    (1 * 1024 * 1024)
+/* Reserved for sprite frames, and never used: dt64_load puts every texture,
+ * sprites included, in MEM_ARENA_TEXTURE. Nothing in the tree references
+ * MEM_ARENA_SPRITE, and its high-water mark is 0 across a full demo route.
+ * A megabyte of an 8 MB machine sat here for a split that never happened.
+ *
+ * Zero rather than deleted: the arena id stays valid, so if sprites ever do
+ * get their own lifetime the reservation is one number away. */
+#define MEM_SPRITE_ARENA    0
 
 /* One level's lumps. The largest Ultimate Doom map is 186 KB. */
 #define MEM_LEVEL_ARENA     (256 * 1024)

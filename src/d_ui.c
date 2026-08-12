@@ -67,6 +67,30 @@ void D_UI_Ticker(void)
  * away from the corner. */
 #define UI_SAFE_X 4
 
+/* Pre-attach: run the vendored bar drawer into the capture list, diff it
+ * against the committed frame, and recomposite the offscreen strip when
+ * anything -- including the palette bank -- changed. Runs before the
+ * frame's main attach so the composite's own attach nests cleanly (the
+ * same slot the wipe's blit uses). Bonus over the old flow: the
+ * ST_doPaletteStuff inside ST_Drawer now selects the flash bank BEFORE the
+ * frame binds its TLUT, so flashes land the same frame instead of one
+ * late, and the staging buffer is never mutated behind an in-flight DMA. */
+void D_UI_UpdateBar(void)
+{
+    void V_BarCaptureBegin(void);
+    int V_BarCaptureEnd(void);
+    void V_BarComposite(void);
+    void V_SetYShift(int shift);
+
+    if (gamestate != GS_LEVEL || !gametic) return;
+    V_BarCaptureBegin();
+    V_SetYShift(40);
+    ST_Drawer(false, true);
+    V_SetYShift(0);
+    if (V_BarCaptureEnd())
+        V_BarComposite();
+}
+
 void D_UI_Draw(void)
 {
     void V_SetYShift(int shift);
@@ -85,11 +109,24 @@ void D_UI_Draw(void)
     case GS_LEVEL:
         if (!gametic)
             break;              /* D_Display's guard: no bar before a tic */
-        V_SetYShift(40);
-        ST_Drawer(false, true);
+        /* (bar handled below; composite maintained by D_UI_UpdateBar) */
+        {
+            /* The bar comes from the composited strip when one is valid
+             * (D_UI_UpdateBar rebuilt it pre-attach if anything changed);
+             * the direct path survives as the fallback for allocation
+             * failure or capture overflow. */
+            int V_BarValid(void);
+            void V_BarBlit(void);
+            if (V_BarValid()) {
+                V_BarBlit();
+            } else {
+                V_SetYShift(40);
+                ST_Drawer(false, true);
+                V_SetYShift(0);
+            }
+        }
         /* Messages and the automap's level name hug the left edge, where a
          * television's overscan would clip them. */
-        V_SetYShift(0);
         V_SetXShift(UI_SAFE_X);
         HU_Drawer();
         V_SetXShift(0);
