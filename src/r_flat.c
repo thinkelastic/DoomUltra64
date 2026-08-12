@@ -161,6 +161,12 @@ static int         numjobtex;
 static float cur_glow;
 static float cur_tint[3] = { 1.0f, 1.0f, 1.0f };
 static int   cur_lit;         /* job's light-reach flag; gates the queries */
+/* Unlit AND unglowing -- which is nearly every flat outside a firefight
+ * or a sludge pool. The three-channel shade chain then produces exactly
+ * shade on every channel (zero light adds, zero glow adds, clamps
+ * no-ops since shade <= 1), so one conversion replicated is
+ * bit-identical to three, and ~20 FPU ops per vertex fold away. */
+static int   cur_neutral;
 #endif
 #if R_FOGSCALE
 /* Distance-falloff LUT entry for the job being emitted, same per-job
@@ -282,6 +288,7 @@ void r_flat_flush(const r_camera_t *cam)
             cur_tint[1] = jobs[i].tint[1] * (1.0f / 255.0f);
             cur_tint[2] = jobs[i].tint[2] * (1.0f / 255.0f);
             cur_lit     = jobs[i].lit;
+            cur_neutral = !cur_lit && jobs[i].glow == 0;
 #endif
             draw_one(cam, jobs[i].pts, jobs[i].npts, jobs[i].height,
                      (float)jobs[i].shade_ll * (1.0f / 255.0f));
@@ -711,8 +718,8 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
         FAN_SHADE_DECL(p)                                                   \
         const int16_t xi = (int16_t)rf_floor_i32(sx * 4.0f);                \
         const int16_t yi = (int16_t)rf_floor_i32(sy * 4.0f);                \
-        const int16_t si = (int16_t)((p->wx * tscale - sorg_t) * 32.0f);    \
-        const int16_t ti = (int16_t)((p->wy * tscale - torg_t) * 32.0f);    \
+        const int16_t si = (int16_t)(p->wx * tsc32 - sorg32);               \
+        const int16_t ti = (int16_t)(p->wy * tsc32 - torg32);               \
         float zv = 1.0f - FLAT_Z_NEAR * iw;                                 \
         if (zv < 0.0f) zv = 0.0f;                                           \
         const int16_t zi = (int16_t)(zv * 0x7FFF);                          \
@@ -733,31 +740,44 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
          * term carries the surface's own colour (see the note at the old
          * staging loop's home: tinting the whole vertex would recolour
          * neighbouring concrete and double-tint the sludge). Shade fans out
-         * per channel; alpha is 255 as sv[5]=1.0f always produced. */
+         * per channel; alpha is 255 as sv[5]=1.0f always produced. The
+         * neutral branch is bit-identical to the chain it skips (see
+         * cur_neutral) and is what most vertices take. */
 #define FAN_SHADE_DECL(p)                                                   \
-        float la[3];                                                        \
-        if (cur_lit) r_light_at_rgb((p)->wx, (p)->wy, lz, la);              \
-        else         la[0] = la[1] = la[2] = 0.0f;                          \
+        uint32_t rgba;                                                      \
         FAN_VIS_DECL(p)                                                     \
-        float rr = shade + la[0] + glow_r;                                  \
-        float gg = shade + la[1] + glow_g;                                  \
-        float bb = shade + la[2] + glow_b;                                  \
-        if (rr > 1.0f) rr = 1.0f;                                           \
-        if (gg > 1.0f) gg = 1.0f;                                           \
-        if (bb > 1.0f) bb = 1.0f;                                           \
-        rr *= vis; gg *= vis; bb *= vis;                                    \
-        const uint32_t rgba = ((uint32_t)(rr * 255.0f) << 24) |             \
-                              ((uint32_t)(gg * 255.0f) << 16) |             \
-                              ((uint32_t)(bb * 255.0f) << 8) | 255u;
+        if (cur_neutral) {                                                  \
+            const uint32_t cs = (uint32_t)(shade * vis * 255.0f);           \
+            rgba = (cs << 24) | (cs << 16) | (cs << 8) | 255u;              \
+        } else {                                                            \
+            float la[3];                                                    \
+            if (cur_lit) r_light_at_rgb((p)->wx, (p)->wy, lz, la);          \
+            else         la[0] = la[1] = la[2] = 0.0f;                      \
+            float rr = shade + la[0] + glow_r;                              \
+            float gg = shade + la[1] + glow_g;                              \
+            float bb = shade + la[2] + glow_b;                              \
+            if (rr > 1.0f) rr = 1.0f;                                       \
+            if (gg > 1.0f) gg = 1.0f;                                       \
+            if (bb > 1.0f) bb = 1.0f;                                       \
+            rr *= vis; gg *= vis; bb *= vis;                                \
+            rgba = ((uint32_t)(rr * 255.0f) << 24) |                        \
+                   ((uint32_t)(gg * 255.0f) << 16) |                        \
+                   ((uint32_t)(bb * 255.0f) << 8) | 255u;                   \
+        }
 #else
 #define FAN_SHADE_DECL(p)                                                   \
         FAN_VIS_DECL(p)                                                     \
         const uint32_t cs = (uint32_t)(shade * vis * 255.0f);               \
         const uint32_t rgba = (cs << 24) | (cs << 16) | (cs << 8) | 255u;
 #endif
-        /* The texel origins are loop constants; s/t stay well inside the
-         * int16 texel range by the sorg/torg rebase. */
-        const float sorg_t = sorg, torg_t = torg;
+        /* The texel origins are loop constants, carried pre-scaled into
+         * s10.5: (wx*tscale - sorg)*32 == wx*(tscale*32) - sorg*32
+         * bit-exactly, because every factor is a power of two -- scaling
+         * commutes with the one rounding (the subtract) -- and it saves
+         * two multiplies per vertex. s/t stay well inside the int16 texel
+         * range by the sorg/torg rebase. */
+        const float tsc32  = tscale * 32.0f;
+        const float sorg32 = sorg * 32.0f, torg32 = torg * 32.0f;
 
         if (!r_tri_group_reg) {
             /* Group-leading fan: expand only the three vertices
