@@ -19,6 +19,7 @@
 #include "r_flat.h"
 #include "r_sky.h"
 #include "r_sprite.h"
+#include "r_vapor.h"
 #include "wad.h"
 #include "r_wall.h"
 #include "r_wipe.h"
@@ -219,6 +220,7 @@ static void scene_init(void)
 #endif
 
         D_InitPicTables(1024);
+        r_vapor_init();
 
         /* Menus, status bar and messages BEFORE the first level load: Doom's
          * own P_SpawnPlayer calls ST_Start and HU_Start for the console
@@ -816,6 +818,7 @@ int main(void)
 
         r_flat_begin();
         r_sprite_begin();
+        r_vapor_begin();
         r_setup_walls();
         r_sky_span_reset();
 #if D_DYNLIGHT
@@ -884,7 +887,12 @@ int main(void)
         /* Backdrop last, depth-tested: it fills only the pixels the world
          * left untouched, and only in the columns the walk saw sky. */
         { int D_InLevel(void); int D_AutomapActive(void);
-          if (level_loaded && D_InLevel() && !D_AutomapActive()) r_sky_draw(&cam); }
+          if (level_loaded && D_InLevel() && !D_AutomapActive()) r_sky_draw(&cam);
+          /* Vapor last among the world passes: translucency needs every
+           * opaque pixel behind it -- walls, flats, sprites, sky --
+           * already resolved, and its z-probe does the hiding. */
+          if (level_loaded && D_InLevel() && !D_AutomapActive())
+              r_vapor_flush(&cam); }
 
         /* The automap replaces the view: filled-triangle line quads in their
          * own mode block, before the COPY-mode UI bracket below. */

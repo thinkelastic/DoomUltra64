@@ -19,6 +19,17 @@
 #define D_DYNLIGHT 0
 #endif
 
+/* Which liquid family a glowing flat belongs to -- the vapor layer picks
+ * its look from this (green haze over sludge, smoke over lava). */
+enum {
+    D_GLOW_NONE = 0,
+    D_GLOW_NUKAGE,
+    D_GLOW_LAVA,
+    D_GLOW_SLIME,
+    D_GLOW_BLOOD,
+    D_GLOW_WATER,
+};
+
 #if D_DYNLIGHT
 
 #define D_GLOW_MAX 8
@@ -27,6 +38,7 @@ extern int16_t d_glow_pic[D_GLOW_MAX];
 extern float   d_glow_amt[D_GLOW_MAX];
 extern float   d_glow_rgb[D_GLOW_MAX][3];   /* light colour, from the art */
 extern uint8_t d_glow_have_rgb[D_GLOW_MAX];
+extern uint8_t d_glow_class[D_GLOW_MAX];
 extern int     d_num_glow;
 
 /* Lazily bakes d_glow_rgb[slot] from the flat's texels; d_bridge.c. */
@@ -39,6 +51,14 @@ static inline float D_FlatGlow(int picnum)
     for (int i = 0; i < d_num_glow; i++)
         if (d_glow_pic[i] == (int16_t)picnum) return d_glow_amt[i];
     return 0.0f;
+}
+
+/* Liquid family of this flat; D_GLOW_NONE for anything not emissive. */
+static inline int D_FlatGlowClass(int picnum)
+{
+    for (int i = 0; i < d_num_glow; i++)
+        if (d_glow_pic[i] == (int16_t)picnum) return d_glow_class[i];
+    return D_GLOW_NONE;
 }
 
 /* Colour of the light this flat casts. White for anything not emissive, so a
@@ -59,6 +79,7 @@ static inline void D_FlatGlowRGB(int picnum, float rgb[3])
 #else
 
 static inline float D_FlatGlow(int picnum) { (void)picnum; return 0.0f; }
+static inline int   D_FlatGlowClass(int picnum) { (void)picnum; return D_GLOW_NONE; }
 static inline void  D_FlatGlowRGB(int picnum, float rgb[3])
 { (void)picnum; rgb[0] = rgb[1] = rgb[2] = 1.0f; }
 

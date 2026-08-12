@@ -292,6 +292,12 @@ N64_CFLAGS += -DR_FUSESPLIT=$(FUSESPLIT)
 FASTNARROW ?= 0
 N64_CFLAGS += -DR_FASTNARROW=$(FASTNARROW)
 
+# VAPOR=0 removes the liquid-vapor pass: the translucent noise layer that
+# puts a green haze over nukage and slime and a smoke pall over lava. One
+# z-tested fan per visible pool, drawn after all opaque passes.
+VAPOR ?= 1
+N64_CFLAGS += -DR_VAPOR=$(VAPOR)
+
 # ZCHECK=1 proves the z-only node refresh reproduces the full pass exactly:
 # it runs both on every refresh and asserts every field of every node matches.
 # Costs far more than the work it is checking -- for validation only.
@@ -393,6 +399,9 @@ src += src/posehash.c
 endif
 ifeq ($(DYNLIGHT),1)
 src += src/r_light.c
+endif
+ifeq ($(VAPOR),1)
+src += src/r_vapor.c
 endif
 
 # floorf/ceilf as instructions instead of libm calls, for the WHOLE link.

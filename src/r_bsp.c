@@ -42,6 +42,7 @@ angle_t     R_PointToAngle2(fixed_t x1, fixed_t y1, fixed_t x2, fixed_t y2);
 #include "r_pvs.h"
 #include "r_sky.h"
 #include "r_sprite.h"
+#include "r_vapor.h"
 #include "r_wall.h"
 
 /* Doom fixed-point to float. Map units are the same units the camera uses, so
@@ -760,7 +761,7 @@ static void render_flats_inner(const subsector_t *ss)
     const float fglow = 0.0f;
     static const float ftint[3] = { 1.0f, 1.0f, 1.0f };
 #endif
-    if (cur_cam->z > fh)
+    if (cur_cam->z > fh) {
         r_flat_add(pts, rg->numpts, fh, light, p_level_texture(sec->floorpic),
                    fglow, ftint,
                    /* Sphere-vs-box reach test per surface: a rejected light
@@ -768,6 +769,12 @@ static void render_flats_inner(const subsector_t *ss)
                     * its per-vertex queries with identical output. */
                    r_light_reaches_box((float)rg->bx0, (float)rg->by0,
                                        (float)rg->bx1, (float)rg->by1, fh));
+        /* Glowing liquids grow their vapor layer: haze over the sludge,
+         * smoke over the lava. Same polygon, a few units up, translucent. */
+        if (fglow > 0.0f)
+            r_vapor_add(pts, rg->numpts, fh,
+                        D_FlatGlowClass(sec->floorpic), light);
+    }
     /* A sky ceiling is an absence, not a surface. Doom marks it by the flat
      * itself rather than a flag: F_SKY1 resolves to skyflatnum at load. */
     if (cur_cam->z < ch && sec->ceilingpic != skyflatnum) {

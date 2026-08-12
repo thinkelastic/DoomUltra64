@@ -103,6 +103,7 @@ int16_t d_glow_pic[D_GLOW_MAX];
 float   d_glow_amt[D_GLOW_MAX];
 float   d_glow_rgb[D_GLOW_MAX][3];      /* light colour, from the art */
 uint8_t d_glow_have_rgb[D_GLOW_MAX];
+uint8_t d_glow_class[D_GLOW_MAX];
 int     d_num_glow;
 #define glow_pic      d_glow_pic
 #define glow_amt      d_glow_amt
@@ -160,15 +161,16 @@ void D_FlatGlowReset(void)
 }
 
 
-static float glow_for_name(const char *n)
+static float glow_for_name(const char *n, uint8_t *cls)
 {
     /* Prefix matches: the WAD numbers the animation frames (NUKAGE1..3,
      * LAVA1..4), and every frame of one animation glows the same. */
-    if (!strncasecmp(n, "NUKAGE", 6)) return 0.55f;   /* the green sludge */
-    if (!strncasecmp(n, "LAVA",   4)) return 0.70f;
-    if (!strncasecmp(n, "SLIME",  5)) return 0.45f;
-    if (!strncasecmp(n, "BLOOD",  5)) return 0.30f;
-    if (!strncasecmp(n, "FWATER", 6)) return 0.25f;
+    if (!strncasecmp(n, "NUKAGE", 6)) { *cls = D_GLOW_NUKAGE; return 0.55f; }
+    if (!strncasecmp(n, "LAVA",   4)) { *cls = D_GLOW_LAVA;   return 0.70f; }
+    if (!strncasecmp(n, "SLIME",  5)) { *cls = D_GLOW_SLIME;  return 0.45f; }
+    if (!strncasecmp(n, "BLOOD",  5)) { *cls = D_GLOW_BLOOD;  return 0.30f; }
+    if (!strncasecmp(n, "FWATER", 6)) { *cls = D_GLOW_WATER;  return 0.25f; }
+    *cls = D_GLOW_NONE;
     return 0.0f;
 }
 #endif /* D_DYNLIGHT */
@@ -181,14 +183,16 @@ int R_FlatNumForName(const char *name)
     const int idx = p_level_resolve(name, "f_");
 
 #if D_DYNLIGHT
-    const float g = glow_for_name(name);
+    uint8_t cls;
+    const float g = glow_for_name(name, &cls);
     if (g > 0.0f && idx >= 0 && num_glow < GLOW_MAX) {
         bool seen = false;
         for (int i = 0; i < num_glow; i++)
             if (glow_pic[i] == (int16_t)idx) { seen = true; break; }
         if (!seen) {
-            glow_pic[num_glow] = (int16_t)idx;
-            glow_amt[num_glow] = g;
+            glow_pic[num_glow]     = (int16_t)idx;
+            glow_amt[num_glow]     = g;
+            d_glow_class[num_glow] = cls;
             num_glow++;
         }
     }
