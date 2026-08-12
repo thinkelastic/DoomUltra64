@@ -227,9 +227,16 @@ void r_vapor_flush(const r_camera_t *cam)
          * the pattern churns in place instead of running like a conveyor,
          * which is what makes the movement legible at a glance -- and a
          * breathing opacity, phased per pool so neighbouring hazes never
-         * pulse in step. fm_sinf is libdragon's ~50-tick sine. */
+         * pulse in step. fm_sinf is libdragon's ~50-tick sine.
+         *
+         * The phase seed is the pool's own world position, NOT its heap
+         * address: zone addresses move whenever code size changes, so a
+         * pointer-seeded phase made the haze differ between two builds of
+         * the same scene -- poison for A/B pixel comparison. Vertex
+         * coordinates come from the WAD and cannot vary per build. */
         const float t = (float)leveltime;
-        const float phase = (float)((((uintptr_t)j->pts) >> 4) & 7) * 0.8f;
+        const float phase =
+            (float)(((int)j->pts[0].x + (int)j->pts[0].y) & 7) * 0.8f;
         const float du = t * st->drift_u
                        + 0.16f * fm_sinf(t * 0.021f + phase);
         const float dv = t * st->drift_v

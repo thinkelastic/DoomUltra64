@@ -69,6 +69,11 @@ trap 'rm -rf "$WORK"' EXIT
 run_side() {
     local name="$1"; shift
     echo "==> building $name: $COMMON $*"
+    # make keys objects on source timestamps, not on -D flags, so without
+    # this the B side would relink A's objects unchanged and the diff would
+    # compare A against itself -- a guaranteed false PASS, in exactly the
+    # direction this script exists to rule out.
+    rm -rf build/src
     if ! ./build.sh $COMMON "$@" > "$WORK/$name.build" 2>&1; then
         echo "!! $name failed to build" >&2
         tail -20 "$WORK/$name.build" >&2
