@@ -470,22 +470,46 @@ void P_MobjThinker (mobj_t* mobj)
     }
 
 #if D_SMOKETRAIL
-    // Rocket exhaust: the same MT_SMOKE the revenant's tracer leaves
-    // (A_Tracer above spawns it the identical way), every other tic, one
-    // tic behind the shell. Decoration must be invisible to demo sync,
-    // so the animation jitter comes from M_Random -- the P_Random
-    // sequence the recorded demos replay against is never consulted.
+    // Smoke trails: the same MT_SMOKE the revenant's tracer leaves
+    // (A_Tracer spawns it the identical way), one tic behind the shell.
+    // Rockets puff every other tic; the fireballs fly at roughly half a
+    // rocket's speed, so every fourth tic gives them the same ~40-unit
+    // spacing, and their smoke rises at half rate -- residue, not
+    // exhaust. Decoration must be invisible to demo sync AND to
+    // build-vs-build pixel comparison, so the animation jitter is
+    // hashed from simulation state: neither the P_Random sequence the
+    // recorded demos replay against nor M_Random (whose consumption
+    // count is not tic-deterministic) is consulted.
     // P_ExplodeMissile clears MF_MISSILE, which ends the trail.
-    if (mobj->type == MT_ROCKET && (mobj->flags & MF_MISSILE)
-        && (leveltime & 1))
+    if (mobj->flags & MF_MISSILE)
     {
-        mobj_t *smoke = P_SpawnMobj (mobj->x - mobj->momx,
-                                     mobj->y - mobj->momy,
-                                     mobj->z, MT_SMOKE);
-        smoke->momz = FRACUNIT;
-        smoke->tics -= M_Random()&3;
-        if (smoke->tics < 1)
-            smoke->tics = 1;
+	int every;
+
+	switch (mobj->type)
+	{
+	  case MT_ROCKET:
+	    every = 2;
+	    break;
+	  case MT_TROOPSHOT:
+	  case MT_HEADSHOT:
+	  case MT_BRUISERSHOT:
+	    every = 4;
+	    break;
+	  default:
+	    every = 0;
+	    break;
+	}
+	if (every && !(leveltime & (every - 1)))
+	{
+	    mobj_t *smoke = P_SpawnMobj (mobj->x - mobj->momx,
+					 mobj->y - mobj->momy,
+					 mobj->z, MT_SMOKE);
+	    smoke->momz = mobj->type == MT_ROCKET ? FRACUNIT : FRACUNIT/2;
+	    smoke->tics -=
+		(int)((leveltime ^ (mobj->x >> 16) ^ (mobj->y >> 16)) & 3);
+	    if (smoke->tics < 1)
+		smoke->tics = 1;
+	}
     }
 #endif
 

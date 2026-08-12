@@ -300,10 +300,12 @@ N64_CFLAGS += -DR_FASTNARROW=$(FASTNARROW)
 VAPOR ?= 1
 N64_CFLAGS += -DR_VAPOR=$(VAPOR)
 
-# SMOKETRAIL=1 gives every rocket a smoke exhaust: the same MT_SMOKE puffs
-# the revenant's tracer already leaves, spawned one tic behind the shell on
-# every other tic. Game-visible decoration, demo-sync invisible: the spawn
-# consumes no P_Random, so recorded demos (the title attracts) play back
+# SMOKETRAIL=1 gives rockets and the monsters' fireballs a smoke trail: the
+# same MT_SMOKE puffs the revenant's tracer already leaves, spawned one tic
+# behind the shell -- every other tic for rockets, every fourth for the
+# slower fireballs (the same ~40-unit spacing). Game-visible decoration,
+# sync-invisible by construction: the spawn consumes no random stream at
+# all (jitter is hashed from simulation state), so recorded demos play back
 # unchanged -- proven route-identical with abdiff over the walker route.
 SMOKETRAIL ?= 1
 N64_CFLAGS += -DD_SMOKETRAIL=$(SMOKETRAIL)
