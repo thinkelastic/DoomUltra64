@@ -501,9 +501,20 @@ void P_MobjThinker (mobj_t* mobj)
 	}
 	if (every && !(leveltime & (every - 1)))
 	{
+	    // P_SpawnMobj itself draws one P_Random (lastlook, line ~605)
+	    // -- the hidden consumption that desynced every recorded demo
+	    // the moment a projectile smoked mid-attract: each puff shifted
+	    // the sequence the demo inputs were recorded against, and every
+	    // monster decision after it went off-script. Decoration must
+	    // leave the sequence exactly as it found it, so the index is
+	    // saved and restored around the spawn; lastlook is meaningless
+	    // on a thing that never runs A_Look.
+	    extern int prndindex;
+	    const int saved_prnd = prndindex;
 	    mobj_t *smoke = P_SpawnMobj (mobj->x - mobj->momx,
 					 mobj->y - mobj->momy,
 					 mobj->z, MT_SMOKE);
+	    prndindex = saved_prnd;
 	    smoke->momz = mobj->type == MT_ROCKET ? FRACUNIT : FRACUNIT/2;
 	    smoke->tics -=
 		(int)((leveltime ^ (mobj->x >> 16) ^ (mobj->y >> 16)) & 3);
