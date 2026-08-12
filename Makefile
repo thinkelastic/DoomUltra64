@@ -310,6 +310,30 @@ N64_CFLAGS += -DR_VAPOR=$(VAPOR)
 SMOKETRAIL ?= 1
 N64_CFLAGS += -DD_SMOKETRAIL=$(SMOKETRAIL)
 
+# REFLECT=1 draws mirror images of things standing over glowing liquid --
+# a monster wading through nukage reflects in it, dimmed and tinted the
+# pool's own hue. The image is masked to pool pixels by the z-buffer alone
+# (each vertex carries the depth at which its view ray crosses the water
+# plane; anything nearer already in the buffer wins), so the cost is one
+# blended quad per nearby thing and zero clipping math. The RDP-side fill
+# is affordable per the Aug 12 hardware session: rdp_busy tops out at 60%.
+# Capture gates predate this flag -- pin REFLECT=0 when comparing against
+# ref3 captures.
+REFLECT ?= 1
+N64_CFLAGS += -DR_REFLECT=$(REFLECT)
+
+# CI4FLATS=1 ships every flat whose 4096 indices share one high nibble as
+# full-resolution 64x64 CI4 (59 of the IWAD's 107, losslessly) instead of
+# the 32x32 CI8 downsample: 2048 bytes is exactly the TMEM budget beside
+# the TLUT, and the RDP's CI4 palette field selects the matching 16-entry
+# bank of the resident PLAYPAL -- no new palette machinery, flash-correct
+# by construction. Costs RDP fill only (uploads double in bytes), which
+# the Aug 12 session priced as affordable. The flag reaches wad2n64
+# through the assets rule; fold refs predate it, so pin CI4FLATS=0 when
+# comparing against ref3 captures.
+CI4FLATS ?= 1
+N64_CFLAGS += -DD_CI4FLATS=$(CI4FLATS)
+
 # ZCHECK=1 proves the z-only node refresh reproduces the full pass exactly:
 # it runs both on every refresh and asserts every field of every node matches.
 # Costs far more than the work it is checking -- for validation only.
@@ -539,10 +563,13 @@ $(BUILD_DIR)/mkpvs: tools/mkpvs.c
 	@echo "    [HOST ] $@"
 	@$(HOST_CC) -O2 -Wall -Wextra -o $@ $< -lm
 
-$(BUILD_DIR)/.assets.stamp: $(BUILD_DIR)/wad2n64 $(BUILD_DIR)/mkpvs $(WAD)
+# .flags is a prerequisite so that flipping CI4FLATS (part of FLAGSIG via
+# N64_CFLAGS) re-runs the converter -- without it a CI4FLATS=0 build would
+# silently keep the previous build's CI4 flats and the lever would lie.
+$(BUILD_DIR)/.assets.stamp: $(BUILD_DIR)/wad2n64 $(BUILD_DIR)/mkpvs $(WAD) $(BUILD_DIR)/.flags
 	@mkdir -p $(FS) $(BUILD_DIR)
 	@echo "    [WAD  ] $(WAD)"
-	@$(BUILD_DIR)/wad2n64 $(WAD) $(FS) --all
+	@$(BUILD_DIR)/wad2n64 $(WAD) $(FS) --all $(if $(filter 0,$(CI4FLATS)),--no-ci4)
 	@if [ "$(PVS)" != "0" ]; then $(BUILD_DIR)/mkpvs $(WAD) $(FS); fi
 	@echo "    [SFX  ] converting effects to wav64"
 	@$(N64_INST)/bin/audioconv64 --wav-mono -o $(FS) $(FS)/*.wav

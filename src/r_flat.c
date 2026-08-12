@@ -245,9 +245,24 @@ static void bind_flat(dt64_tex_t *tex)
     rdpq_texparms_t p = {0};
     p.s.repeats = REPEAT_INFINITE;
     p.t.repeats = REPEAT_INFINITE;
+    /* CI4 flats select their 16-entry bank of the resident 256-entry TLUT;
+     * ignored for CI8, where palbank is zero. */
+    p.palette = tex->palbank;
     rdpq_tex_upload(TILE0, &tex->surface, &p);
     stat_uploads++;
 }
+
+/* Texel density of the texture bound now. One flat always covers 64 world
+ * units square, so texels-per-unit is width/64 -- exactly the legacy 0.5
+ * for a 32x32 CI8 downsample (bit-identical to the old constant), 1.0 for
+ * a full-resolution CI4 flat -- and the wrap period in texels is just the
+ * width. Set per texture bucket in the flush. */
+static float cur_tscale = 1.0f / FLAT_UNITS_PER_TEXEL;
+static float cur_period = FLAT_PERIOD;
+/* Reciprocal alongside, so the rebase keeps its multiply: both widths are
+ * powers of two, so x * (1/w) is bit-identical to x / w -- exactly the
+ * strength reduction the compiler did when the period was a constant. */
+static float cur_inv_period = 1.0f / FLAT_PERIOD;
 
 static void draw_one(const r_camera_t *cam, const r_polypt_t *pts, int npts,
                      float height, float shade);
@@ -274,6 +289,9 @@ void r_flat_flush(const r_camera_t *cam)
         const uint32_t t_ = TICKS_READ();
 #endif
         bind_flat(jobtex[t]);
+        cur_tscale = (float)jobtex[t]->width * (1.0f / 64.0f);
+        cur_period = (float)jobtex[t]->width;
+        cur_inv_period = 1.0f / cur_period;
         r_tri_group_begin();               /* TMEM changed: re-register */
 #if D_HWSTAT
         stat_bind_us += TICKS_TO_US(TICKS_SINCE(t_));
@@ -451,13 +469,13 @@ static void draw_one(const r_camera_t *cam, const r_polypt_t *pts, int npts,
      * the polygon's own size. */
     float smin = 1e9f, tmin = 1e9f;
     for (int i = 0; i < m; i++) {
-        const float sx = src[i].wx * (1.0f / FLAT_UNITS_PER_TEXEL);
-        const float ty = src[i].wy * (1.0f / FLAT_UNITS_PER_TEXEL);
+        const float sx = src[i].wx * cur_tscale;
+        const float ty = src[i].wy * cur_tscale;
         if (sx < smin) smin = sx;
         if (ty < tmin) tmin = ty;
     }
-    const float sorg = rf_floorf(smin / FLAT_PERIOD) * FLAT_PERIOD;
-    const float torg = rf_floorf(tmin / FLAT_PERIOD) * FLAT_PERIOD;
+    const float sorg = rf_floorf(smin * cur_inv_period) * cur_period;
+    const float torg = rf_floorf(tmin * cur_inv_period) * cur_period;
 
     /* --- depth banding --------------------------------------------------
      * Split the polygon into bands of bounded depth ratio before projecting,
@@ -685,7 +703,7 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
      * twice each time. */
     const float focal_x = cam->focal_x;
     const float dzf     = dz * cam->focal_y;
-    const float tscale = 1.0f / FLAT_UNITS_PER_TEXEL;
+    const float tscale = cur_tscale;
 #if D_DYNLIGHT
     /* Loop-invariant pieces of the lit path, hoisted by hand: the glow
      * products and the query height do not vary per vertex, and spelling

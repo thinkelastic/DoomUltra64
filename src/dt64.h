@@ -36,6 +36,10 @@ typedef struct dt64_tex_s {
     surface_t  surface;      /* wraps texels for rdpq_tex_upload_sub */
     uint8_t    tiles_x;      /* width  in TMEM tiles */
     uint8_t    tiles_y;      /* height in TMEM tiles */
+    /* CI4 flats only: which 16-entry bank of the resident 256-entry TLUT
+     * the low nibbles index (the texel's original high nibble). Zero for
+     * CI8, where the palette field is ignored. */
+    uint8_t    palbank;
 
     /* Half-resolution level, or NULL. Selected when a surface is minified:
      * a 128x128 texture costs eight TMEM tiles and eight quads, its mip two. */

@@ -173,8 +173,11 @@ bool dt64_load(dt64_tex_t *tex, const char *path)
 
     if (size < DT64_HEADER_SIZE || memcmp(raw, "DT64", 4) != 0) return false;
 
+    /* Version 3 is CI8; version 4 is a CI4 payload -- two texels per byte,
+     * palette bank in flags bits 8..11. Only flats ship as 4. */
     uint16_t version = (uint16_t)((raw[4] << 8) | raw[5]);
-    if (version != 3) return false;
+    if (version != 3 && version != 4) return false;
+    const int ci4 = version == 4;
 
     tex->width  = (uint16_t)((raw[6]  << 8) | raw[7]);
     tex->height = (uint16_t)((raw[8]  << 8) | raw[9]);
@@ -182,7 +185,9 @@ bool dt64_load(dt64_tex_t *tex, const char *path)
     tex->leftoffset = (int16_t)((raw[12] << 8) | raw[13]);
     tex->topoffset  = (int16_t)((raw[14] << 8) | raw[15]);
 
-    if ((int)(DT64_HEADER_SIZE + tex->width * tex->height) > size) return false;
+    const int payload = ci4 ? (tex->width * tex->height) / 2
+                            :  tex->width * tex->height;
+    if ((int)(DT64_HEADER_SIZE + payload) > size) return false;
 
     /* Point at the texel payload in place -- no second copy of a 16 KB
      * texture. The 16-byte header keeps this pointer 16-aligned, which matters
@@ -191,9 +196,12 @@ bool dt64_load(dt64_tex_t *tex, const char *path)
     tex->texels = raw + DT64_HEADER_SIZE;
     assertf(((uintptr_t)tex->texels & 7) == 0,
             "texels for '%s' are misaligned (%p)", path, tex->texels);
-    tex->surface = surface_make_linear(tex->texels, FMT_CI8, tex->width, tex->height);
-    tex->tiles_x = (uint8_t)((tex->width  + DT64_TILE_W - 1) / DT64_TILE_W);
-    tex->tiles_y = (uint8_t)((tex->height + DT64_TILE_H - 1) / DT64_TILE_H);
+    tex->palbank = ci4 ? (uint8_t)((tex->flags >> 8) & 15) : 0;
+    tex->surface = surface_make_linear(tex->texels, ci4 ? FMT_CI4 : FMT_CI8,
+                                       tex->width, tex->height);
+    /* A CI4 flat is one 2 KB upload, wrapped whole like the CI8 flats. */
+    tex->tiles_x = ci4 ? 1 : (uint8_t)((tex->width  + DT64_TILE_W - 1) / DT64_TILE_W);
+    tex->tiles_y = ci4 ? 1 : (uint8_t)((tex->height + DT64_TILE_H - 1) / DT64_TILE_H);
     tex->mip = NULL;
     return true;
 }

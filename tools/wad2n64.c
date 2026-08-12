@@ -522,25 +522,46 @@ static void emit_all_textures(wad_t *w, const char *outdir) {
     printf("  [TEX  ] %d wall textures composed into %s/\n", total, outdir);
 }
 
-/* Emit every flat between F_START and F_END, downsampled to 32x32.
+/* Emit every flat between F_START and F_END: full 64x64 CI4 where the art
+ * allows it, 32x32 CI8 downsample where it does not.
  *
- * Doom flats are 64x64 raw palette indices -- 4096 bytes, against the 2048 of
- * TMEM left once a TLUT is resident. Something has to give:
- *
- *   - CI4 at full 64x64 fits exactly, but only 59 of the IWAD's 107 flats use
- *     16 or fewer colours, so half would need quantising. Worse, CI4 indexes
- *     16-entry sub-palettes, which cannot coexist with the 256-entry PLAYPAL
- *     the CI8 wall textures sample through -- it would mean swapping the TLUT
- *     between wall and flat batches.
- *   - 32x32 CI8 is 1024 bytes, keeps the shared palette, needs no quantiser,
- *     and leaves TMEM headroom. The cost is half resolution on surfaces that
- *     are always seen at a shallow angle.
- *
- * The second is the better trade here. Full-resolution flats would need the
- * TLUT-swap machinery, which is a different piece of work.
- *
- * Box-filtering in palette space is meaningless, so the downsample picks one
- * of the four source texels rather than averaging indices. */
+ * Doom flats are 64x64 raw palette indices -- 4096 bytes, against the 2048
+ * of TMEM left once a TLUT is resident. The old note here rejected CI4 on
+ * the belief that its 16-entry sub-palettes could not coexist with the
+ * 256-entry PLAYPAL the walls sample. That was wrong about the hardware:
+ * a CI4 tile's palette field selects a 16-entry BANK of whatever TLUT is
+ * resident -- bank N reads entries N*16..N*16+15 of the same 256-entry
+ * table. So a flat whose every index shares one high nibble is CI4 with
+ * bank = that nibble and texel = the low one: no new palette uploads, no
+ * TLUT swap, and the runtime flash palettes recolour it for free. 59 of
+ * the IWAD's 107 flats qualify losslessly (index runs in PLAYPAL are
+ * 16-aligned by its construction); the rest keep the downsample:
+ * box-filtering in palette space is meaningless, so it picks one of the
+ * four source texels rather than averaging indices. */
+static int g_no_ci4;
+
+/* Packed two texels per byte, left texel in the high nibble -- the RDP's
+ * CI4 order. 2048 bytes: exactly the TMEM budget beside the TLUT, one
+ * upload, wraps whole like the CI8 flats do. */
+static void emit_flat_ci4(const char *outdir, const char *name,
+                          const uint8_t *src, int bank) {
+    char path[1024];
+    snprintf(path, sizeof path, "%s/%s.dt64", outdir, name);
+    FILE *f = fopen(path, "wb");
+    if (!f) die("cannot write '%s'", path);
+
+    fwrite("DT64", 1, 4, f);
+    wr16be(f, 4);                              /* version 4: CI4 payload */
+    wr16be(f, 64);
+    wr16be(f, 64);
+    wr16be(f, (uint16_t)(4u | ((unsigned)bank << 8)));  /* bit2 CI4; bank */
+    wr16be(f, 0);
+    wr16be(f, 0);
+    for (int i = 0; i < 4096; i += 2)
+        fputc(((src[i] & 15) << 4) | (src[i + 1] & 15), f);
+    fclose(f);
+}
+
 static void emit_all_flats(wad_t *w, const char *outdir) {
     int start = -1, end = -1;
     for (int32_t i = 0; i < w->numlumps; i++) {
@@ -553,16 +574,13 @@ static void emit_all_flats(wad_t *w, const char *outdir) {
     }
 
     uint8_t small[32 * 32];
-    int total = 0;
+    int total = 0, ci4 = 0;
     for (int32_t i = start + 1; i < end; i++) {
         if (w->dir[i].size != 4096) continue;          /* markers, oddities */
 
         order_add(w->dir[i].name);
 
         const uint8_t *src = w->data + w->dir[i].filepos;
-        for (int y = 0; y < 32; y++)
-            for (int x = 0; x < 32; x++)
-                small[y * 32 + x] = src[(y * 2) * 64 + (x * 2)];
 
         char name[9] = {0};
         memcpy(name, w->dir[i].name, 8);
@@ -571,10 +589,27 @@ static void emit_all_flats(wad_t *w, const char *outdir) {
          * share a name, so keep them apart in the filesystem. */
         char fname[32];
         snprintf(fname, sizeof fname, "f_%s", name);
+
+        if (!g_no_ci4) {
+            const int bank = src[0] >> 4;
+            int uniform = 1;
+            for (int k = 1; k < 4096; k++)
+                if ((src[k] >> 4) != bank) { uniform = 0; break; }
+            if (uniform) {
+                emit_flat_ci4(outdir, fname, src, bank);
+                ci4++; total++;
+                continue;
+            }
+        }
+
+        for (int y = 0; y < 32; y++)
+            for (int x = 0; x < 32; x++)
+                small[y * 32 + x] = src[(y * 2) * 64 + (x * 2)];
         emit_texture_quiet(outdir, fname, small, 32, 32, 0);
         total++;
     }
-    printf("  [FLAT ] %d flats downsampled to 32x32 CI8 into %s/\n", total, outdir);
+    printf("  [FLAT ] %d flats: %d full-res 64x64 CI4, %d downsampled to "
+           "32x32 CI8 into %s/\n", total, ci4, total - ci4, outdir);
 }
 
 /* Emit every sprite frame between S_START and S_END.
@@ -806,7 +841,10 @@ int main(int argc, char **argv) {
 
     emit_tlut(&wad, outdir);
 
-    if (argc == 4 && strcmp(argv[3], "--all") == 0) {
+    for (int a = 3; a < argc; a++)
+        if (strcmp(argv[a], "--no-ci4") == 0) g_no_ci4 = 1;
+
+    if (argc >= 4 && strcmp(argv[3], "--all") == 0) {
         order_begin(outdir, "flats");
         emit_all_flats(&wad, outdir);
         order_end();
