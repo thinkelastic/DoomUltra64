@@ -890,6 +890,12 @@ int main(void)
 #else
               r_sprite_flush();
 #endif
+#if R_REFLECT
+              /* Mirror images of things over glowing pools: after the
+               * sprites (nearer actors occlude them via z), before sky
+               * and vapor (spill repaint, haze over the mirror). */
+              r_reflect_flush(&cam);
+#endif
           } }
 
         /* Backdrop last, depth-tested: it fills only the pixels the world

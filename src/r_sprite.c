@@ -50,6 +50,26 @@ static sprjob_t jobs[SPR_MAX_JOBS];
 static int      numjobs;
 static int      stat_drawn, stat_uploads, stat_dropped;
 
+#if R_REFLECT
+/* Mirror images of things standing over glowing liquid. Few per frame --
+ * only things whose own sector floor glows -- so no grouping: each job
+ * uploads its own tiles. The image is the sprite reflected about the
+ * horizontal plane z = H, which for a zero-pitch camera is another
+ * billboard: same columns, rows reversed, hanging below the waterline. */
+#define REFL_MAX 16
+typedef struct {
+    dt64_tex_t *tex;
+    float       depth;
+    float       sx;
+    float       scale_x, scale_y;
+    float       w_top;       /* sprite's world top; rows run down from it */
+    float       plane_h;     /* the waterline */
+    float       sr, sg, sb;  /* dimmed, pool-tinted shade */
+} refljob_t;
+static refljob_t refl[REFL_MAX];
+static int       numrefl;
+#endif
+
 static const rdpq_trifmt_t TRIFMT_SPR = {
     .pos_offset   = 0,
     .shade_offset = 2,
@@ -61,6 +81,9 @@ static const rdpq_trifmt_t TRIFMT_SPR = {
 void r_sprite_begin(void)
 {
     numjobs = stat_drawn = stat_uploads = stat_dropped = 0;
+#if R_REFLECT
+    numrefl = 0;
+#endif
 }
 
 int r_sprite_count(void)   { return stat_drawn; }
@@ -359,3 +382,169 @@ void r_psprite_draw(void)
         }
     }
 }
+
+#if R_REFLECT
+/* --- liquid reflections -------------------------------------------------
+ *
+ * Mirror images of things over glowing liquid. For a camera that never
+ * pitches, the reflection of a billboard about the horizontal plane z = H
+ * is another billboard: same columns, rows reversed, hanging below the
+ * waterline. So the whole feature is one more quad per nearby thing, and
+ * the masking costs nothing at all -- see r_reflect_flush.
+ */
+
+/* Queue the mirror image. Culls mirror r_sprite_add's, but against the
+ * image's own extent: a sprite on screen can have its image off screen and
+ * vice versa. */
+void r_reflect_add(const r_camera_t *cam, const r_thing_t *t,
+                   const float sh[3], int fog_ll,
+                   float plane_h, const float pool_rgb[3])
+{
+    if (!t->spr || numrefl >= REFL_MAX) return;
+    if (cam->z <= plane_h + 1.0f) return;   /* eye at the waterline: no image */
+
+    const float dx = t->x - cam->x, dy = t->y - cam->y;
+    const float cs = r_view_cs, sn = r_view_sn;
+    const float depth = dx * cs + dy * sn;
+    if (depth < SPR_NEAR) return;
+
+    const float offs    = dx * sn - dy * cs;
+    const float scale_x = cam->focal_x / depth;
+    const float scale_y = cam->focal_y / depth;
+
+    const dt64_tex_t *tspr = (const dt64_tex_t *)t->spr;
+    const float sx    = SCREEN_W * 0.5f + offs * scale_x;
+    const float halfw = (float)tspr->width * scale_x;
+    if (sx + halfw < 0.0f || sx - halfw > (float)SCREEN_W) return;
+
+    const float w_top  = t->z + (float)tspr->topoffset;
+    const float w_bot  = w_top - (float)tspr->height;
+    const float cy     = SCREEN_H * 0.5f;
+    /* Image extent, mirrored: z' = 2H - z. */
+    const float y_top  = cy - (2.0f * plane_h - w_bot - cam->z) * scale_y;
+    if (y_top > (float)SCREEN_H + 2.0f) return;
+    const float y_bot  = cy - (2.0f * plane_h - w_top - cam->z) * scale_y;
+    if (y_bot < -2.0f) return;
+
+    refljob_t *j = &refl[numrefl++];
+    j->tex     = (dt64_tex_t *)t->spr;   /* no mip: images are dim and short */
+    j->depth   = depth;
+    j->sx      = sx;
+    j->scale_x = scale_x;
+    j->scale_y = scale_y;
+    j->w_top   = w_top;
+    j->plane_h = plane_h;
+
+    /* Fogged like the caster, then dimmed toward the pool's own hue: a
+     * reflection off rippling emissive liquid is darker than what casts it
+     * and picks the liquid's colour up. Fullbright casters (fireballs, a
+     * lost soul) keep their exemption and stay bright in the water. */
+    float k = 1.0f;
+#if R_FOGSCALE
+    if (fog_ll >= 0) k = r_vis(depth, r_fog_inv[fog_ll]);
+#else
+    (void)fog_ll;
+#endif
+    j->sr = sh[0] * k * (0.34f + 0.30f * pool_rgb[0]);
+    j->sg = sh[1] * k * (0.34f + 0.30f * pool_rgb[1]);
+    j->sb = sh[2] * k * (0.34f + 0.30f * pool_rgb[2]);
+}
+
+/* Draw the queued images. Runs after the sprite pass -- nearer actors
+ * occlude images through the z-buffer -- and before sky and vapor: sky
+ * repaints any spill into never-written columns, and the haze drifts over
+ * the mirror, which is exactly where haze belongs.
+ *
+ * The masking trick: each vertex's Z is the depth at which the ray through
+ * it crosses the water plane. On pool pixels that is the pool's own
+ * depth-buffer value (same plane), so a small bias wins; on any pixel where
+ * nearer geometry was drawn -- the pool's banks, walls, things -- the test
+ * fails. The image clips itself to the pool's visible pixels with no
+ * polygon math at all. */
+void r_reflect_flush(const r_camera_t *cam)
+{
+    if (!numrefl) return;
+
+    /* Blended, z-tested, never z-written. Texture alpha rides through the
+     * combiner's alpha channel, so transparent texels leave the memory
+     * pixel alone and solid ones mix at the vertex alpha. Point sampling
+     * for the same cutout-halo reason as the sprite pass. */
+    rdpq_mode_combiner(RDPQ_COMBINER1((TEX0, 0, SHADE, 0), (TEX0, 0, SHADE, 0)));
+    rdpq_mode_blender(RDPQ_BLENDER((IN_RGB, IN_ALPHA, MEMORY_RGB, INV_MUX_ALPHA)));
+    rdpq_mode_alphacompare(0);
+    rdpq_mode_zbuf(true, false);
+    rdpq_mode_filter(FILTER_POINT);
+
+    const float cy = SCREEN_H * 0.5f;
+
+    for (int jn = 0; jn < numrefl; jn++) {
+        const refljob_t *j = &refl[jn];
+        dt64_tex_t *tex = j->tex;
+        const int w  = tex->width, h = tex->height;
+        const int tw = w < DT64_TILE_W ? w : DT64_TILE_W;
+        const int th = h < DT64_TILE_H ? h : DT64_TILE_H;
+
+        const float iw     = 1.0f / j->depth;   /* affine across a billboard */
+        const float x_left = j->sx - (float)tex->leftoffset * j->scale_x;
+        const float eh     = cam->z - j->plane_h;
+
+        for (int t0 = 0; t0 < h; t0 += th) {
+            const int t1 = t0 + th > h ? h : t0 + th;
+
+            /* Texel rows t0..t1 sit at world z [w_top-t1, w_top-t0]; the
+             * mirror sends them to [2H-(w_top-t0), 2H-(w_top-t1)] -- lower
+             * rows nearer the waterline. That reversal is the flip: the
+             * quad below samples t1 at its top edge and t0 at its bottom. */
+            const float zi_lo = 2.0f * j->plane_h - (j->w_top - (float)t0);
+            const float zi_hi = 2.0f * j->plane_h - (j->w_top - (float)t1);
+            const float y_top = cy - (zi_hi - cam->z) * j->scale_y;
+            const float y_bot = cy - (zi_lo - cam->z) * j->scale_y;
+            if (y_bot < 0.0f || y_top > (float)SCREEN_H) continue;
+
+            /* Ray-plane crossing depth per edge. The bias below must beat
+             * not quantisation but the POOL'S OWN approximation: the flat
+             * pass interpolates z linearly across each depth band, sagging
+             * under the true hyperbola by up to ~2^-7 near the camera at
+             * the shipped band ratio -- a 2^-9 bias lost to it and the
+             * mask ate the whole image. 2^-6 dominates the sag; it cannot
+             * leak onto the banks, whose surfaces sit at ~0.4x the
+             * crossing depth on the same pixel rows (an enormous z gap),
+             * leaving only a potential one-pixel seam at the silhouette. */
+            const float dc_hi = j->depth * eh / (cam->z - zi_hi);
+            const float dc_lo = j->depth * eh / (cam->z - zi_lo);
+            float z_hi = 1.0f - R_FLAT_NEAR / dc_hi - (1.0f / 64.0f);
+            float z_lo = 1.0f - R_FLAT_NEAR / dc_lo - (1.0f / 64.0f);
+            if (z_hi < 0.0f) z_hi = 0.0f;
+            if (z_lo < 0.0f) z_lo = 0.0f;
+
+            for (int s0 = 0; s0 < w; s0 += tw) {
+                const int s1 = s0 + tw > w ? w : s0 + tw;
+                const float x0 = x_left + (float)s0 * j->scale_x;
+                const float x1 = x_left + (float)s1 * j->scale_x;
+                if (x1 < 0.0f || x0 > (float)SCREEN_W) continue;
+
+                dt64_upload_tile(TILE0, tex, NULL, s0, t0, s1, t1);
+                stat_uploads++;
+
+                float v[4][10];
+                const float xs[4] = { x0, x1, x1, x0 };
+                const float ys[4] = { y_top, y_top, y_bot, y_bot };
+                const float ss[4] = { (float)s0, (float)s1, (float)s1, (float)s0 };
+                const float ts[4] = { (float)t1, (float)t1, (float)t0, (float)t0 };
+                const float zs[4] = { z_hi, z_hi, z_lo, z_lo };
+                for (int i = 0; i < 4; i++) {
+                    v[i][0] = xs[i]; v[i][1] = ys[i];
+                    v[i][2] = j->sr; v[i][3] = j->sg; v[i][4] = j->sb;
+                    v[i][5] = 0.55f;
+                    v[i][6] = ss[i]; v[i][7] = ts[i];
+                    v[i][8] = iw;
+                    v[i][9] = zs[i];
+                }
+                r_tri_quad(&TRIFMT_SPR, v[0], v[1], v[2], v[3]);
+                r_tri_spr += 2;
+            }
+        }
+    }
+    numrefl = 0;
+}
+#endif /* R_REFLECT */

@@ -893,6 +893,27 @@ R_HOT static void render_subsector(int num)
             }
             r_sprite_add(cur_cam, &t, sh,
                          (mo->frame & FF_FULLBRIGHT) ? -1 : lit_ll);
+
+#if R_REFLECT
+            /* Over a glowing liquid: queue the mirror image. No polygon is
+             * needed -- the flush's z-plane masking clips the image to the
+             * pool's visible pixels -- so this is just the plane height and
+             * the pool's hue. Sector-keyed: a thing on the bank does not
+             * reflect, one wading or flying low over the surface does. */
+            {
+                const float fg = D_FlatGlow(ss->sector->floorpic);
+                if (fg > 0.0f) {
+                    const float ph = fx(ss->sector->floorheight);
+                    if (t.z - ph < 128.0f) {
+                        float prgb[3];
+                        D_FlatGlowRGB(ss->sector->floorpic, prgb);
+                        r_reflect_add(cur_cam, &t, sh,
+                                      (mo->frame & FF_FULLBRIGHT) ? -1 : lit_ll,
+                                      ph, prgb);
+                    }
+                }
+            }
+#endif
         }
     }
 
