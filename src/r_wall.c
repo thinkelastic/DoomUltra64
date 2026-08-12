@@ -671,7 +671,7 @@ void r_draw_wall_clipped(const r_camera_t *cam, const r_wall_t *wall,
     r_draw_wall_win(cam, wall, xmin, xmax, 0.0f, (float)SCREEN_H);
 }
 
-void r_draw_wall_win(const r_camera_t *cam, const r_wall_t *wall,
+R_HOT void r_draw_wall_win(const r_camera_t *cam, const r_wall_t *wall,
                      float xmin, float xmax, float ymin, float ymax)
 {
     cam_focal_y = cam->focal_y;
@@ -804,7 +804,7 @@ static bool wall_col(wctx_t *c, float ca, float cb, float s_a, float s_b,
 
 /* Emit one clipped parameter range of a wall with the mip level its own
  * nearest point selects. */
-static void wall_emit(const r_camera_t *cam, const r_wall_t *wall,
+R_HOT static void wall_emit(const r_camera_t *cam, const r_wall_t *wall,
                       float ua, float ub,
                       float d1, float o1, float d2, float o2,
                       float ymin, float ymax)

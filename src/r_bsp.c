@@ -273,7 +273,7 @@ static void clip_blk_refresh(int x1, int x2)
 }
 
 /* Close columns outright (solid seg: wall plus own flats cover them). */
-static void clip_close(int x1, int x2)
+R_HOT static void clip_close(int x1, int x2)
 {
 #ifdef R_NOCLOSURE
     (void)x1; (void)x2; return;
@@ -381,7 +381,7 @@ static void clip_narrow(int x1, int x2,
 
 /* Loosest open window over an inclusive column range; top >= bot means
  * every column in the range is closed. */
-static void clip_window(int x1, int x2, float *top, float *bot)
+R_HOT static void clip_window(int x1, int x2, float *top, float *bot)
 {
     if (x1 < 0) x1 = 0;
     if (x2 > SCREEN_W - 1) x2 = SCREEN_W - 1;
@@ -432,7 +432,7 @@ static void clip_reset(void)
  * free of consequences now that a depth buffer decides what wins. */
 #define SEAM_BLEED 1.0f
 
-static void emit_range(int x1, int x2)
+R_HOT static void emit_range(int x1, int x2)
 {
     if (x2 < x1) return;
     STAT(in_pass ? stat_em_pass++ : stat_em_solid++);
@@ -455,7 +455,7 @@ static void emit_range(int x1, int x2)
 }
 
 /* Draw the visible parts of [first,last] and mark the range as covered. */
-static void clip_solid(int first, int last)
+R_HOT static void clip_solid(int first, int last)
 {
 #ifdef R_FLATDUMP
     if ((r_flat_stamp & 127) == 0 && r_flat_stamp > 0)
@@ -533,7 +533,7 @@ static void mark_solid(int first, int last)
  * on the other side of every doorway.
  *
  * Transcribed from R_ClipPassWallSegment. */
-static void clip_pass(int first, int last)
+R_HOT static void clip_pass(int first, int last)
 {
     cliprange_t *start = solidsegs;
     STAT(in_pass = 1);
@@ -803,7 +803,7 @@ static void render_flats_inner(const subsector_t *ss)
 int r_ss_emitted;
 #endif
 
-static void render_subsector(int num)
+R_HOT static void render_subsector(int num)
 {
     if (num >= numsubsectors) return;
 #if R_PVS == 2

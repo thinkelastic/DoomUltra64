@@ -245,7 +245,13 @@ void p_level_anim_tick(void)
     }
 }
 
-dt64_tex_t *p_level_texture(int index)
+/* Hot-block member: called ~8x per visited seg from the walk. See the
+ * R_HOT note in r_wall.h; kept as a local define to spare this file the
+ * renderer's headers. */
+#ifndef R_HOT
+#define R_HOT __attribute__((section(".text.hot")))
+#endif
+R_HOT dt64_tex_t *p_level_texture(int index)
 {
     if (index < 0 || index >= lvl_numtex) return NULL;
     index = anim_xlat[index];                 /* animation indirection */

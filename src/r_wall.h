@@ -128,6 +128,16 @@ void r_set_view(const r_camera_t *cam);
  * BSP traversal). Valid after r_set_view until the camera moves. */
 extern float r_view_cs, r_view_sn;
 
+/* Members of the packed hot-code block (repo-local n64.ld places
+ * .text.hot contiguously, first in .text). The per-seg walk's working set
+ * exceeds the 16 KB direct-mapped I-cache, so SOME functions must alias;
+ * this block chooses which by keeping the nine per-seg core functions
+ * mutually conflict-free (~14.4 KB) and its layout deterministic across
+ * relinks. Membership changes must keep the block under 16 KB and be
+ * re-measured on hardware (ph_walk_us) -- every placement change re-rolls
+ * every conflict outside the block. Host builds ignore the section. */
+#define R_HOT __attribute__((section(".text.hot")))
+
 /* Light-diminishing falloff, shared by walls, flats and sprites: fraction
  * of a surface's light that survives to the eye at `depth`. `inv` comes
  * from r_fog_inv[sector light]: with FOGSCALE=1 the far distance scales
