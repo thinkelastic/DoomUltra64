@@ -4,9 +4,10 @@ Doom and Doom II on the Nintendo 64, rendered by the RDP. Built on
 [libdragon](https://github.com/DragonMinded/libdragon) and validated on real
 hardware through an SC64 flashcart.
 
-Doom's game code is vendored under `src/doom` and compiled unmodified. The
-software column and span rasteriser is gone; everything else that touched a PC
-— video, sound, files, saves, input — was replaced.
+Doom's game code is vendored under `src/doom` and compiled nearly untouched —
+the only additions are the marked frame-interpolation snapshots (`old*`
+state). The software column and span rasteriser is gone; everything else that
+touched a PC — video, sound, files, saves, input — was replaced.
 
 ## Why the RDP suits Doom
 
@@ -44,6 +45,31 @@ flat.
 Reordering is only sound where geometry does not overlap in screen space, which
 Doom's solid-segment clipping guarantees for walls. Sprites and masked
 midtextures get their own ordered pass.
+
+## What the port adds
+
+Effects the RDP's per-vertex shade makes nearly free. Each is removable with
+a Makefile flag, and with the stack disabled the renderer is validated
+pixel-identical to its plain output:
+
+- **Colored dynamic lights** (`DYNLIGHT=0`). Muzzle flashes, projectiles and
+  explosions light the walls, floors and things around them with distance
+  falloff, folded into the shade the renderer already computes. Barrels
+  flash on death; rocket impacts flare wider and hotter than their flight
+  glow.
+- **Emissive liquids.** Nukage, lava and blood glow with colour sampled from
+  their own art and spill it up nearby walls at the waterline.
+- **Liquid vapor** (`VAPOR=0`). A translucent noise layer drifts and churns
+  over every glowing pool — green haze hugging nukage and slime, a darker
+  smoke pall over lava.
+- **Light-scaled diminishing** (`FOGSCALE=0`), and sprites that fog with the
+  world. Darkness closes in faster in dark sectors, as vanilla's light
+  ramp intended, and things sit in that falloff instead of floating
+  unfogged in front of it.
+- **Frame interpolation** (`INTERP=0`). The simulation stays 35 Hz; the
+  picture does not. View, things, sector movers, the weapon bob and the
+  vapor all glide at frame rate, and a paused or menu-held world presents
+  its exact current state rather than lerping a frozen pair.
 
 ## Building
 
@@ -214,7 +240,9 @@ emulator tolerates stale inherited depth state that the real RDP does not.
 
 ```
 src/                port layer: renderer, WAD streaming, arenas, platform
-src/doom/           Doom's own game code, compiled unmodified
+src/doom/           Doom's own game code, plus marked interpolation snapshots
+n64.ld              repo-local link script; packs the per-seg render core
+                    into one contiguous I-cache window (see r_wall.h)
 tools/wad2n64.c     WAD -> CI8 + shared TLUT, at build time
 tools/mkmuswad.py   music -> one WAD with the directory at the front
 tools/mkpvs.c       precomputed visibility baker (off by default)
@@ -240,12 +268,18 @@ states.
 - **Precomputed visibility is off.** Sampled sets need widening to stay
   conservative, and widening them enough took E1M1 to 63% of the map visible on
   average — at which point it rejects little that the frustum and solid-segment
-  clipping did not already reject. A set that is conservative by construction
-  (2D anti-penumbra portal flow) is what would make it pay.
-- CI4 assets with per-texture 16-colour palettes would double the effective
-  TMEM budget and remain unexplored.
+  clipping did not already reject. Re-running the baker's portal mode showed it
+  both looser than sampling and unsound, so the honest path is a re-tuned
+  sampled baker — parked unless hardware shows the BSP walk itself is the
+  constraint.
+- **CI4 is measured, not unexplored.** As a performance lever it moves 1–3% on
+  the wrong side of the pipeline. The real opening is quality: 64×64 flats
+  through aligned-run sub-palettes of the resident PLAYPAL (59 of 107 IWAD
+  flats losslessly) would undo the 32×32 flat downsample the port ships with —
+  worth taking only if hardware shows RDP headroom.
 
 ## Licence
 
-Doom's source is GPL-2 and this links against it, so the project is GPL-2.
-Game assets are not included and are not redistributable.
+Doom's source is GPL-2 and this links against it, so the project is GPL-2 —
+the full text is in `LICENSE`. Game assets are not included and are not
+redistributable.
