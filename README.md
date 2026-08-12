@@ -86,6 +86,11 @@ pixel-identical to its plain output:
   world. Darkness closes in faster in dark sectors, as vanilla's light
   ramp intended, and things sit in that falloff instead of floating
   unfogged in front of it.
+- **Rumble Pak** (`RUMBLE=0`). A thump when you take a hit — the same
+  damage edge the red flash keys on — and concussion from explosions
+  within 600 units, scaled by distance. The pak's motor is binary, so
+  strength is an error-diffused duty cycle, the way N64 games always
+  faked analog rumble.
 - **Frame interpolation** (`INTERP=0`). The simulation stays 35 Hz; the
   picture does not. View, things, sector movers, the weapon bob and the
   vapor all glide at frame rate, and a paused or menu-held world presents

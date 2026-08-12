@@ -98,6 +98,7 @@ void R_InitSkyFlat(void)
 #if D_DYNLIGHT
 /* Storage for the inline queries in d_glow.h; the writers below own it. */
 #include "d_glow.h"
+#include "d_rumble.h"
 #define GLOW_MAX D_GLOW_MAX
 int16_t d_glow_pic[D_GLOW_MAX];
 float   d_glow_amt[D_GLOW_MAX];
@@ -1155,6 +1156,19 @@ void D_LightsUpdate(void)
     const float px = (float)pl->mo->x / 65536.0f;
     const float py = (float)pl->mo->y / 65536.0f;
 
+#if D_RUMBLE
+    /* The damage edge: damagecount jumps by the damage taken and decays
+     * one per tic, so a rise is a fresh hit -- the same signal the red
+     * flash keys on. Runs once per gametic behind this function's cache. */
+    {
+        static int last_dmg;
+        const int dc = pl->damagecount;
+        if (dc > last_dmg)
+            D_RumbleAdd((float)(dc - last_dmg) * (1.0f / 40.0f));
+        last_dmg = dc;
+    }
+#endif
+
     /* Anything this far from the eye cannot reach geometry the player is
      * looking at closely enough to matter, and the list is small. */
     const float CULL = 1400.0f;
@@ -1175,6 +1189,9 @@ void D_LightsUpdate(void)
          * saturated enough to read on grey stone but shy of pure primaries,
          * which posterize against the 16-bit framebuffer. */
         float radius, intensity, cr, cg, cb;
+#if D_RUMBLE
+        float boom = 0.0f;   /* set by the explosion cases; fed after the cull */
+#endif
         switch (mo->type) {
             case MT_ROCKET:
                 if ((mo->frame & FF_FRAMEMASK) > 0) {
@@ -1183,6 +1200,9 @@ void D_LightsUpdate(void)
                      * small in-flight glow riding through it. */
                     radius = 560.0f; intensity = 1.15f;
                     cr = 1.00f; cg = 0.66f; cb = 0.34f;
+#if D_RUMBLE
+                    boom = 0.9f;
+#endif
                 } else {
                     radius = 384.0f; intensity = 0.90f;
                     cr = 1.00f; cg = 0.62f; cb = 0.30f;
@@ -1198,6 +1218,11 @@ void D_LightsUpdate(void)
                     const int fr = (int)(mo->frame & FF_FRAMEMASK);
                     intensity = 1.30f - 0.25f * (float)fr;
                     if (intensity < 0.30f) intensity = 0.30f;
+#if D_RUMBLE
+                    /* Only the first blast frames thump; the tail glow
+                     * of the animation is light, not concussion. */
+                    if (fr <= 6) boom = 1.0f;
+#endif
                 }
                 radius = 560.0f;
                 cr = 1.00f; cg = 0.64f; cb = 0.30f;
@@ -1242,6 +1267,20 @@ void D_LightsUpdate(void)
         const float my = (float)mo->y / 65536.0f;
         const float dx = mx - px, dy = my - py;
         if (dx * dx + dy * dy > CULL * CULL) continue;
+
+#if D_RUMBLE
+        /* Concussion falls off linearly to nothing at 600 units. Fed per
+         * gametic (this walk is cached), so a blast pumps the level for
+         * its few animation tics and the motor rides it down. */
+        if (boom > 0.0f) {
+            const float d2 = dx * dx + dy * dy;
+            if (d2 < 600.0f * 600.0f) {
+                /* sqrt.s is a native VR4300 instruction; no libm here. */
+                const float k = 1.0f - sqrtf(d2) * (1.0f / 600.0f);
+                D_RumbleAdd(boom * k * 0.6f);
+            }
+        }
+#endif
 
         /* Height of the projectile's middle, so a fireball lights the floor
          * under it and the ceiling above rather than the plane it sits on. */

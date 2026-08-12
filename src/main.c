@@ -746,6 +746,12 @@ int main(void)
 
         handle_input();
 
+#if D_RUMBLE
+        /* Decay and dither the rumble level into the pak, once per frame.
+         * Output-only: no pixels, no sim state, no demo risk. */
+        { void D_RumbleFrame(void); D_RumbleFrame(); }
+#endif
+
 #ifdef R_VIEWLOCK
         {   /* Reproduction rig: pin the camera to a pose reported by the
              * hwstat telemetry (build with VIEWLOCK=x,y,z,milliangle), so a

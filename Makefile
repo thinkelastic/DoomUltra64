@@ -334,6 +334,16 @@ N64_CFLAGS += -DR_REFLECT=$(REFLECT)
 CI4FLATS ?= 1
 N64_CFLAGS += -DD_CI4FLATS=$(CI4FLATS)
 
+# RUMBLE=1 drives a Rumble Pak in controller 1: a thump when the player
+# takes a hit (the same damagecount edge the red flash keys on) and
+# concussion from explosions within 600 units, scaled by distance (the
+# dynamic-light walk already knows every blast). The pak's motor is
+# binary, so strength is duty cycle -- an error-diffused on/off per frame.
+# Output-only: reads the sim, writes a peripheral; it cannot move a pixel
+# or desync a demo. No pak, no effect.
+RUMBLE ?= 1
+N64_CFLAGS += -DD_RUMBLE=$(RUMBLE)
+
 # ZCHECK=1 proves the z-only node refresh reproduces the full pass exactly:
 # it runs both on every refresh and asserts every field of every node matches.
 # Costs far more than the work it is checking -- for validation only.
@@ -438,6 +448,9 @@ src += src/r_light.c
 endif
 ifeq ($(VAPOR),1)
 src += src/r_vapor.c
+endif
+ifeq ($(RUMBLE),1)
+src += src/d_rumble.c
 endif
 
 # floorf/ceilf as instructions instead of libm calls, for the WHOLE link.
