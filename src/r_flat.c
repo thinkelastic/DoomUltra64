@@ -131,9 +131,6 @@ typedef struct {
     uint8_t         shade_ll;
     uint8_t         npts;
     uint8_t         texidx;
-    /* Mirroring floor: pushed a hair deeper in Z so the reflection pass
-     * can use the buffer as its stencil (see r_flat.h). */
-    uint8_t         refl;
     /* Nonzero when a light can reach the surface (caller's sphere-vs-box
      * test): the fan skips every per-vertex query otherwise. Occupies what
      * was the record's one pad byte. */
@@ -213,6 +210,9 @@ void r_flat_add(const r_polypt_t *pts, int npts, float height, int lightlevel,
                 dt64_tex_t *tex, float glow, const float tint[3], int lit,
                 int reflective)
 {
+    /* The reflective flag routes to the reflection pass's region list --
+     * the ghost clip polygons -- not to this queue; see r_reflect_region. */
+    (void)reflective;
     if (!tex || npts < 3 || npts > FLAT_MAX_PTS) return;
     if (numjobs >= FLAT_MAX_JOBS) { stat_dropped++; return; }
 
@@ -240,7 +240,6 @@ void r_flat_add(const r_polypt_t *pts, int npts, float height, int lightlevel,
 #endif
     j->npts   = (uint8_t)npts;
     j->texidx = (uint8_t)ti;
-    j->refl   = (uint8_t)(reflective != 0);
 }
 
 /* Wrapping is the point of the upload parameters: REPEAT_INFINITE lets one
@@ -264,14 +263,6 @@ static void bind_flat(dt64_tex_t *tex)
  * width. Set per texture bucket in the flush. */
 static float cur_tscale = 1.0f / FLAT_UNITS_PER_TEXEL;
 static float cur_period = FLAT_PERIOD;
-/* Mirroring floors sit REFL_PLANE_PUSH deeper in the z-buffer; the
- * reflection pass biases its ghosts by half that, landing between the
- * true plane and the pushed surface -- so a ghost wins exactly the
- * pixels the reflective flat wrote and loses same-height neighbours,
- * which the crossing depth alone cannot tell apart. Both margins are
- * double the flat pass's worst banding sag (~2^-7). */
-#define REFL_PLANE_PUSH (1.0f / 32.0f)
-static int   cur_refl;
 /* Reciprocal alongside, so the rebase keeps its multiply: both widths are
  * powers of two, so x * (1/w) is bit-identical to x / w -- exactly the
  * strength reduction the compiler did when the period was a constant. */
@@ -313,7 +304,6 @@ void r_flat_flush(const r_camera_t *cam)
 #if R_FOGSCALE
             cur_fog_inv = r_fog_inv[jobs[i].shade_ll];
 #endif
-            cur_refl = jobs[i].refl;
 #if D_DYNLIGHT
             cur_glow    = jobs[i].glow    * (1.0f / 255.0f);
             cur_tint[0] = jobs[i].tint[0] * (1.0f / 255.0f);
@@ -754,10 +744,6 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
         const int16_t ti = (int16_t)(p->wy * tsc32 - torg32);               \
         float zv = 1.0f - FLAT_Z_NEAR * iw;                                 \
         if (zv < 0.0f) zv = 0.0f;                                           \
-        if (cur_refl) {                                                     \
-            zv += REFL_PLANE_PUSH;                                          \
-            if (zv > 1.0f) zv = 1.0f;                                       \
-        }                                                                   \
         const int16_t zi = (int16_t)(zv * 0x7FFF);                          \
         r_tri_slot((slot_), (xi << 16) | (yi & 0xFFFF), (zi << 16), rgba,   \
                    (si << 16) | (ti & 0xFFFF),                              \
@@ -844,12 +830,7 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
                 x3[i][7] = c[i].wy * tscale - torg;
                 x3[i][8] = iw;
                 float zv = 1.0f - FLAT_Z_NEAR * iw;
-                if (zv < 0.0f) zv = 0.0f;
-                if (cur_refl) {
-                    zv += REFL_PLANE_PUSH;
-                    if (zv > 1.0f) zv = 1.0f;
-                }
-                x3[i][9] = zv;
+                x3[i][9] = zv < 0.0f ? 0.0f : zv;
             }
             rdpq_triangle(&TRIFMT_FLAT, x3[0], x3[1], x3[2]);
             r_tri_group_reg = 1;
@@ -917,12 +898,7 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
          * (FLAT_CLIP_NEAR < R_FLAT_NEAR); everything in that margin clamps
          * to depth 0 -- nothing can sort in front of it anyway. */
         float zv = 1.0f - FLAT_Z_NEAR * iw;
-        if (zv < 0.0f) zv = 0.0f;
-        if (cur_refl) {
-            zv += REFL_PLANE_PUSH;
-            if (zv > 1.0f) zv = 1.0f;
-        }
-        sv[i][9] = zv;
+        sv[i][9] = zv < 0.0f ? 0.0f : zv;
     }
 
     r_tri_fan(&TRIFMT_FLAT, (const float (*)[10])sv, m);

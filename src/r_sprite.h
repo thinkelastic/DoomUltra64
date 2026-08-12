@@ -29,6 +29,12 @@ void r_sprite_flush(void);
 void r_reflect_add(const r_camera_t *cam, const r_thing_t *t,
                    const float sh[3], int fog_ll,
                    float plane_h, const float pool_rgb[3]);
+/* The visible footprint of a reflective flat, straight from the BSP walk's
+ * flat regions (the same polygons the vapor pass consumes). Ghosts are
+ * clipped to these in screen space, which is what confines a mirror image
+ * to its own surface: the z-test alone cannot tell a reflective floor
+ * from a same-height neighbour, a farther pool, or untouched sky. */
+void r_reflect_region(const r_polypt_t *pts, int npts, float h);
 void r_reflect_flush(const r_camera_t *cam);
 #endif
 

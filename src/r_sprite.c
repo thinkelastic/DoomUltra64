@@ -24,6 +24,7 @@
 #include "r_tri.h"
 
 #include <math.h>
+#include <string.h>
 
 #define SPR_MAX_JOBS 128
 
@@ -71,6 +72,30 @@ static int       numrefl;
 #if D_DYNLIGHT
 static int       numrwrefl;      /* wall ghosts; queue at end of file */
 #endif
+
+/* Visible footprints of the reflective flats, queued by the BSP walk (the
+ * same subsector polygons the vapor pass consumes; they live in the level
+ * arena and do not move). Every ghost is clipped to the footprints of ITS
+ * OWN plane in screen space -- the correction for everything the z-test
+ * cannot see: same-height neighbours, other reflective floors, and sky
+ * columns the world never wrote. */
+#define REFL_REGION_MAX 24
+typedef struct {
+    const r_polypt_t *pts;
+    float             h;
+    uint8_t           n;
+} reflregion_t;
+static reflregion_t reflreg[REFL_REGION_MAX];
+static int          numreflreg;
+
+void r_reflect_region(const r_polypt_t *pts, int npts, float h)
+{
+    if (npts < 3 || numreflreg >= REFL_REGION_MAX) return;
+    reflregion_t *r = &reflreg[numreflreg++];
+    r->pts = pts;
+    r->h   = h;
+    r->n   = (uint8_t)(npts > 16 ? 16 : npts);
+}
 #endif
 
 static const rdpq_trifmt_t TRIFMT_SPR = {
@@ -86,6 +111,7 @@ void r_sprite_begin(void)
     numjobs = stat_drawn = stat_uploads = stat_dropped = 0;
 #if R_REFLECT
     numrefl = 0;
+    numreflreg = 0;
 #if D_DYNLIGHT
     numrwrefl = 0;      /* a frame whose flush never ran must not leak */
 #endif
@@ -460,6 +486,116 @@ void r_reflect_add(const r_camera_t *cam, const r_thing_t *t,
 static void reflect_walls_emit(const r_camera_t *cam);
 #endif
 
+/* Screen-project one footprint at its own height; 0 if it vanishes. */
+static int refl_project_region(const r_camera_t *cam, const reflregion_t *rg,
+                               float px[24], float py[24])
+{
+    float d[16], o[16];
+    const int n = rg->n;
+    const float cs = r_view_cs, sn = r_view_sn;
+    for (int i = 0; i < n; i++) {
+        const float dx = rg->pts[i].x - cam->x;
+        const float dy = rg->pts[i].y - cam->y;
+        d[i] = dx * cs + dy * sn;
+        o[i] = dx * sn - dy * cs;
+    }
+    /* Near-clip the polygon so the projection below cannot divide by a
+     * vanishing depth. */
+    float d2[20], o2[20];
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        const int j = i + 1 < n ? i + 1 : 0;
+        const int ina = d[i] >= SPR_NEAR, inb = d[j] >= SPR_NEAR;
+        if (ina) { d2[m] = d[i]; o2[m] = o[i]; m++; }
+        if (ina != inb) {
+            const float t = (SPR_NEAR - d[i]) / (d[j] - d[i]);
+            d2[m] = SPR_NEAR; o2[m] = o[i] + (o[j] - o[i]) * t; m++;
+        }
+        if (m >= 18) break;
+    }
+    if (m < 3) return 0;
+    const float cx = SCREEN_W * 0.5f, cy = SCREEN_H * 0.5f;
+    const float hz = rg->h - cam->z;
+    for (int i = 0; i < m; i++) {
+        const float iw = 1.0f / d2[i];
+        px[i] = cx + o2[i] * cam->focal_x * iw;
+        py[i] = cy - hz * cam->focal_y * iw;
+    }
+    return m;
+}
+
+/* One Sutherland-Hodgman step over 10-float rows. Rows carry s,t already
+ * multiplied by iw, so every attribute is screen-linear and the plain lerp
+ * at the cut is perspective-exact. */
+static int refl_clip_edge(float in[][10], int n, float out[][10],
+                          float ax, float ay, float bx, float by, float sgn)
+{
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        const int j = i + 1 < n ? i + 1 : 0;
+        const float ex = bx - ax, ey = by - ay;
+        const float da = sgn * (ex * (in[i][1] - ay) - ey * (in[i][0] - ax));
+        const float db = sgn * (ex * (in[j][1] - ay) - ey * (in[j][0] - ax));
+        if (da >= 0.0f) { memcpy(out[m], in[i], sizeof(float) * 10); m++; }
+        if ((da >= 0.0f) != (db >= 0.0f) && m < 13) {
+            const float t = da / (da - db);
+            for (int k = 0; k < 10; k++)
+                out[m][k] = in[i][k] + (in[j][k] - in[i][k]) * t;
+            m++;
+        }
+        if (m >= 13) break;
+    }
+    return m;
+}
+
+/* Clip one ghost quad (rows with s,t premultiplied by iw) to every
+ * footprint of its plane; emit the surviving fans. A ghost whose plane
+ * has no visible footprint emits nothing -- which is also the correct
+ * fate of a mirror over a pool the frame never drew. */
+static void refl_emit_clipped(const r_camera_t *cam, float q[4][10],
+                              float plane_h)
+{
+    for (int rgi = 0; rgi < numreflreg; rgi++) {
+        const reflregion_t *rg = &reflreg[rgi];
+        if (rg->h > plane_h + 0.5f || rg->h < plane_h - 0.5f) continue;
+
+        float px[24], py[24];
+        const int pn = refl_project_region(cam, rg, px, py);
+        if (pn < 3) continue;
+
+        /* The footprint's winding on screen decides which side is inside. */
+        float area = 0.0f;
+        for (int i = 0; i < pn; i++) {
+            const int j = i + 1 < pn ? i + 1 : 0;
+            area += px[i] * py[j] - px[j] * py[i];
+        }
+        const float sgn = area >= 0.0f ? 1.0f : -1.0f;
+
+        float a[14][10], b[14][10];
+        memcpy(a, q, sizeof(float) * 40);
+        int n = 4, flip = 0;
+        for (int e = 0; e < pn && n >= 3; e++) {
+            const int j = e + 1 < pn ? e + 1 : 0;
+            n = refl_clip_edge(flip ? b : a, n, flip ? a : b,
+                               px[e], py[e], px[j], py[j], sgn);
+            flip ^= 1;
+        }
+        if (n < 3) continue;
+
+        float (*p)[10] = flip ? b : a;
+        float v[14][10];
+        for (int i = 0; i < n; i++) {
+            memcpy(v[i], p[i], sizeof(float) * 10);
+            v[i][6] = p[i][6] / p[i][8];
+            v[i][7] = p[i][7] / p[i][8];
+        }
+        for (int i = 1; i + 1 < n; i++) {
+            rdpq_triangle(&TRIFMT_SPR, v[0], v[i], v[i + 1]);
+            r_tri_spr++;
+        }
+    }
+}
+
 /* Draw the queued images. Runs after the sprite pass -- nearer actors
  * occlude images through the z-buffer -- and before sky and vapor: sky
  * repaints any spill into never-written columns, and the haze drifts over
@@ -566,12 +702,11 @@ void r_reflect_flush(const r_camera_t *cam)
                     v[i][0] = xs[i]; v[i][1] = ys[i];
                     v[i][2] = j->sr; v[i][3] = j->sg; v[i][4] = j->sb;
                     v[i][5] = as[i];
-                    v[i][6] = ss[i]; v[i][7] = ts[i];
+                    v[i][6] = ss[i] * iw; v[i][7] = ts[i] * iw;
                     v[i][8] = iw;
                     v[i][9] = zs[i];
                 }
-                r_tri_quad(&TRIFMT_SPR, v[0], v[1], v[2], v[3]);
-                r_tri_spr += 2;
+                refl_emit_clipped(cam, v, j->plane_h);
             }
         }
     }
@@ -737,8 +872,8 @@ static void reflect_walls_emit(const r_camera_t *cam)
             v[c][1] = cy - (zi - cam->z) * cam->focal_y * iw;
             v[c][2] = r->sr; v[c][3] = r->sg; v[c][4] = r->sb;
             v[c][5] = aa[row];
-            v[c][6] = side ? u2 : u1;
-            v[c][7] = ta[row];
+            v[c][6] = (side ? u2 : u1) * iw;
+            v[c][7] = ta[row] * iw;
             v[c][8] = iw;
             {
                 /* +2^-6, between the true plane and the reflective
@@ -750,8 +885,7 @@ static void reflect_walls_emit(const r_camera_t *cam)
                 v[c][9] = z;
             }
         }
-        r_tri_quad(&TRIFMT_SPR, v[0], v[1], v[2], v[3]);
-        r_tri_spr += 2;
+        refl_emit_clipped(cam, v, r->plane_h);
     }
     numrwrefl = 0;
 }

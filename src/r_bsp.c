@@ -770,6 +770,11 @@ static void render_flats_inner(const subsector_t *ss)
                    r_light_reaches_box((float)rg->bx0, (float)rg->by0,
                                        (float)rg->bx1, (float)rg->by1, fh),
                    R_REFLECT && D_FlatReflective(sec->floorpic));
+#if R_REFLECT
+        /* The mirror pass clips its ghosts to these footprints. */
+        if (D_FlatReflective(sec->floorpic))
+            r_reflect_region(pts, rg->numpts, fh);
+#endif
         /* Glowing liquids grow their vapor layer: haze over the sludge,
          * smoke over the lava. Same polygon, a few units up, translucent. */
         if (fglow > 0.0f)
