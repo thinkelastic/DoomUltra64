@@ -898,7 +898,12 @@ R_HOT static void render_subsector(int num)
                 sh[2] = lit + add[2]; if (sh[2] > 1.0f) sh[2] = 1.0f;
             }
             r_sprite_add(cur_cam, &t, sh,
-                         (mo->frame & FF_FULLBRIGHT) ? -1 : lit_ll);
+                         (mo->frame & FF_FULLBRIGHT) ? -1 : lit_ll,
+                         /* Smoke and bullet puffs read better as haze
+                          * than as cardboard: route them to the sprite
+                          * pass's translucent tail. */
+                         (mo->type == MT_SMOKE || mo->type == MT_PUFF)
+                             ? 0.6f : 1.0f);
 
 #if R_REFLECT
             /* Over a glowing liquid: queue the mirror image. No polygon is

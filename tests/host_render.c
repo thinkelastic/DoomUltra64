@@ -558,7 +558,7 @@ int main(int argc, char **argv)
             r_thing_t t = { .x = 100.0f + 40.0f * i, .y = -20.0f + 20.0f * i,
                             .z = 0.0f, .spr = &spr };
             { const float sh[3] = { 1.0f, 1.0f, 1.0f };
-              r_sprite_add(&views[0].cam, &t, sh, -1); }
+              r_sprite_add(&views[0].cam, &t, sh, -1, 1.0f); }
         }
         r_sprite_flush();
 
@@ -579,7 +579,7 @@ int main(int argc, char **argv)
         {
             r_thing_t t = { .x = 100.0f, .y = 0.0f, .z = -2000.0f, .spr = &spr };
             { const float sh[3] = { 1.0f, 1.0f, 1.0f };
-              r_sprite_add(&views[0].cam, &t, sh, -1); }
+              r_sprite_add(&views[0].cam, &t, sh, -1, 1.0f); }
         }
         r_sprite_flush();
         printf("sprites: off-screen instance     -> uploads=%d tris=%d\n",

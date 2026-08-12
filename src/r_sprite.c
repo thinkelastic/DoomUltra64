@@ -44,6 +44,9 @@ typedef struct {
      * coloured light on an actor costs nothing extra per vertex. Fog is
      * folded in here, once per job. */
     float       sr, sg, sb;
+    /* 1.0 draws in the opaque alpha-cut groups; anything lower routes to
+     * the translucent tail pass -- smoke and bullet puffs. */
+    float       alpha;
     uint8_t     mipped;
 } sprjob_t;
 
@@ -123,7 +126,7 @@ int r_sprite_uploads(void) { return stat_uploads; }
 int r_sprite_dropped(void) { return stat_dropped; }
 
 void r_sprite_add(const r_camera_t *cam, const r_thing_t *t,
-                  const float sh[3], int fog_ll)
+                  const float sh[3], int fog_ll, float alpha)
 {
     if (!t->spr) return;
     if (numjobs >= SPR_MAX_JOBS) { stat_dropped++; return; }
@@ -184,6 +187,7 @@ void r_sprite_add(const r_camera_t *cam, const r_thing_t *t,
         j->sg = sh[1] * k;
         j->sb = sh[2] * k;
     }
+    j->alpha = alpha;
 }
 
 /* Draw one tile of a sprite. The billboard sits at a single depth, so the
@@ -216,7 +220,7 @@ static void draw_tile(const sprjob_t *j, int s0, int t0, int s1, int t1,
         v[i][0] = xs[i];
         v[i][1] = ys[i];
         v[i][2] = j->sr; v[i][3] = j->sg; v[i][4] = j->sb;
-        v[i][5] = 1.0f;
+        v[i][5] = j->alpha;   /* opaque groups never read it; the tail does */
         v[i][6] = ss[i];
         v[i][7] = ts[i];
         v[i][8] = iw;
@@ -282,7 +286,9 @@ void r_sprite_flush(void)
     int16_t     head[SPR_MAX_TEXTURES];
     static int16_t nextj[SPR_MAX_JOBS];
     int ntex = 0;
+    int have_tl = 0;
     for (int i = 0; i < numjobs; i++) {
+        if (jobs[i].alpha < 1.0f) { have_tl = 1; continue; }
         int k = -1;
         for (int c = 0; c < ntex; c++)
             if (texes[c] == jobs[i].tex) { k = c; break; }
@@ -340,6 +346,57 @@ void r_sprite_flush(void)
                         bound = true;
                     }
 
+                    draw_tile(j, s0, t0, s1, t1, scx, scy, x0, y0);
+                }
+            }
+        }
+    }
+    /* --- translucent tail: smoke and puffs -----------------------------
+     * Far to near (the array is depth-ascending, so walk it backward),
+     * blended against what is already there, z-tested so the world
+     * occludes them but never z-written so they cannot carve holes in
+     * each other. The combiner must multiply texture alpha by shade
+     * alpha here -- the opaque pass deliberately passes texture alpha
+     * alone for its cutout compare. */
+    if (have_tl) {
+        rdpq_mode_combiner(RDPQ_COMBINER1((TEX0, 0, SHADE, 0),
+                                          (TEX0, 0, SHADE, 0)));
+        rdpq_mode_blender(RDPQ_BLENDER((IN_RGB, IN_ALPHA,
+                                        MEMORY_RGB, INV_MUX_ALPHA)));
+        rdpq_mode_alphacompare(0);
+        rdpq_mode_zbuf(true, false);
+
+        dt64_tex_t *last_tex = NULL;
+        int last_s0 = -1, last_t0 = -1;
+        for (int i = numjobs - 1; i >= 0; i--) {
+            const sprjob_t *j = &jobs[i];
+            if (j->alpha >= 1.0f) continue;
+            dt64_tex_t *tex = j->tex;
+            const int w = tex->width, h = tex->height;
+            const int tw = w < DT64_TILE_W ? w : DT64_TILE_W;
+            const int th = h < DT64_TILE_H ? h : DT64_TILE_H;
+            const float m   = j->mipped ? 2.0f : 1.0f;
+            const float scx = j->scale_x * m;
+            const float scy = j->scale_y * m;
+            const float left = j->sx - (float)tex->leftoffset * scx;
+            const float top  = j->sy - (float)tex->topoffset  * scy;
+            for (int t0 = 0; t0 < h; t0 += th) {
+                const int t1 = t0 + th > h ? h : t0 + th;
+                for (int s0 = 0; s0 < w; s0 += tw) {
+                    const int s1 = s0 + tw > w ? w : s0 + tw;
+                    const float x0 = left + (float)s0 * scx;
+                    const float y0 = top  + (float)t0 * scy;
+                    if (x0 + (float)(s1 - s0) * scx < 0.0f ||
+                        x0 > (float)SCREEN_W ||
+                        y0 + (float)(t1 - t0) * scy < 0.0f ||
+                        y0 > (float)SCREEN_H) continue;
+                    /* Puff frames repeat down a trail: one upload serves
+                     * a run of the same frame. */
+                    if (tex != last_tex || s0 != last_s0 || t0 != last_t0) {
+                        dt64_upload_tile(TILE0, tex, NULL, s0, t0, s1, t1);
+                        stat_uploads++;
+                        last_tex = tex; last_s0 = s0; last_t0 = t0;
+                    }
                     draw_tile(j, s0, t0, s1, t1, scx, scy, x0, y0);
                 }
             }

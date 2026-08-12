@@ -15,8 +15,11 @@ void r_psprite_draw(void);
 /* sh[] is the three-channel shade (dynamic lights can colour an actor);
  * fog_ll is the sector light level for the distance falloff, or -1 for a
  * fullbright frame, which is exempt exactly as vanilla's colormap-0 was. */
+/* alpha 1.0 joins the opaque cutout groups; lower values (smoke, puffs)
+ * draw in the translucent tail: far-to-near, blended, z-tested, never
+ * z-written. */
 void r_sprite_add(const r_camera_t *cam, const r_thing_t *t,
-                  const float sh[3], int fog_ll);
+                  const float sh[3], int fog_ll, float alpha);
 void r_sprite_flush(void);
 
 /* Liquid reflections: mirror images of things over glowing pools, drawn

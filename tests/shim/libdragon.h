@@ -44,6 +44,10 @@ typedef struct { uint8_t r, g, b, a; } color_t;
 /* Combiner/blender descriptors carry token lists such as (TEX0,0,SHADE,0);
  * each is a single parenthesised macro argument, so they collapse cleanly. */
 #define RDPQ_COMBINER1(rgb, alpha) 0
+/* Blender formulas reduce to an opaque token on the host: the harness
+ * checks geometry and TMEM discipline, not blending arithmetic. */
+#define RDPQ_BLENDER(bl) 0
+static inline void rdpq_mode_blender(int b) { (void)b; }
 #define RDPQ_FOG_STANDARD          1
 
 static inline void rdpq_set_mode_standard(void) {}
