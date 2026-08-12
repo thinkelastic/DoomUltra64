@@ -183,11 +183,17 @@ so on screen and names the file it wanted, rather than failing obscurely.
 Building the pieces yourself:
 
 ```sh
+./build.sh release                              # -> DoomN64-<version>.zip
 ./build.sh EXTWAD=1                             # -> doom.z64
 ./build.sh GAME=doom2 EXTWAD=1                  # -> doom2.z64
 ./tools/mkmuswad.py DOOMMUS.wad  DOOMMUS.WAD    # from a source music WAD
 ./tools/mkmuswad.py DOOM2MUS.wad DOOM2MUS.WAD
 ```
+
+`release` builds both card ROMs and packs the archive above — the `Doom/`
+folder with an empty `saves/`, plus the music WADs when they sit in the
+repository root. It refuses to pack a ROM with an IWAD baked in, and the zip
+is named by `git describe`.
 
 `EXTWAD=1` leaves the IWAD out of the image, which is what makes the ROM read
 it from the card; a default build bakes one in and needs no `.WAD` beside it.

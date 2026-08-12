@@ -587,6 +587,45 @@ $(BUILD_DIR)/$(ROM).elf: $(src:%.c=$(BUILD_DIR)/%.o)
 
 $(ROM).z64: $(BUILD_DIR)/$(ROM).dfs
 
+# ---------------------------------------------------------------- release
+# `./build.sh release` builds both games' card ROMs and packs the archive the
+# README's install section describes: one Doom/ folder to drop at the SD root,
+# with an empty saves/ inside. EXTWAD only -- a default build bakes the
+# commercial IWAD into the image, and no such ROM may ever be distributed.
+#
+# The size check is belt and braces over extwad-prune: an EXTWAD ROM is
+# 11-16 MB and one with an IWAD baked in is 11-15 MB bigger, so 20 MB cleanly
+# splits them, and a ROM that fails it aborts the pack rather than shipping.
+#
+# Music WADs ride along when they sit beside the Makefile. They are rendered
+# from the games' own scores, which makes them as non-redistributable as the
+# IWADs -- a public release normally ships without them, and the pack says
+# what it skipped.
+RELVER := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+RELZIP := DoomN64-$(RELVER).zip
+.PHONY: release
+release:
+	@$(MAKE) --no-print-directory EXTWAD=1
+	@$(MAKE) --no-print-directory EXTWAD=1 GAME=doom2
+	@for r in doom.z64 doom2.z64; do \
+	    sz=$$(wc -c < $$r); \
+	    if [ "$$sz" -ge 20000000 ]; then \
+	        echo "!! $$r is $$sz bytes -- an IWAD is baked in, refusing to pack"; \
+	        exit 1; \
+	    fi; \
+	done
+	@rm -rf $(BUILD_DIR)/release
+	@mkdir -p $(BUILD_DIR)/release/Doom/saves
+	@cp doom.z64  $(BUILD_DIR)/release/Doom/Doom.z64
+	@cp doom2.z64 $(BUILD_DIR)/release/Doom/Doom2.z64
+	@for m in DOOMMUS.WAD DOOM2MUS.WAD; do \
+	    if [ -f "$$m" ]; then cp "$$m" $(BUILD_DIR)/release/Doom/; \
+	    else echo "    [NOTE ] $$m not present -- archive ships without it"; fi; \
+	done
+	@echo "    [ZIP  ] $(RELZIP)"
+	@python3 tools/mkzip.py $(RELZIP) $(BUILD_DIR)/release Doom
+	@python3 -m zipfile -l $(RELZIP)
+
 # ------------------------------------------------------------------ tests
 # Compiles the real renderer against a mock RDP and rasterises it on the host.
 # Verifies projection, near-clipping, TMEM tile addressing and fog without an

@@ -5,6 +5,8 @@ build-doom2/
 filesystem-doom2/
 shots/
 *.z64
+# The release archive is a build product (make release).
+DoomN64-*.zip
 # Commercial IWADs are not redistributable. Ignore the whole directory
 # rather than a lowercase glob: the previous rule missed DOOM.WAD purely
 # because of its case and swept 10 MB of id's data into a commit.
