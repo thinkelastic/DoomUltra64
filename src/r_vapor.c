@@ -99,11 +99,11 @@ typedef struct {
 
 static const vapstyle_t vap_style[] = {
     [D_GLOW_NUKAGE] = { 10.0f, 150, 230, 150,  72, 1.0f / 192.0f,
-                        0.0011f,  0.0007f },
+                        0.0044f,  0.0028f },
     [D_GLOW_SLIME]  = { 10.0f, 170, 205, 170,  60, 1.0f / 192.0f,
-                        0.0009f,  0.0006f },
+                        0.0036f,  0.0024f },
     [D_GLOW_LAVA]   = { 22.0f,  72,  62,  56, 116, 1.0f / 160.0f,
-                        0.0018f, -0.0012f },
+                        0.0072f, -0.0048f },
 };
 #define VAP_NSTYLE (int)(sizeof vap_style / sizeof vap_style[0])
 
@@ -222,19 +222,31 @@ void r_vapor_flush(const r_camera_t *cam)
         n = vap_clip(poly, n, clip, view_k, 1.0f, 0.0f);
         if (n < 3) continue;
 
+        /* Three motions stack, all per-frame constants so the per-vertex
+         * cost is zero: the linear drift, a slow circular SWIRL over it --
+         * the pattern churns in place instead of running like a conveyor,
+         * which is what makes the movement legible at a glance -- and a
+         * breathing opacity, phased per pool so neighbouring hazes never
+         * pulse in step. fm_sinf is libdragon's ~50-tick sine. */
+        const float t = (float)leveltime;
+        const float phase = (float)((((uintptr_t)j->pts) >> 4) & 7) * 0.8f;
+        const float du = t * st->drift_u
+                       + 0.16f * fm_sinf(t * 0.021f + phase);
+        const float dv = t * st->drift_v
+                       + 0.16f * fm_sinf(t * 0.015f + phase * 1.7f);
+        const float breathe = 0.82f + 0.18f * fm_sinf(t * 0.05f + phase);
+
         /* Rebase the texture coordinates near zero, exactly why the flats
          * carry sorg/torg: world X times the repeat scale times 32 texels
          * overflows the RDP's s10.5 range on a big map. The layer's first
          * vertex anchors the origin; the drift rides in before flooring so
          * motion survives the rebase. */
-        const float du = (float)leveltime * st->drift_u;
-        const float dv = (float)leveltime * st->drift_v;
         const float uorg = rf_floorf(j->pts[0].x * st->uvscale + du);
         const float vorg = rf_floorf(j->pts[0].y * st->uvscale + dv);
         const float rr = (float)st->r * (1.0f / 255.0f);
         const float gg = (float)st->g * (1.0f / 255.0f);
         const float bb = (float)st->b * (1.0f / 255.0f);
-        const float aa = (float)st->a * (1.0f / 255.0f);
+        const float aa = (float)st->a * (1.0f / 255.0f) * breathe;
         const float finv = r_fog_inv[j->light];
         const float dzf  = dz * cam->focal_y;
 
