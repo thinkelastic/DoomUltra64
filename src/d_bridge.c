@@ -454,16 +454,36 @@ void D_PlayerInput(float fwd, float strafe, float turn, boolean run,
 boolean r_interpolate = false;
 fixed_t fractionaltic = 0;
 
+/* Stamped by main.c before every G_Ticker; only a P_Ticker that actually
+ * ran advances leveltime past it. So leveltime > oldleveltime is precisely
+ * "the world moved since the last tic attempt" -- false while the menu or
+ * pause holds P_Ticker off. */
+int oldleveltime = 0;
+
+/* fractionaltic as a plain float in [0,1), zero whenever interpolation is
+ * off -- for renderer consumers (vapor) that animate on leveltime and
+ * should glide with the world without pulling Doom's types in. */
+float d_subtic = 0.0f;
+
 void D_SetTicFrac(uint32_t into_tic_us)
 {
 #if D_INTERP
     if (into_tic_us > 28570u) into_tic_us = 28570u;  /* hold at the pair */
     fractionaltic = (fixed_t)(((uint64_t)into_tic_us << FRACBITS) / 28571u);
-    r_interpolate = true;
+    /* Interpolate only while the simulation advances. When P_Ticker
+     * early-returns -- menu open in single player, pause -- the (old,
+     * current) pairs freeze mid-move but the fraction would keep cycling
+     * at 35 Hz, and every mid-move door and monster sawtooths between its
+     * last two positions behind the menu. Presenting current state,
+     * uninterpolated, is exact for a world that is not moving. */
+    r_interpolate = (leveltime > oldleveltime);
+    d_subtic = r_interpolate
+             ? (float)fractionaltic * (1.0f / (float)FRACUNIT) : 0.0f;
 #else
     (void)into_tic_us;
     fractionaltic  = 0;
     r_interpolate  = false;
+    d_subtic       = 0.0f;
 #endif
 }
 

@@ -234,7 +234,12 @@ void r_vapor_flush(const r_camera_t *cam)
          * pointer-seeded phase made the haze differ between two builds of
          * the same scene -- poison for A/B pixel comparison. Vertex
          * coordinates come from the WAD and cannot vary per build. */
-        const float t = (float)leveltime;
+        /* d_subtic glides the drift between tics; the vapor was the one
+         * moving thing in the world stepping at 35 Hz while everything
+         * else interpolated. Zero with interpolation off, so INTERP=0
+         * builds animate exactly on the tic as before. */
+        extern float d_subtic;
+        const float t = (float)leveltime + d_subtic;
         const float phase =
             (float)(((int)j->pts[0].x + (int)j->pts[0].y) & 7) * 0.8f;
         const float du = t * st->drift_u

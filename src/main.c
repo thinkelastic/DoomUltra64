@@ -523,6 +523,14 @@ static void run_game_tics(uint32_t frame_us)
          * ticker applies (P_Ticker inside GS_LEVEL). */
         if (advancedemo)
             D_DoAdvanceDemo();
+        /* Interpolation guard (d_bridge.c): only a P_Ticker that actually
+         * runs moves leveltime past this stamp, so a menu- or pause-held
+         * world renders its current state instead of lerping a frozen
+         * pair with a still-cycling fraction. */
+        {
+            extern int leveltime, oldleveltime;
+            oldleveltime = leveltime;
+        }
         D_TicStart();
         M_Ticker();
         G_Ticker();
