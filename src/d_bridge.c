@@ -1134,8 +1134,32 @@ void D_LightsUpdate(void)
          * which posterize against the 16-bit framebuffer. */
         float radius, intensity, cr, cg, cb;
         switch (mo->type) {
-            case MT_ROCKET:      radius = 384.0f; intensity = 0.90f;
-                                 cr = 1.00f; cg = 0.62f; cb = 0.30f; break;
+            case MT_ROCKET:
+                if ((mo->frame & FF_FRAMEMASK) > 0) {
+                    /* Past frame A the rocket is its explosion: a wider,
+                     * hotter flash for the blast's few tics instead of the
+                     * small in-flight glow riding through it. */
+                    radius = 560.0f; intensity = 1.15f;
+                    cr = 1.00f; cg = 0.66f; cb = 0.34f;
+                } else {
+                    radius = 384.0f; intensity = 0.90f;
+                    cr = 1.00f; cg = 0.62f; cb = 0.30f;
+                }
+                break;
+            case MT_BARREL:
+                /* A standing barrel is furniture. A dying one is the game's
+                 * biggest practical fireball: flash hard, then decay with
+                 * the explosion animation's own frames -- monotonic with
+                 * the art, no state-table spelunking. */
+                if (mo->health > 0) continue;
+                {
+                    const int fr = (int)(mo->frame & FF_FRAMEMASK);
+                    intensity = 1.30f - 0.25f * (float)fr;
+                    if (intensity < 0.30f) intensity = 0.30f;
+                }
+                radius = 560.0f;
+                cr = 1.00f; cg = 0.64f; cb = 0.30f;
+                break;
             case MT_PLASMA:      radius = 288.0f; intensity = 0.75f;
                                  cr = 0.45f; cg = 0.65f; cb = 1.00f; break;
             case MT_BFG:         radius = 576.0f; intensity = 1.00f;
