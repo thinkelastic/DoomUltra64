@@ -63,6 +63,16 @@ pixel-identical to its plain output:
   the projectile's glow, interpolated like every other thing, and invisible
   to demo sync (the spawn consumes no random stream at all, so the title
   attracts play back unchanged).
+- **Liquid reflections** (`REFLECT=0`). Things over a glowing pool mirror
+  in it, dimmed and tinted the liquid's own hue. The image is masked to
+  pool pixels by the depth buffer alone — each vertex carries the depth at
+  which its view ray crosses the water plane, so anything nearer wins and
+  the mirror clips itself with zero polygon math.
+- **Full-resolution liquids and floors** (`CI4FLATS=0`). Every flat whose
+  art fits one 16-entry bank of the palette ships as full 64×64 CI4 — 59
+  of the IWAD's 107, losslessly — instead of the 32×32 downsample TMEM
+  used to force. The RDP's CI4 palette field selects the matching bank of
+  the resident PLAYPAL, so palette flashes recolour them for free.
 - **Emissive liquids.** Nukage, lava and blood glow with colour sampled from
   their own art and spill it up nearby walls at the waterline.
 - **Liquid vapor** (`VAPOR=0`). A translucent noise layer drifts and churns
@@ -284,11 +294,12 @@ states.
   both looser than sampling and unsound, so the honest path is a re-tuned
   sampled baker — parked unless hardware shows the BSP walk itself is the
   constraint.
-- **CI4 is measured, not unexplored.** As a performance lever it moves 1–3% on
-  the wrong side of the pipeline. The real opening is quality: 64×64 flats
-  through aligned-run sub-palettes of the resident PLAYPAL (59 of 107 IWAD
-  flats losslessly) would undo the 32×32 flat downsample the port ships with —
-  worth taking only if hardware shows RDP headroom.
+- **CI4 is measured — and taken as quality, not speed.** As a performance
+  lever it moves 1–3% on the wrong side of the pipeline, so it was parked
+  until the Aug 2026 hardware session showed the RDP topping out at 60%
+  busy. With fill affordable, the 64×64 aligned-run flats shipped
+  (`CI4FLATS`, above); the remaining 48 flats span more than one palette
+  bank and keep the downsample.
 
 ## Licence
 

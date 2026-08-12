@@ -65,7 +65,21 @@ void *mem_alloc(mem_arena_id_t id, size_t size)
 
     void *p = a->base + a->used;
     a->used += aligned;
-    if (a->used > a->peak) a->peak = a->used;
+    if (a->used > a->peak) {
+        a->peak = a->used;
+        /* Loud once per level when an arena runs close to its ceiling.
+         * The Aug 12 hardware session measured the texture peak at 1,914
+         * of 2,048 KB on the demo maps alone -- larger maps may hit the
+         * wall, and a demand-load returning NULL mid-fight is a far worse
+         * way to find out than this line in the log. Threshold at 15/16
+         * capacity; fires only on a new high-water mark, so it cannot
+         * spam. */
+        if (a->peak > a->capacity - a->capacity / 16u &&
+            a->peak - aligned <= a->capacity - a->capacity / 16u)
+            debugf("mem: %s arena at %u of %u KB -- near the ceiling\n",
+                   a->name, (unsigned)(a->peak / 1024),
+                   (unsigned)(a->capacity / 1024));
+    }
     return p;
 }
 
