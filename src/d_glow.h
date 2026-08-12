@@ -32,13 +32,17 @@ enum {
 
 #if D_DYNLIGHT
 
-#define D_GLOW_MAX 8
+/* 16, not 8: reflective-only flats (teleporter pads, marble, tech plate)
+ * share this registry, and an E3 map can carry liquids and several of
+ * them at once. */
+#define D_GLOW_MAX 16
 
 extern int16_t d_glow_pic[D_GLOW_MAX];
 extern float   d_glow_amt[D_GLOW_MAX];
 extern float   d_glow_rgb[D_GLOW_MAX][3];   /* light colour, from the art */
 extern uint8_t d_glow_have_rgb[D_GLOW_MAX];
 extern uint8_t d_glow_class[D_GLOW_MAX];
+extern uint8_t d_glow_reflect[D_GLOW_MAX];  /* mirrors, glowing or not */
 extern int     d_num_glow;
 
 /* Lazily bakes d_glow_rgb[slot] from the flat's texels; d_bridge.c. */
@@ -61,6 +65,15 @@ static inline int D_FlatGlowClass(int picnum)
     return D_GLOW_NONE;
 }
 
+/* Does this floor mirror what stands over it? True for every glowing
+ * liquid and for the polished surfaces registered reflective-only. */
+static inline int D_FlatReflective(int picnum)
+{
+    for (int i = 0; i < d_num_glow; i++)
+        if (d_glow_pic[i] == (int16_t)picnum) return d_glow_reflect[i];
+    return 0;
+}
+
 /* Colour of the light this flat casts. White for anything not emissive, so a
  * caller can multiply unconditionally. */
 static inline void D_FlatGlowRGB(int picnum, float rgb[3])
@@ -80,6 +93,7 @@ static inline void D_FlatGlowRGB(int picnum, float rgb[3])
 
 static inline float D_FlatGlow(int picnum) { (void)picnum; return 0.0f; }
 static inline int   D_FlatGlowClass(int picnum) { (void)picnum; return D_GLOW_NONE; }
+static inline int   D_FlatReflective(int picnum) { (void)picnum; return 0; }
 static inline void  D_FlatGlowRGB(int picnum, float rgb[3])
 { (void)picnum; rgb[0] = rgb[1] = rgb[2] = 1.0f; }
 

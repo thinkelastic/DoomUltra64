@@ -901,8 +901,7 @@ R_HOT static void render_subsector(int num)
              * the pool's hue. Sector-keyed: a thing on the bank does not
              * reflect, one wading or flying low over the surface does. */
             {
-                const float fg = D_FlatGlow(ss->sector->floorpic);
-                if (fg > 0.0f) {
+                if (D_FlatReflective(ss->sector->floorpic)) {
                     const float ph = fx(ss->sector->floorheight);
                     if (t.z - ph < 128.0f) {
                         float prgb[3];
@@ -1042,11 +1041,29 @@ R_HOT static void render_subsector(int num)
             }
             cur_wall.glow  = gl;
             cur_wall.glowz = gz;
+            cur_wall.reflect = gl > 0.0f;
             if (gl > 0.0f) {
                 D_FlatGlowRGB(gpic, cur_wall.glow_rgb);
             } else {
-                cur_wall.glow_rgb[0] = cur_wall.glow_rgb[1] =
-                cur_wall.glow_rgb[2] = 1.0f;
+                /* Not over a liquid -- but a polished floor (teleporter
+                 * pad, marble, tech plate) still mirrors. Reuse glowz as
+                 * the plane and glow_rgb as the tint; glow stays 0, so
+                 * the light spill nulls itself. Same side preference as
+                 * the glow: the reflective floor may be behind the line. */
+                int rpic = -1;
+                if (D_FlatReflective(front->floorpic)) {
+                    rpic = front->floorpic; gz = ffloor;
+                } else if (back && D_FlatReflective(back->floorpic)) {
+                    rpic = back->floorpic;  gz = bfloor;
+                }
+                if (rpic >= 0) {
+                    cur_wall.reflect = 1;
+                    cur_wall.glowz   = gz;
+                    D_FlatGlowRGB(rpic, cur_wall.glow_rgb);
+                } else {
+                    cur_wall.glow_rgb[0] = cur_wall.glow_rgb[1] =
+                    cur_wall.glow_rgb[2] = 1.0f;
+                }
             }
         }
 #endif

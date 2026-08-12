@@ -111,6 +111,11 @@ typedef struct {
      * flat's own art via D_FlatGlowRGB); {1,1,1} when glow is zero. Feeds
      * the per-quad tint -- brightness stays per-corner via `glow`. */
     float   glow_rgb[3];
+    /* The adjacent floor mirrors (every glowing liquid, plus the polished
+     * surfaces registered reflective-only). glowz doubles as the mirror
+     * plane and glow_rgb as its tint; glow stays 0 for the non-liquids,
+     * which nulls the light spill without a second code path. */
+    uint8_t reflect;
 #endif
 } r_wall_t;
 

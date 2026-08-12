@@ -681,13 +681,12 @@ R_HOT void r_draw_wall_win(const r_camera_t *cam, const r_wall_t *wall,
     if (!tex) return;
 
 #if R_REFLECT && D_DYNLIGHT
-    /* A wall that receives glow-spill stands over the liquid that spills
-     * it -- exactly the wall whose mirror belongs in the pool. glowz is
-     * the waterline and glow_rgb the tint, both already computed. The
-     * queue rejects consecutive duplicates itself: this function runs
-     * once per uncovered column range, and a twice-blended ghost would
-     * double its alpha at the seam. */
-    if (wall->glow > 0.0f) {
+    /* A wall over liquid or a polished floor mirrors into it: glowz is
+     * the plane and glow_rgb the tint, both already computed. The queue
+     * rejects consecutive duplicates itself: this function runs once per
+     * uncovered column range, and a twice-blended ghost would double its
+     * alpha at the seam. */
+    if (wall->reflect) {
         void r_reflect_wall_add(const r_wall_t *w);
         r_reflect_wall_add(wall);
     }

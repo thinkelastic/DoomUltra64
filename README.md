@@ -63,8 +63,10 @@ pixel-identical to its plain output:
   the projectile's glow, interpolated like every other thing, and invisible
   to demo sync (the spawn consumes no random stream at all, so the title
   attracts play back unchanged).
-- **Liquid reflections** (`REFLECT=0`). Things over a glowing pool mirror
-  in it, dimmed and tinted the liquid's own hue. The image is masked to
+- **Reflections** (`REFLECT=0`). Things and walls over a glowing pool
+  mirror in it, dimmed and tinted the liquid's own hue — and the polished
+  surfaces do it too: teleporter pads, the temples' green marble, and the
+  blue and silver tech floors, each tinted by its own art. The image is masked to
   pool pixels by the depth buffer alone — each vertex carries the depth at
   which its view ray crosses the water plane, so anything nearer wins and
   the mirror clips itself with zero polygon math.

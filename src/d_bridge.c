@@ -104,6 +104,7 @@ float   d_glow_amt[D_GLOW_MAX];
 float   d_glow_rgb[D_GLOW_MAX][3];      /* light colour, from the art */
 uint8_t d_glow_have_rgb[D_GLOW_MAX];
 uint8_t d_glow_class[D_GLOW_MAX];
+uint8_t d_glow_reflect[D_GLOW_MAX];
 int     d_num_glow;
 #define glow_pic      d_glow_pic
 #define glow_amt      d_glow_amt
@@ -173,6 +174,25 @@ static float glow_for_name(const char *n, uint8_t *cls)
     *cls = D_GLOW_NONE;
     return 0.0f;
 }
+
+/* Polished surfaces that mirror without glowing: no vapor, no light spill,
+ * no self-illumination -- registered with glow 0, which nulls every glow
+ * consumer -- but things and walls over them queue reflections, tinted by
+ * the surface's own baked colour like the liquids are. The list is the
+ * shiny art: teleporter pads, the temples' green marble, and the polished
+ * blue and silver tech plates. Exact names where a prefix would catch
+ * matte cousins (FLAT2, FLAT17..19, DEM1_1..4). */
+static int reflect_for_name(const char *n)
+{
+    if (!strncasecmp(n, "GATE",   4)) return 1;   /* GATE1..4  */
+    if (!strncasecmp(n, "CEIL4_", 6)) return 1;   /* CEIL4_1..3 */
+    if (!strcasecmp (n, "DEM1_5"))    return 1;
+    if (!strcasecmp (n, "DEM1_6"))    return 1;
+    if (!strcasecmp (n, "FLAT14"))    return 1;
+    if (!strcasecmp (n, "FLAT22"))    return 1;
+    if (!strcasecmp (n, "FLAT23"))    return 1;
+    return 0;
+}
 #endif /* D_DYNLIGHT */
 
 int R_FlatNumForName(const char *name)
@@ -184,15 +204,17 @@ int R_FlatNumForName(const char *name)
 
 #if D_DYNLIGHT
     uint8_t cls;
-    const float g = glow_for_name(name, &cls);
-    if (g > 0.0f && idx >= 0 && num_glow < GLOW_MAX) {
+    const float g   = glow_for_name(name, &cls);
+    const int   rfl = g > 0.0f ? 1 : reflect_for_name(name);
+    if ((g > 0.0f || rfl) && idx >= 0 && num_glow < GLOW_MAX) {
         bool seen = false;
         for (int i = 0; i < num_glow; i++)
             if (glow_pic[i] == (int16_t)idx) { seen = true; break; }
         if (!seen) {
-            glow_pic[num_glow]     = (int16_t)idx;
-            glow_amt[num_glow]     = g;
-            d_glow_class[num_glow] = cls;
+            glow_pic[num_glow]       = (int16_t)idx;
+            glow_amt[num_glow]       = g;
+            d_glow_class[num_glow]   = cls;
+            d_glow_reflect[num_glow] = (uint8_t)rfl;
             num_glow++;
         }
     }
