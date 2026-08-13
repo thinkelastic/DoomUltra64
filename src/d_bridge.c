@@ -1163,8 +1163,17 @@ void D_LightsUpdate(void)
     {
         static int last_dmg;
         const int dc = pl->damagecount;
-        if (dc > last_dmg)
-            D_RumbleAdd((float)(dc - last_dmg) * (1.0f / 40.0f));
+        if (dc > last_dmg) {
+            /* Any hit must be FELT: the motor needs ~100 ms spun up
+             * before it registers, so a bare damage/40 made a pistol
+             * graze a single-frame blip no hardware can show -- proven
+             * on an Analogue 3D where explosions thumped and hits were
+             * silent. Floor every hit at a solid tap and let heavy ones
+             * approach a full charge. */
+            float a = 0.35f + (float)(dc - last_dmg) * (1.0f / 60.0f);
+            if (a > 1.0f) a = 1.0f;
+            D_RumbleAdd(a);
+        }
         last_dmg = dc;
     }
 #endif
