@@ -112,6 +112,22 @@ N64_CFLAGS += -DD_SOUND=$(SOUND)
 LEVELTEST ?= 0
 N64_CFLAGS += -DD_LEVELTEST=$(LEVELTEST)
 
+# EXITAT=n finishes the level at tic n, so the intermission can be reached
+# unattended -- the screen after a level, with that level's textures still
+# resident. Pair with MAP=e,m to pick which level's working set is in the
+# arena when the intermission asks for its own art.
+EXITAT ?= 0
+N64_CFLAGS += -DD_EXITAT=$(EXITAT)
+
+# TEXARENA=<KB> shrinks the texture arena below this console's 2 MB, to
+# reproduce a tighter budget than the machine in hand has. The
+# intermission loads its own art while the finished level's is still
+# resident, so what is left over decides whether it draws at all.
+TEXARENA ?= 0
+ifneq ($(TEXARENA),0)
+N64_CFLAGS += -DMEM_TEXTURE_ARENA=$(shell expr $(TEXARENA) \* 1024)
+endif
+
 ROTTEST ?= 0
 N64_CFLAGS += -DR_ROT_TEST=$(ROTTEST)
 

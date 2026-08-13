@@ -30,7 +30,13 @@
  * The 1334 KB this comment used to quote was a load-time reading, taken
  * before the level's textures and every demand-loaded sprite frame had
  * arrived; it understated the real peak by a quarter. */
+/* Overridable so a build can reproduce a tighter budget than this
+ * console has: the intermission loads its art while the finished
+ * level's is still resident, and how much room is left decides
+ * whether it draws at all. */
+#ifndef MEM_TEXTURE_ARENA
 #define MEM_TEXTURE_ARENA   (2 * 1024 * 1024)
+#endif
 
 /* Reserved for sprite frames, and never used: dt64_load puts every texture,
  * sprites included, in MEM_ARENA_TEXTURE. Nothing in the tree references

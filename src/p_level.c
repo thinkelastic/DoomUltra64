@@ -376,6 +376,14 @@ static int tex_resolve_pfx(const uint8_t *name8, const char *prefix)
          * quiet. */
         if (!prefix[0])
             debugf("tex miss: %s\n", path);
+#if DEBUG_RDP
+        /* UI misses were silent, and silence is how an unpainted
+         * intermission looks exactly like a working one that drew
+         * nothing. Under DEBUG they name themselves. */
+        else if (prefix[0] == 'u')
+            debugf("ui miss: %s (slots %d/%d)\n", path, lvl_numtex,
+                   MAX_LEVEL_TEX);
+#endif
         /* Only a genuinely absent file is remembered. A failed read or a
          * momentarily full arena must stay retryable, or one bad cartridge
          * read hides that sprite for the whole level. */
