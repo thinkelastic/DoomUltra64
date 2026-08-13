@@ -17,6 +17,7 @@
 #include "p_level.h"
 #include "r_bsp.h"
 #include "r_flat.h"
+#include "r_halo.h"
 #include "r_sky.h"
 #include "r_sprite.h"
 #include "r_vapor.h"
@@ -221,6 +222,7 @@ static void scene_init(void)
 
         D_InitPicTables(1024);
         r_vapor_init();
+        r_halo_init();
 
         /* Menus, status bar and messages BEFORE the first level load: Doom's
          * own P_SpawnPlayer calls ST_Start and HU_Start for the console
@@ -877,6 +879,7 @@ int main(void)
         r_flat_begin();
         r_sprite_begin();
         r_vapor_begin();
+        r_halo_begin();
         r_setup_walls();
         r_sky_span_reset();
 #if D_DYNLIGHT
@@ -955,6 +958,10 @@ int main(void)
           /* Vapor last among the world passes: translucency needs every
            * opaque pixel behind it -- walls, flats, sprites, sky --
            * already resolved, and its z-probe does the hiding. */
+          /* Light in the air: shafts and halos before the vapor, which
+           * is thicker and belongs in front of them. */
+          if (level_loaded && D_InLevel() && !D_AutomapActive())
+              r_halo_flush(&cam);
           if (level_loaded && D_InLevel() && !D_AutomapActive())
               r_vapor_flush(&cam); }
 

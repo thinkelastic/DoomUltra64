@@ -228,6 +228,45 @@ int R_CheckTextureNumForName(const char *name)
     return p_level_resolve(name, "");
 }
 
+#if R_HALO
+/* Which sectors are light WELLS: a sky ceiling that is a hole in a roof,
+ * rather than part of the open air.
+ *
+ * Span alone cannot tell them apart. E1M2 has a small sky sector sitting
+ * inside a large one -- a raised platform in an open courtyard -- and by
+ * size it looks exactly like a chimney. The difference is what surrounds
+ * it: a well's neighbours are roofed rooms, open sky's neighbours are
+ * more sky. So a sector qualifies only if no two-sided line joins it to
+ * another sky-ceilinged sector.
+ *
+ * One pass over the linedefs at load, and the frame just reads a byte. */
+static uint8_t *sky_well;
+
+int D_SectorIsSkyWell(int secnum)
+{
+    return sky_well && secnum >= 0 && secnum < numsectors && sky_well[secnum];
+}
+
+void D_BuildSkyWells(void)
+{
+    sky_well = Z_Malloc(numsectors, PU_LEVEL, NULL);
+    if (!sky_well) return;
+
+    for (int i = 0; i < numsectors; i++)
+        sky_well[i] = sectors[i].ceilingpic == skyflatnum;
+
+    for (int i = 0; i < numlines; i++) {
+        const line_t *ld = &lines[i];
+        if (!ld->frontsector || !ld->backsector) continue;
+        if (ld->frontsector->ceilingpic != skyflatnum) continue;
+        if (ld->backsector->ceilingpic  != skyflatnum) continue;
+        /* Sky on both sides: neither is a hole in anything. */
+        sky_well[ld->frontsector - sectors] = 0;
+        sky_well[ld->backsector  - sectors] = 0;
+    }
+}
+#endif
+
 /* --- renderer: load-time precomputation the RDP does not need ---------- */
 
 /* Doom builds per-seg and per-sector render caches at load because its

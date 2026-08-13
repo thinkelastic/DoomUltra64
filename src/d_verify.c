@@ -91,6 +91,9 @@ void D_LevelPostSetup(void)
     }
     { void p_level_anim_init(void); p_level_anim_init(); }
 
+#if R_HALO
+    { void D_BuildSkyWells(void); D_BuildSkyWells(); }
+#endif
     R_BuildSubsectorData();
     r_pvs_load(gameepisode, gamemap);
     D_SetSky(gameepisode);

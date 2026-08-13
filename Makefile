@@ -326,6 +326,15 @@ N64_CFLAGS += -DR_VAPOR=$(VAPOR)
 SMOKETRAIL ?= 1
 N64_CFLAGS += -DD_SMOKETRAIL=$(SMOKETRAIL)
 
+# HALO=0 removes light in the air: the glow around every dynamic light,
+# and the shafts that fall through small sky openings. Both are one
+# primitive -- a view-facing translucent billboard, z-tested against the
+# world, added rather than mixed -- and both cost fill rather than CPU,
+# which the Aug 12 hardware session priced as affordable (rdp_busy 41%
+# median). Shafts are rejected over open sky; see r_halo.h.
+HALO ?= 1
+N64_CFLAGS += -DR_HALO=$(HALO)
+
 # REFLECT=1 draws mirror images of things standing over glowing liquid --
 # a monster wading through nukage reflects in it, dimmed and tinted the
 # pool's own hue. The image is masked to pool pixels by the z-buffer alone
@@ -483,6 +492,9 @@ src += src/r_vapor.c
 endif
 ifeq ($(RUMBLE),1)
 src += src/d_rumble.c
+endif
+ifeq ($(HALO),1)
+src += src/r_halo.c
 endif
 
 # floorf/ceilf as instructions instead of libm calls, for the WHOLE link.

@@ -38,6 +38,7 @@ void       *R_SpriteFrame(int sprite, int frame, int rot);
 angle_t     R_PointToAngle2(fixed_t x1, fixed_t y1, fixed_t x2, fixed_t y2);
 
 #include "r_flat.h"
+#include "r_halo.h"
 #include "r_light.h"
 #include "r_pvs.h"
 #include "r_sky.h"
@@ -737,6 +738,19 @@ static void render_flats_inner(const subsector_t *ss)
         r_sky_span_add(lo, hi);
     }
     const r_polypt_t *pts = &r_regionpts[rg->firstpt];
+
+#if R_HALO
+    /* A sky ceiling over a SMALL enclosed plan is a light well, and light
+     * falls through it. r_shaft_add applies that test and rejects open
+     * sky, where a visible beam would look wrong. */
+    { int D_SectorIsSkyWell(int secnum);
+      if (sec->ceilingpic == skyflatnum &&
+          D_SectorIsSkyWell((int)(sec - sectors)))
+        r_shaft_add(pts, rg->numpts, fx(sec->floorheight),
+                    fx(sec->ceilingheight),
+                    sec->lightlevel < 0 ? 0 :
+                    sec->lightlevel > 255 ? 255 : sec->lightlevel); }
+#endif
 
     const int light = sec->lightlevel < 0 ? 0 :
                       sec->lightlevel > 255 ? 255 : sec->lightlevel;
