@@ -493,6 +493,23 @@ static void run_game_tics(uint32_t frame_us)
         if (gametic >= D_FREEZE) { carry_us = 0; tic_stamp = TICKS_READ(); return; }
     }
 #endif
+#if D_EXITAT
+    /* Reach the INTERMISSION unattended: finish the level at a fixed tic,
+     * exactly as touching the exit switch would. The intermission loads
+     * its background and fonts into the same texture arena the level's
+     * own art is still holding -- which is a pure memory-budget question
+     * and therefore reproducible here, not a hardware one. Fires once. */
+    {
+        extern int gametic;
+        static int exited;
+        void G_ExitLevel(void);
+        int  D_InLevel(void);
+        if (!exited && gametic >= D_EXITAT && D_InLevel()) {
+            exited = 1;
+            G_ExitLevel();
+        }
+    }
+#endif
     int guard = 0;
     while (carry_us >= 28571u && guard < 4) {
         carry_us -= 28571u;
@@ -734,6 +751,33 @@ int main(void)
 #endif
 
     while (1) {
+        /* The level's art dies with the level. Release it the moment the
+         * game leaves GS_LEVEL -- for the intermission, the finale, or the
+         * attract screen -- instead of holding it until the NEXT level
+         * loads, which is when p_load_level used to do it.
+         *
+         * That delay was a real bug: the intermission loads its own
+         * background and fonts while the finished level's working set is
+         * still resident, so on a heavy map it was bidding for the last
+         * hundred kilobytes of the arena. When it lost, dt64_load failed,
+         * V_DrawPatch drew nothing, and the screen came up black with only
+         * the stats on it -- silently, because a UI miss prints nothing.
+         * Reproduced with TEXARENA=1630 on E2M2 ("ui miss: /u_WIMAP1.dt64",
+         * "arena exhausted (need 62 KB, 29 KB free)"), which is the same
+         * squeeze a 1914 KB peak leaves on the console's 2 MB.
+         *
+         * p_level_reset_assets is the function p_load_level already used;
+         * it drops the arena and every cache that holds resolved pointers
+         * into it. Nothing between here and the next level renders the
+         * world, and the wipe melts a saved framebuffer, not textures. */
+        {
+            int  D_InLevel(void);
+            void p_level_reset_assets(void);
+            static int was_in_level;
+            const int in_level = D_InLevel();
+            if (was_in_level && !in_level) p_level_reset_assets();
+            was_in_level = in_level;
+        }
         {
             void D_SetTicFrac(uint32_t into_tic_us);
             void D_InterpBegin(void);
