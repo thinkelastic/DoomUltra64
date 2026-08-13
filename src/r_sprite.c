@@ -91,6 +91,11 @@ typedef struct {
 static reflregion_t reflreg[REFL_REGION_MAX];
 static int          numreflreg;
 
+/* Self-report for the HWSTAT line: how many footprints the walk queued
+ * and how many ghost triangles actually reached the RDP this frame. The
+ * pair separates "floor never registered" from "ghosts all culled". */
+int r_refl_dbg_regions, r_refl_dbg_tris;
+
 void r_reflect_region(const r_polypt_t *pts, int npts, float h)
 {
     if (npts < 3 || numreflreg >= REFL_REGION_MAX) return;
@@ -114,7 +119,9 @@ void r_sprite_begin(void)
     numjobs = stat_drawn = stat_uploads = stat_dropped = 0;
 #if R_REFLECT
     numrefl = 0;
+    r_refl_dbg_regions = numreflreg;   /* last frame's count, now complete */
     numreflreg = 0;
+    r_refl_dbg_tris = 0;
 #if D_DYNLIGHT
     numrwrefl = 0;      /* a frame whose flush never ran must not leak */
 #endif
@@ -534,9 +541,13 @@ void r_reflect_add(const r_camera_t *cam, const r_thing_t *t,
 #else
     (void)fog_ll;
 #endif
-    j->sr = sh[0] * k * (0.34f + 0.30f * pool_rgb[0]);
-    j->sg = sh[1] * k * (0.34f + 0.30f * pool_rgb[1]);
-    j->sb = sh[2] * k * (0.34f + 0.30f * pool_rgb[2]);
+    /* Tuned on a real TV, not the emulator: composite video and CRT
+     * gamma eat dim blends, so the ghost runs brighter than a monitor
+     * would suggest. Console diagnostic R3/17 proved the geometry was
+     * rendering while the player saw nothing. */
+    j->sr = sh[0] * k * (0.46f + 0.30f * pool_rgb[0]);
+    j->sg = sh[1] * k * (0.46f + 0.30f * pool_rgb[1]);
+    j->sb = sh[2] * k * (0.46f + 0.30f * pool_rgb[2]);
 }
 
 #if D_DYNLIGHT
@@ -649,6 +660,7 @@ static void refl_emit_clipped(const r_camera_t *cam, float q[4][10],
         for (int i = 1; i + 1 < n; i++) {
             rdpq_triangle(&TRIFMT_SPR, v[0], v[i], v[i + 1]);
             r_tri_spr++;
+            r_refl_dbg_tris++;
         }
     }
 }
@@ -719,8 +731,15 @@ void r_reflect_flush(const r_camera_t *cam)
              * double the flat pass's worst banding sag (~2^-7). */
             const float dc_hi = j->depth * eh / (cam->z - zi_hi);
             const float dc_lo = j->depth * eh / (cam->z - zi_lo);
-            float z_hi = 1.0f - R_FLAT_NEAR / dc_hi + (1.0f / 64.0f);
-            float z_lo = 1.0f - R_FLAT_NEAR / dc_lo + (1.0f / 64.0f);
+            /* MINUS: nearer than the plane, so the ghost wins the pool's
+             * own pixels (including its banding sag) and loses to true
+             * occluders. The brief +2^-6 era was the z-push design's
+             * leftover -- with the push reverted it put every ghost
+             * BEHIND its pool and the real RDP culled them all, R7/42
+             * submitted and zero visible. Neighbour bleed, the reason
+             * the sign once flipped, is the region clip's job now. */
+            float z_hi = 1.0f - R_FLAT_NEAR / dc_hi - (1.0f / 64.0f);
+            float z_lo = 1.0f - R_FLAT_NEAR / dc_lo - (1.0f / 64.0f);
             if (z_hi > 1.0f) z_hi = 1.0f;
             if (z_lo > 1.0f) z_lo = 1.0f;
             if (z_hi < 0.0f) z_hi = 0.0f;
@@ -730,12 +749,12 @@ void r_reflect_flush(const r_camera_t *cam)
              * down, dying REFL_FADE_T units below the plane -- water's
              * own look, and the soft cap on how far anything ghosts. */
             #define REFL_FADE_T 64.0f
-            float a_hi = 0.55f * (zi_hi - (j->plane_h - REFL_FADE_T))
+            float a_hi = 0.72f * (zi_hi - (j->plane_h - REFL_FADE_T))
                                * (1.0f / REFL_FADE_T);
-            float a_lo = 0.55f * (zi_lo - (j->plane_h - REFL_FADE_T))
+            float a_lo = 0.72f * (zi_lo - (j->plane_h - REFL_FADE_T))
                                * (1.0f / REFL_FADE_T);
-            if (a_hi > 0.55f) a_hi = 0.55f;
-            if (a_lo > 0.55f) a_lo = 0.55f;
+            if (a_hi > 0.72f) a_hi = 0.72f;
+            if (a_lo > 0.72f) a_lo = 0.72f;
             if (a_hi <= 0.0f) continue;
             if (a_lo < 0.0f) a_lo = 0.0f;
 
@@ -830,9 +849,9 @@ void r_reflect_wall_add(const r_wall_t *w)
     r->light   = w->light;
 
     const float l = (float)w->light * (1.0f / 255.0f);
-    r->sr = l * (0.34f + 0.30f * w->glow_rgb[0]);
-    r->sg = l * (0.34f + 0.30f * w->glow_rgb[1]);
-    r->sb = l * (0.34f + 0.30f * w->glow_rgb[2]);
+    r->sr = l * (0.46f + 0.30f * w->glow_rgb[0]);
+    r->sg = l * (0.46f + 0.30f * w->glow_rgb[1]);
+    r->sb = l * (0.46f + 0.30f * w->glow_rgb[2]);
 }
 
 /* Emit the queued wall ghosts; called from r_reflect_flush inside its mode
@@ -914,9 +933,9 @@ static void reflect_walls_emit(const r_camera_t *cam)
         /* Both edges fade with image depth, not just the foot: an
          * elevated wall's whole band sits deep and starts already dim. */
         const float aa[2] = {
-            0.45f * (zi_top - (r->plane_h - REFL_WALL_FADE))
+            0.62f * (zi_top - (r->plane_h - REFL_WALL_FADE))
                   * (1.0f / REFL_WALL_FADE),
-            0.45f * (zi_bot - (r->plane_h - REFL_WALL_FADE))
+            0.62f * (zi_bot - (r->plane_h - REFL_WALL_FADE))
                   * (1.0f / REFL_WALL_FADE) };
         for (int c = 0; c < 4; c++) {
             const int side = (c == 1 || c == 2);      /* right column */
@@ -933,10 +952,9 @@ static void reflect_walls_emit(const r_camera_t *cam)
             v[c][7] = ta[row] * iw;
             v[c][8] = iw;
             {
-                /* +2^-6, between the true plane and the reflective
-                 * flat's 2^-5 push -- see the thing emitter. */
+                /* -2^-6, nearer than the plane: see the thing emitter. */
                 const float dc = d * eh / (cam->z - zi);
-                float z = 1.0f - R_FLAT_NEAR / dc + (1.0f / 64.0f);
+                float z = 1.0f - R_FLAT_NEAR / dc - (1.0f / 64.0f);
                 if (z > 1.0f) z = 1.0f;
                 if (z < 0.0f) z = 0.0f;
                 v[c][9] = z;
