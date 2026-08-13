@@ -1409,7 +1409,12 @@ void D_LightsUpdate(void)
          * twice from play. Keys, armour, muzzle flashes and the
          * emissive floors keep their full size. */
         switch (mo->type) {
-            case MT_ROCKET: case MT_BARREL:
+            /* A barrel going up is the biggest fireball in the game and
+             * carries a wider glow than the things that merely fly. */
+            case MT_BARREL:
+                r_light_halo_next(0.325f);
+                break;
+            case MT_ROCKET:
             case MT_TROOPSHOT: case MT_HEADSHOT: case MT_BRUISERSHOT:
             case MT_PLASMA: case MT_BFG:
                 r_light_halo_next(0.25f);

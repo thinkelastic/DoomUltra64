@@ -46,24 +46,24 @@ void r_halo_init(void)
             float r2 = dx * dx + dy * dy;
             if (r2 > 1.0f) r2 = 1.0f;
 
-            /* An annulus, not a disc: the glow you see is the air AROUND
-             * a source, and the source itself is already drawn there --
-             * its sprite, at its own brightness. Leaving the middle
-             * clear means no blend of any kind touches the core, so a
-             * fireball keeps its own colour however bright it is, and
-             * the halo can only ever add to its surroundings.
+            /* A disc with a softened core, not a ring.
              *
-             * Peaks near half the radius, zero at the centre and at the
-             * rim, both edges smooth so neither shows as a ring. */
+             * This was a true annulus -- zero at the centre -- to keep
+             * any blend off the source's own pixels while the blender
+             * was still darkening what it touched. With that fixed the
+             * hole is no longer needed, and it was WIDER than the sprite
+             * it protected: a fireball showed a visible gap between the
+             * ball and its glow. The core is now merely damped rather
+             * than empty, so the glow runs continuously outward from the
+             * sprite's edge, and the falloff still carries most of the
+             * light into the air around it where it belongs. */
             const float r = rf_sqrtf_approx(r2);
-            float fall;
-            if (r < 0.42f) {
-                const float u = r * (1.0f / 0.42f);    /* 0 centre .. 1 peak */
-                fall = u * u;
-            } else {
-                const float u = (1.0f - r) * (1.0f / 0.58f); /* 1 peak .. 0 rim */
-                fall = u * u;
-            }
+            const float t = 1.0f - r;
+            float fall = t * t;                        /* 1 centre .. 0 rim */
+            const float damp = r < 0.30f
+                             ? 0.62f + 0.38f * (r * (1.0f / 0.30f))
+                             : 1.0f;
+            fall *= damp;
             if (fall < 0.0f) fall = 0.0f;
             int a = (int)(fall * 15.0f + 0.5f);
             if (a > 15) a = 15;
