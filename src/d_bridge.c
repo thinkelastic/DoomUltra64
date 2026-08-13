@@ -1161,20 +1161,31 @@ void D_LightsUpdate(void)
      * one per tic, so a rise is a fresh hit -- the same signal the red
      * flash keys on. Runs once per gametic behind this function's cache. */
     {
-        static int last_dmg;
+        static int last_dmg, last_health;
         const int dc = pl->damagecount;
-        if (dc > last_dmg) {
+        const int hp = pl->health;
+        /* Two edges, strongest wins. damagecount is the red flash's
+         * signal but CAPS AT 100: under sustained battering it pins and
+         * the rise-edge goes silent exactly when the thumping should be
+         * hardest. Health drops on every damaging attack in the game --
+         * the universal edge -- and covers the saturated case. */
+        int hurt = 0;
+        if (dc > last_dmg)     hurt = dc - last_dmg;
+        if (hp < last_health && last_health - hp > hurt)
+            hurt = last_health - hp;
+        if (hurt > 0) {
             /* Any hit must be FELT: the motor needs ~100 ms spun up
              * before it registers, so a bare damage/40 made a pistol
              * graze a single-frame blip no hardware can show -- proven
              * on an Analogue 3D where explosions thumped and hits were
              * silent. Floor every hit at a solid tap and let heavy ones
              * approach a full charge. */
-            float a = 0.35f + (float)(dc - last_dmg) * (1.0f / 60.0f);
+            float a = 0.35f + (float)hurt * (1.0f / 60.0f);
             if (a > 1.0f) a = 1.0f;
             D_RumbleAdd(a);
         }
-        last_dmg = dc;
+        last_dmg    = dc;
+        last_health = hp;
     }
 #endif
 
