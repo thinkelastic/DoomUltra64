@@ -1197,6 +1197,33 @@ void D_LightsUpdate(void)
         r_light_add(px, py, (float)pl->mo->z / 65536.0f + 32.0f, 512.0f, 1.0f,
                     1.00f, 0.93f, 0.78f);          /* warm gunpowder white */
 
+#if D_RUMBLE
+    /* Weapon kick: a short light pulse each time the muzzle flash state
+     * changes -- one per shot, including each round of a chaingun volley
+     * (its flash states alternate). Scaled per weapon and deliberately
+     * lighter than the flat 0.6 hit thump, so recoil and pain stay
+     * distinct in the hand. Melee has no flash and no kick. */
+    {
+        static const void *last_flash;
+        const void *fs = pl->psprites[ps_flash].state;
+        if (fs && fs != last_flash) {
+            float k = 0.18f;
+            switch (pl->readyweapon) {
+                case wp_pistol:        k = 0.18f; break;
+                case wp_shotgun:       k = 0.35f; break;
+                case wp_supershotgun:  k = 0.45f; break;
+                case wp_chaingun:      k = 0.15f; break;
+                case wp_missile:       k = 0.50f; break;
+                case wp_plasma:        k = 0.12f; break;
+                case wp_bfg:           k = 0.70f; break;
+                default: break;
+            }
+            D_RumbleAdd(k);
+        }
+        last_flash = fs;
+    }
+#endif
+
     for (thinker_t *th = thinkercap.next; th != &thinkercap; th = th->next) {
         if (th->function.acp1 != (actionf_p1)P_MobjThinker) continue;
         const mobj_t *mo = (const mobj_t *)th;
