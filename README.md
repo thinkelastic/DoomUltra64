@@ -133,17 +133,35 @@ that clamp collapses quad edges. Near walls already project to y = -3360 at
 320 wide; scaling Y as well would double every such value and drive far more
 geometry into a clamp that is a known source of artefacts.
 
-The flag is built to move **one** variable. Geometry, CPU submit cost and TMEM
-uploads are all unchanged — upload count is set by which tiles are on screen,
-not by how many pixels they cover, and LOD selection is deliberately pinned to
-the vertical scale so both modes pick the same mips. `make test WIDE=1`
-confirms it: identical upload and triangle counts to the 320 build, `oob=0`.
-What doubles is fill rate, RDRAM bandwidth, and the framebuffers.
+Geometry and TMEM uploads really are unchanged — upload count is set by which
+tiles are on screen, not by how many pixels they cover, and LOD selection is
+deliberately pinned to the vertical scale so both modes pick the same mips.
+`make test WIDE=1` confirms it: identical upload and triangle counts to the
+320 build, `oob=0`.
 
-So an A/B of the `f` and `c` figures in the `HWSTAT` line answers exactly one
-question: **is there spare RDP capacity at 320x240?** If `f` barely moves, the
-RDP was idle and the pixels are nearly free. If it tracks the doubled fill,
-the RDP was already the constraint.
+**CPU submit is not unchanged, and this flag is not a clean fill-rate probe.**
+That was the original claim here and hardware disproved it. Measured over the
+same demo route on a stock console:
+
+| | 320x240 | 640x240 |
+|---|---|---|
+| frame time, median | 16.9 ms | 21.3 ms |
+| CPU submit, median | 8.0 ms | 14.4 ms |
+| BSP walk | 3.4 ms | 8.8 ms |
+| missed vsync | 52% | 92% |
+
+The walk more than doubled, and it is CPU work. The occlusion machinery is
+indexed by SCREEN COLUMN — `clip_top[SCREEN_W]`, `clip_bot[SCREEN_W]`, and the
+per-column loops in `clip_solid`, `clip_narrow` and `emit_range` — so twice the
+width means twice those iterations, and the flat pass's span work scales the
+same way. Fill rate and RDRAM bandwidth do double as well, but on a frame that
+is CPU-bound they are not what you are measuring.
+
+The practical consequence: an overclocked CPU buys far more in wide mode than
+an overclocked RDP does. Wide ROMs are shipped separately (`DoomUltra.z64`)
+rather than as a runtime setting, because switching resolution at runtime would
+mean reserving the wide framebuffers permanently — 600 KB out of a texture
+arena that already peaks at 1,914 KB of 2,048 on the heaviest maps.
 
 **This measurement only works on hardware.** In ares the frame time is
 entirely CPU submit — `f` and `c` come out within ~0.2 ms of each other in

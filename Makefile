@@ -153,16 +153,18 @@ N64_CFLAGS += -DD_INTERP=$(INTERP)
 # rate, the same 240 scanlines, no interlace (the N64's 480-line modes are
 # interlaced and flicker on a CRT).
 #
-# The point of this flag is that it moves ONE variable. Geometry, CPU submit
-# cost and TMEM uploads are all unchanged -- upload count is driven by which
+# Geometry and TMEM uploads are unchanged -- upload count is driven by which
 # tiles are on screen, not by how many pixels they cover, and LOD selection is
-# deliberately pinned to the vertical scale so it picks the same mips as the
-# 320 build. What doubles is fill rate, RDRAM bandwidth, and the framebuffers
-# (~600 KB -> ~1.2 MB for three buffers plus z).
+# pinned to the vertical scale so it picks the same mips as the 320 build.
+# Vertical projection is bit-identical between the two by design.
 #
-# So an A/B of `f` in the HWSTAT line answers exactly one question: is there
-# spare RDP capacity at 320x240? Build both, run the same demo route, compare
-# medians. Vertical projection is bit-identical between the two by design.
+# CPU SUBMIT IS NOT UNCHANGED, and this is not a clean fill-rate probe. That
+# was the original claim and hardware disproved it: over the same demo route,
+# submit went 8.0 -> 14.4 ms and the BSP walk 3.4 -> 8.8 ms, because the
+# occlusion arrays and their loops are indexed per SCREEN COLUMN. Frame time
+# went 16.9 -> 21.3 ms median, vsync misses 52% -> 92%. Fill and bandwidth
+# double too (~600 KB -> ~1.2 MB of buffers), but on a CPU-bound frame they
+# are not what the number is showing you.
 WIDE ?= 0
 N64_CFLAGS += -DR_WIDE=$(WIDE)
 
