@@ -179,7 +179,15 @@ static void billboard(const r_camera_t *cam, float wx, float wy,
     const float y_bot = cy - (z_bot - cam->z) * cam->focal_y * iw;
     if (y_bot < 0.0f || y_top > (float)SCREEN_H) return;
 
-    float z = 1.0f - R_FLAT_NEAR * iw;
+    /* Slightly NEARER than the thing it belongs to. A fireball's sprite
+     * is drawn first and writes depth at exactly this distance, so a
+     * halo sharing that depth z-fights with the very object it wraps --
+     * a speckled, ragged core instead of a glow. The bias is
+     * depth-proportional, folded into the near constant, for the same
+     * reason the reflections' is: a constant in z-space is hundreds of
+     * world units out at range and none up close. A larger near
+     * constant means a smaller z, and smaller is nearer. */
+    float z = 1.0f - (R_FLAT_NEAR + 0.6f) * iw;
     if (z < 0.0f) z = 0.0f;
 
     const float xs[4] = { sx - wpx, sx + wpx, sx + wpx, sx - wpx };

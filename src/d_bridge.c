@@ -1402,16 +1402,17 @@ void D_LightsUpdate(void)
             default: continue;
         }
 
-        /* The glow IN THE AIR is half the reach for anything that flies
-         * or detonates: the light a fireball throws is wide, the fireball
-         * itself is small, and at full size the halo read as a fog bank
-         * rather than a burning thing. Keys, muzzle flashes and the
-         * emissive floors keep theirs. */
+        /* The glow IN THE AIR is a QUARTER of the reach for anything
+         * that flies or detonates: the light a fireball throws is wide,
+         * the fireball itself is small, and anything larger reads as a
+         * fog bank around it rather than a burning thing. Tightened
+         * twice from play. Keys, armour, muzzle flashes and the
+         * emissive floors keep their full size. */
         switch (mo->type) {
             case MT_ROCKET: case MT_BARREL:
             case MT_TROOPSHOT: case MT_HEADSHOT: case MT_BRUISERSHOT:
             case MT_PLASMA: case MT_BFG:
-                r_light_halo_next(0.5f);
+                r_light_halo_next(0.25f);
                 break;
             default: break;
         }
