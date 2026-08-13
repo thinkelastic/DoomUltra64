@@ -318,6 +318,23 @@ N64_CFLAGS += -DR_FASTNARROW=$(FASTNARROW)
 VAPOR ?= 1
 N64_CFLAGS += -DR_VAPOR=$(VAPOR)
 
+# LIQUIDFLOW=0 stops the liquids sliding. Vanilla nukage does not move --
+# it swaps between three stills every eight tics, which reads as a
+# slideshow. Drifting the texture coordinates turns the same frames into a
+# current, and it advances at DISPLAY rate (the sub-tic fraction rides
+# along) where the frame cycle steps at 4.4 Hz. One subtraction per
+# emissive flat per frame; nothing else moves.
+LIQUIDFLOW ?= 1
+N64_CFLAGS += -DR_LIQUIDFLOW=$(LIQUIDFLOW)
+
+# LIQUIDRIPPLE=0 stops the swell that rides on top of the drift: each
+# vertex of an emissive flat is displaced by a sine of its WORLD position,
+# so neighbouring subsectors agree exactly along shared edges. Long
+# wavelength, few texels of amplitude -- enough to undulate, small enough
+# that a T-junction's unavoidable disagreement stays under a pixel.
+LIQUIDRIPPLE ?= 1
+N64_CFLAGS += -DR_LIQUIDRIPPLE=$(LIQUIDRIPPLE)
+
 # SMOKETRAIL=1 gives rockets and the monsters' fireballs a smoke trail: the
 # same MT_SMOKE puffs the revenant's tracer already leaves, spawned one tic
 # behind the shell -- every other tic for rockets, every fourth for the

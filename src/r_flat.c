@@ -19,6 +19,13 @@
  * through a doorway, which is common. They are depth-buffered instead.
  */
 #include "r_flat.h"
+
+#ifndef R_LIQUIDRIPPLE
+#define R_LIQUIDRIPPLE 0
+#endif
+#ifndef R_LIQUIDFLOW
+#define R_LIQUIDFLOW 0
+#endif
 #include "r_fastmath.h"
 #include "r_light.h"
 #include "r_tri.h"
@@ -271,6 +278,67 @@ static float cur_inv_period = 1.0f / FLAT_PERIOD;
 static void draw_one(const r_camera_t *cam, const r_polypt_t *pts, int npts,
                      float height, float shade);
 
+#if R_LIQUIDFLOW && D_DYNLIGHT
+/* How far the liquid has slid this frame, in texels.
+ *
+ * Vanilla nukage does not move: it swaps between three stills every eight
+ * tics, which the eye reads as a slideshow rather than a current. Sliding
+ * the texture coordinates continuously turns the same three frames into
+ * flow -- and unlike the frame cycle it advances at DISPLAY rate, because
+ * the sub-tic fraction rides along, so it glides where the frames step.
+ *
+ * Kept inside one wrap period: the texture repeats infinitely, so any
+ * offset modulo the period looks identical, and staying bounded is what
+ * keeps the s10.5 coordinates the rebase worked to establish. The two
+ * axes run at different rates so the surface drifts diagonally and never
+ * reveals the period by sliding along one axis. */
+static float flow_u, flow_v;
+
+#if R_LIQUIDRIPPLE
+/* A swell across the surface, on top of the drift.
+ *
+ * Each vertex's texture coordinate is displaced by a sine of its WORLD
+ * position -- world, not screen or polygon, because adjacent subsectors
+ * share their edge vertices and both must compute the identical offset
+ * there or the pool tears along every internal boundary.
+ *
+ * Long wavelength and small amplitude, deliberately. It reads as a swell
+ * rather than a wobble, and it is also the safe choice: Doom's subsectors
+ * can meet at T-junctions, where one side carries a vertex mid-edge that
+ * its neighbour lacks, and there the two interpolations cannot agree
+ * exactly. A few texels of displacement keeps that disagreement under a
+ * pixel; a large one would open a visible seam.
+ *
+ * The two axes are driven by the opposite coordinate and at different
+ * rates, so the surface undulates instead of sliding as a block. */
+#define RIPPLE_WAVELEN 256.0f
+#define RIPPLE_K       (6.2831853f / RIPPLE_WAVELEN)
+#define RIPPLE_AMP     2.5f            /* texels */
+
+static float ripple_t;
+static int   cur_ripple;
+
+static inline void ripple_at(float wx, float wy, float *rs, float *rt)
+{
+    *rs = RIPPLE_AMP * sinf(wy * RIPPLE_K + ripple_t);
+    *rt = RIPPLE_AMP * sinf(wx * RIPPLE_K + ripple_t * 1.27f);
+}
+#endif
+
+static void flow_update(void)
+{
+    extern int   leveltime;
+    extern float d_subtic;
+    const float t = (float)leveltime + d_subtic;
+    const float u = t * 0.055f, v = t * 0.034f;
+    flow_u = u - rf_floorf(u * cur_inv_period) * cur_period;
+    flow_v = v - rf_floorf(v * cur_inv_period) * cur_period;
+#if R_LIQUIDRIPPLE
+    ripple_t = t * 0.19f;
+#endif
+}
+#endif
+
 void r_flat_flush(const r_camera_t *cam)
 {
     r_tri_group_begin();
@@ -296,6 +364,9 @@ void r_flat_flush(const r_camera_t *cam)
         cur_tscale = (float)jobtex[t]->width * (1.0f / 64.0f);
         cur_period = (float)jobtex[t]->width;
         cur_inv_period = 1.0f / cur_period;
+#if R_LIQUIDFLOW && D_DYNLIGHT
+        flow_update();          /* the period just changed; rewrap */
+#endif
         r_tri_group_begin();               /* TMEM changed: re-register */
 #if D_HWSTAT
         stat_bind_us += TICKS_TO_US(TICKS_SINCE(t_));
@@ -311,6 +382,9 @@ void r_flat_flush(const r_camera_t *cam)
             cur_tint[2] = jobs[i].tint[2] * (1.0f / 255.0f);
             cur_lit     = jobs[i].lit;
             cur_neutral = !cur_lit && jobs[i].glow == 0;
+#if R_LIQUIDRIPPLE
+            cur_ripple  = jobs[i].glow > 0;
+#endif
 #endif
             draw_one(cam, jobs[i].pts, jobs[i].npts, jobs[i].height,
                      (float)jobs[i].shade_ll * (1.0f / 255.0f));
@@ -478,8 +552,14 @@ static void draw_one(const r_camera_t *cam, const r_polypt_t *pts, int npts,
         if (sx < smin) smin = sx;
         if (ty < tmin) tmin = ty;
     }
-    const float sorg = rf_floorf(smin * cur_inv_period) * cur_period;
-    const float torg = rf_floorf(tmin * cur_inv_period) * cur_period;
+    float sorg = rf_floorf(smin * cur_inv_period) * cur_period;
+    float torg = rf_floorf(tmin * cur_inv_period) * cur_period;
+#if R_LIQUIDFLOW && D_DYNLIGHT
+    /* Only what glows: sludge, lava, blood, water. Concrete does not
+     * flow, and the polished floors registered reflective-only carry no
+     * glow, so they stay put too. */
+    if (cur_glow > 0.0f) { sorg -= flow_u; torg -= flow_v; }
+#endif
 
     /* --- depth banding --------------------------------------------------
      * Split the polygon into bands of bounded depth ratio before projecting,
@@ -693,6 +773,21 @@ static int clip_depth(const fvtx_t *in, int n, fvtx_t *out, float d0, bool keep_
     return m;
 }
 
+/* Ripple offsets in TEXELS, so the direct path (which works in s10.5)
+ * and the registration path (which works in texels) apply the same
+ * number and stay bit-identical where the ripple is off.
+ *
+ * FILE SCOPE on purpose: the reference path lives in the #else of
+ * R_TRI_DIRECT, and defining this inside the direct branch left the host
+ * harness -- the only build that compiles that path -- without it. */
+#if R_LIQUIDRIPPLE
+#define FAN_RIPPLE_DECL(p)                                                  \
+        float rs_ = 0.0f, rt_ = 0.0f;                                       \
+        if (cur_ripple) ripple_at((p)->wx, (p)->wy, &rs_, &rt_);
+#else
+#define FAN_RIPPLE_DECL(p) const float rs_ = 0.0f, rt_ = 0.0f; (void)rs_; (void)rt_;
+#endif
+
 static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
                      float dz, float shade, float sorg, float torg)
 {
@@ -740,8 +835,9 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
         FAN_SHADE_DECL(p)                                                   \
         const int16_t xi = (int16_t)rf_floor_i32(sx * 4.0f);                \
         const int16_t yi = (int16_t)rf_floor_i32(sy * 4.0f);                \
-        const int16_t si = (int16_t)(p->wx * tsc32 - sorg32);               \
-        const int16_t ti = (int16_t)(p->wy * tsc32 - torg32);               \
+        FAN_RIPPLE_DECL(p)                                                  \
+        const int16_t si = (int16_t)(p->wx * tsc32 - sorg32 + rs_ * 32.0f); \
+        const int16_t ti = (int16_t)(p->wy * tsc32 - torg32 + rt_ * 32.0f); \
         float zv = 1.0f - FLAT_Z_NEAR * iw;                                 \
         if (zv < 0.0f) zv = 0.0f;                                           \
         const int16_t zi = (int16_t)(zv * 0x7FFF);                          \
@@ -826,8 +922,9 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
                 x3[i][2] = x3[i][3] = x3[i][4] = shade * vis;
 #endif
                 x3[i][5] = 1.0f;
-                x3[i][6] = c[i].wx * tscale - sorg;
-                x3[i][7] = c[i].wy * tscale - torg;
+                FAN_RIPPLE_DECL(&c[i])
+                x3[i][6] = c[i].wx * tscale - sorg + rs_;
+                x3[i][7] = c[i].wy * tscale - torg + rt_;
                 x3[i][8] = iw;
                 float zv = 1.0f - FLAT_Z_NEAR * iw;
                 x3[i][9] = zv < 0.0f ? 0.0f : zv;
@@ -890,8 +987,9 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
         sv[i][2] = sv[i][3] = sv[i][4] = shade * vis;
 #endif
         sv[i][5] = 1.0f;
-        sv[i][6] = c[i].wx * tscale - sorg;
-        sv[i][7] = c[i].wy * tscale - torg;
+        FAN_RIPPLE_DECL(&c[i])
+        sv[i][6] = c[i].wx * tscale - sorg + rs_;
+        sv[i][7] = c[i].wy * tscale - torg + rt_;
         sv[i][8] = iw;
         /* Depth for the Z-buffer, 0 at the near plane rising to 1 far away.
          * Geometry may now live nearer than the curve's near constant
