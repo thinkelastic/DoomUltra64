@@ -344,6 +344,14 @@ N64_CFLAGS += -DD_CI4FLATS=$(CI4FLATS)
 RUMBLE ?= 1
 N64_CFLAGS += -DD_RUMBLE=$(RUMBLE)
 
+# KEYLIGHT=0 removes the glow from key cards and skulls. They are the
+# dimmest entries in the light registry on purpose: eight slots with
+# weakest-first eviction means a fireball can always take a key's slot in
+# a firefight, and the small radius pools light around the key instead of
+# lighting the room.
+KEYLIGHT ?= 1
+N64_CFLAGS += -DD_KEYLIGHT=$(KEYLIGHT)
+
 # FORCERUMBLE=1 is a DIAGNOSTIC: drive the motor without the accessory
 # handshake, self-pulsing every four seconds -- for third-party pads with
 # built-in rumble that never identify as a Rumble Pak. Never a default:

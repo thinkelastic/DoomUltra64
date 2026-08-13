@@ -1189,6 +1189,16 @@ void D_LightsUpdate(void)
      * looking at closely enough to matter, and the list is small. */
     const float CULL = 1400.0f;
 
+    /* Keys glow. They are one to three per level, static until taken, and
+     * removed from the thinker list the moment they are -- so this costs
+     * one switch case and nothing else. Deliberately the DIMMEST entry in
+     * the registry: with eight slots and weakest-first eviction, a
+     * fireball must always be able to take a key's slot in a firefight.
+     * One breath shared by every key on the level, one sine per gametic. */
+#if D_KEYLIGHT
+    const float key_lum = 0.34f + 0.06f * fm_sinf((float)leveltime * 0.10f);
+#endif
+
     /* The weapon's flash. ps_flash carries a state only while the frame that
      * shows the muzzle is up, which is exactly the window the light wants --
      * no timer of our own, and it stays in step with the weapon's animation
@@ -1280,6 +1290,23 @@ void D_LightsUpdate(void)
                                  cr = 1.00f; cg = 0.55f; cb = 0.30f; break;
             case MT_BRUISERSHOT: radius = 320.0f; intensity = 0.80f;
                                  cr = 0.55f; cg = 1.00f; cb = 0.40f; break;
+#if D_KEYLIGHT
+            /* Key cards and skulls: MISC4/5/6 are blue/red/yellow
+             * cards, MISC7/8/9 the yellow/red/blue skulls. 192 units,
+             * not 256: a sphere twice a wall's height washed a whole bay
+             * rather than pooling, which is not what "a key glows a
+             * little" looks like. This reaches roughly one wall height
+             * around the key and no further. */
+            case MT_MISC4: case MT_MISC9:            /* blue  */
+                radius = 192.0f; intensity = key_lum;
+                cr = 0.35f; cg = 0.55f; cb = 1.00f; break;
+            case MT_MISC5: case MT_MISC8:            /* red   */
+                radius = 192.0f; intensity = key_lum;
+                cr = 1.00f; cg = 0.32f; cb = 0.30f; break;
+            case MT_MISC6: case MT_MISC7:            /* yellow */
+                radius = 192.0f; intensity = key_lum;
+                cr = 1.00f; cg = 0.85f; cb = 0.35f; break;
+#endif
             case MT_SKULL: {
                 /* A lost soul is a burning skull; it carries its fire
                  * everywhere. Kept modest while it floats -- with 8 slots,
