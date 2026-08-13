@@ -686,9 +686,12 @@ R_HOT void r_draw_wall_win(const r_camera_t *cam, const r_wall_t *wall,
      * rejects consecutive duplicates itself: this function runs once per
      * uncovered column range, and a twice-blended ghost would double its
      * alpha at the seam. */
-    if (wall->reflect) {
-        void r_reflect_wall_add(const r_wall_t *w);
-        r_reflect_wall_add(wall);
+    {
+        extern int detailLevel;            /* menu Graphic Detail: 0 = high */
+        if (wall->reflect && !detailLevel) {
+            void r_reflect_wall_add(const r_wall_t *w);
+            r_reflect_wall_add(wall);
+        }
     }
 #endif
 

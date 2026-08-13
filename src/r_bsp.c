@@ -771,9 +771,12 @@ static void render_flats_inner(const subsector_t *ss)
                                        (float)rg->bx1, (float)rg->by1, fh),
                    R_REFLECT && D_FlatReflective(sec->floorpic));
 #if R_REFLECT
-        /* The mirror pass clips its ghosts to these footprints. */
-        if (D_FlatReflective(sec->floorpic))
-            r_reflect_region(pts, rg->numpts, fh);
+        /* The mirror pass clips its ghosts to these footprints. Low
+         * graphic detail queues none, which alone kills every ghost at
+         * the flush -- the wall and thing gates just save the queueing. */
+        { extern int detailLevel;
+          if (!detailLevel && D_FlatReflective(sec->floorpic))
+              r_reflect_region(pts, rg->numpts, fh); }
 #endif
         /* Glowing liquids grow their vapor layer: haze over the sludge,
          * smoke over the lava. Same polygon, a few units up, translucent. */
@@ -912,7 +915,12 @@ R_HOT static void render_subsector(int num)
              * the pool's hue. Sector-keyed: a thing on the bank does not
              * reflect, one wading or flying low over the surface does. */
             {
-                if (D_FlatReflective(ss->sector->floorpic)) {
+                /* The menu's Graphic Detail toggle owns the mirrors at
+                 * runtime: a no-op setting since the software rasteriser
+                 * left, now High = reflections, Low = none. */
+                extern int detailLevel;
+                if (!detailLevel &&
+                    D_FlatReflective(ss->sector->floorpic)) {
                     const float ph = fx(ss->sector->floorheight);
                     if (t.z - ph < 128.0f) {
                         float prgb[3];
