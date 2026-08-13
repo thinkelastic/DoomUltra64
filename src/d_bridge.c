@@ -1157,6 +1157,23 @@ void D_LightsUpdate(void)
     const float py = (float)pl->mo->y / 65536.0f;
 
 #if D_RUMBLE
+    /* The chainsaw is the one weapon you feel the whole time it is out.
+     * Idle it idles: a low floor the duty-cycle dither turns into a slow
+     * irregular tick, the motor catching every few frames. Biting, it
+     * runs hard and continuous. The saw's attack states are the tell --
+     * A_Saw's own frames -- so the change lands the moment the blade
+     * engages rather than when the button goes down. */
+    {
+        float saw = 0.0f;
+        if (pl->readyweapon == wp_chainsaw && pl->health > 0) {
+            const state_t *ws = pl->psprites[ps_weapon].state;
+            const int sn = ws ? (int)(ws - states) : -1;
+            const int biting = (sn == S_SAW1 || sn == S_SAW2 || sn == S_SAW3);
+            saw = biting ? 0.55f : 0.11f;
+        }
+        if (saw > 0.0f) D_RumbleSustain(saw);
+    }
+
     /* The damage edge: damagecount jumps by the damage taken and decays
      * one per tic, so a rise is a fresh hit -- the same signal the red
      * flash keys on. Runs once per gametic behind this function's cache. */

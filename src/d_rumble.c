@@ -18,6 +18,7 @@
 #include "d_rumble.h"
 
 static float level;      /* current energy; decays per frame */
+static float sustain;    /* floor held while a caller keeps asking */
 static float acc;        /* dither accumulator: duty == level, exactly */
 static int   motor_on;   /* last state sent, so redundant sends are skipped */
 
@@ -26,6 +27,11 @@ void D_RumbleAdd(float amount)
     if (amount <= 0.0f) return;
     level += amount;
     if (level > 1.0f) level = 1.0f;
+}
+
+void D_RumbleSustain(float x)
+{
+    if (x > sustain) sustain = x;
 }
 
 void D_RumbleFrame(void)
@@ -67,6 +73,13 @@ void D_RumbleFrame(void)
      * rocket volley sustains. */
     level *= 0.94f;
     if (level < 0.02f) level = 0.0f;
+
+    /* The held floor. It decays faster than it is refreshed (once a tic),
+     * so it holds steady while a caller keeps asking and dies on its own
+     * within a few frames when the game stops -- menu, pause, level end. */
+    if (level < sustain) level = sustain;
+    sustain *= 0.80f;
+    if (sustain < 0.02f) sustain = 0.0f;
 
     acc += level;
     int want = 0;

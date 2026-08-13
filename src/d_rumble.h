@@ -11,6 +11,12 @@
  * Impulses stack and clamp; the motor runs them down over ~180 ms. */
 void D_RumbleAdd(float amount);
 
+/* Hold the motor at a floor while something is running -- a chainsaw in
+ * the hands, say. Call it every tic with the level wanted (0 to stop);
+ * it fades by itself in a few frames if the caller stops calling, so a
+ * pause or a level end cannot leave the motor stuck on. */
+void D_RumbleSustain(float level);
+
 /* Once per rendered frame: decay the level, dither it into the motor. */
 void D_RumbleFrame(void);
 
