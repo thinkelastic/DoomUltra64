@@ -17,6 +17,10 @@
  * levels with no sky at all.
  */
 #include "r_sky.h"
+
+#ifndef R_BILINEAR
+#define R_BILINEAR 1
+#endif
 #include "r_tri.h"
 
 #include <math.h>
@@ -84,7 +88,15 @@ void r_sky_draw(const r_camera_t *cam)
     rdpq_set_mode_standard();
     rdpq_mode_tlut(TLUT_RGBA16);
     rdpq_mode_combiner(RDPQ_COMBINER1((TEX0, 0, SHADE, 0), (0, 0, 0, SHADE)));
-    rdpq_mode_filter(FILTER_POINT);
+    /* Filtered with the world, under the same lever. A sky is mostly
+     * gradient, which is where point sampling shows its stair-steps
+     * worst. The hazard is the tile grid: each quad samples its own
+     * 64x32 TMEM tile uploaded with clamping parameters, so at a tile's
+     * edge the filter asks for a neighbour texel it does not have and
+     * clamps to the edge instead -- half a texel of smear along every
+     * boundary. Checked against a point-sampled capture of the same
+     * sky-heavy pose before this was left on. */
+    rdpq_mode_filter(R_BILINEAR ? FILTER_BILINEAR : FILTER_POINT);
     rdpq_mode_persp(false);        /* screen-space quad: no perspective to correct */
     rdpq_mode_zbuf(true, false);   /* test against the world, never write */
 

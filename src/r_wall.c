@@ -485,12 +485,23 @@ static void r_wall_modes(void)
     rdpq_mode_combiner(RDPQ_COMBINER1((TEX0, 0, SHADE, 0), (0, 0, 0, TEX0)));
 #endif
 
-    /* Point sampling is mandatory for CI8, not a stylistic choice. Bilinear
-     * filtering interpolates palette *indices* rather than colours, and Doom's
-     * PLAYPAL is a set of unrelated ramps, so a blend between two indices
-     * lands on an arbitrary third colour. Flat areas survive it; detailed ones
-     * turn to mud. It also happens to be what Doom is supposed to look like. */
+    /* Bilinear, and the old note here claiming point sampling was
+     * MANDATORY for CI8 was wrong: it argued the filter would blend
+     * palette indices and land on an unrelated third colour. The RDP
+     * resolves a CI8 texel through the TLUT during the fetch and filters
+     * the RGBA it gets back, so what is blended is colour, not indices.
+     * BILINEAR=0 restores the point-sampled look on walls and floors.
+     *
+     * Sprites still need point sampling, for a different reason
+     * entirely: their transparency is a reserved palette INDEX, and
+     * filtering across it rings every cutout with a halo of that
+     * colour. That is a property of the alpha cutout, not of CI8. */
     rdpq_mode_filter(R_BILINEAR ? FILTER_BILINEAR : FILTER_POINT);
+
+    /* Floors and ceilings inherit this whole mode block -- r_flat.c sets
+     * no rdpq mode at all and runs on what this leaves behind, which
+     * holds only because r_flat_flush follows r_flush_walls in the
+     * frame. Changing the filter here changes theirs too. */
 
     /* Depth test and write. Walls would not need this on their own, but they
      * share the frame with depth-buffered floors. */
