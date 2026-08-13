@@ -1055,13 +1055,25 @@ R_HOT static void wall_emit(const r_camera_t *cam, const r_wall_t *wall,
                     q->w_a = ea.w; q->invw_a = ea.invw; q->zw_a = ea.zw;
                     q->w_b = eb.w; q->invw_b = eb.invw; q->zw_b = eb.zw;
 #if D_DYNLIGHT
-                    const uint32_t tnt = quad_tint(wall, light,
-                        (wxa + wxb) * 0.5f, (wya + wyb) * 0.5f,
-                        (wall->ztop + wall->zbot) * 0.5f);
-                    q->rgba[0] = q_rgba_tint(sha_t, tnt);
-                    q->rgba[1] = q_rgba_tint(shb_t, tnt);
-                    q->rgba[2] = q_rgba_tint(shb_b, tnt);
-                    q->rgba[3] = q_rgba_tint(sha_b, tnt);
+                    /* Hue per CORNER, not per band. Brightness already
+                     * gradients per corner through lit_shade, so a
+                     * band-constant hue made an emissive floor's colour
+                     * stop dead at a band boundary while the brightness
+                     * kept ramping past it -- a seam across the wall
+                     * wherever the texture tiled. The quantized record
+                     * already carries four RGBA slots, so matching hue to
+                     * shade costs three more evaluations on exactly the
+                     * walls that have a glow or a light near them: every
+                     * other wall returns neutral on quad_tint's first
+                     * line. */
+                    q->rgba[0] = q_rgba_tint(sha_t,
+                        quad_tint(wall, light, wxa, wya, wall->ztop));
+                    q->rgba[1] = q_rgba_tint(shb_t,
+                        quad_tint(wall, light, wxb, wyb, wall->ztop));
+                    q->rgba[2] = q_rgba_tint(shb_b,
+                        quad_tint(wall, light, wxb, wyb, wall->zbot));
+                    q->rgba[3] = q_rgba_tint(sha_b,
+                        quad_tint(wall, light, wxa, wya, wall->zbot));
 #endif
 #else /* !R_TRI_QUANT */
                     set_vtx(q->v[0], xa, ya_t, sha_t, sa, ta_t, iwa);
@@ -1338,18 +1350,19 @@ static bool wall_col(wctx_t *c, float ca, float cb, float s_a, float s_b,
             q->w_a = qa.w; q->invw_a = qa.invw; q->zw_a = qa.zw;
             q->w_b = qb.w; q->invw_b = qb.invw; q->zw_b = qb.zw;
 #if D_DYNLIGHT
-            /* Tint per BAND, folded straight into the corner shades: the
-             * centre height localizes a floor-hugging glow or light to the
-             * lower courses of a tall wall instead of washing the column. */
-            {
-                const uint32_t tnt = quad_tint(wall, c->light,
-                    (wxa + wxb) * 0.5f, (wya + wyb) * 0.5f,
-                    (ztop + zbot) * 0.5f);
-                q->rgba[0] = q_rgba_tint(sha_t, tnt);
-                q->rgba[1] = q_rgba_tint(shb_t, tnt);
-                q->rgba[2] = q_rgba_tint(shb_b, tnt);
-                q->rgba[3] = q_rgba_tint(sha_b, tnt);
-            }
+            /* Hue per CORNER: see the note at the other emit site. The
+             * band's own corners are the sample points, so neighbouring
+             * bands agree exactly where they meet and the glow runs up
+             * the wall as one gradient instead of stepping at each tile
+             * boundary. */
+            q->rgba[0] = q_rgba_tint(sha_t,
+                quad_tint(wall, c->light, wxa, wya, ztop));
+            q->rgba[1] = q_rgba_tint(shb_t,
+                quad_tint(wall, c->light, wxb, wyb, ztop));
+            q->rgba[2] = q_rgba_tint(shb_b,
+                quad_tint(wall, c->light, wxb, wyb, zbot));
+            q->rgba[3] = q_rgba_tint(sha_b,
+                quad_tint(wall, c->light, wxa, wya, zbot));
 #else
             q->rgba_a = qa.rgba;
             q->rgba_b = qb.rgba;
