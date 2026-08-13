@@ -23,6 +23,9 @@
  */
 #define HALO_TEX 32
 
+/* Boot-time only, so clarity beats cleverness. */
+static inline float rf_sqrtf_approx(float v) { return sqrtf(v); }
+
 static uint8_t   halo_texels[HALO_TEX * HALO_TEX] __attribute__((aligned(16)));
 static uint8_t   shaft_texels[HALO_TEX * HALO_TEX] __attribute__((aligned(16)));
 static surface_t halo_surf, shaft_surf;
@@ -42,8 +45,26 @@ void r_halo_init(void)
             const float dy = ((float)y - c) / c;
             float r2 = dx * dx + dy * dy;
             if (r2 > 1.0f) r2 = 1.0f;
-            const float t = 1.0f - r2;
-            const float fall = t * t;                  /* 0 at rim, 1 centre */
+
+            /* An annulus, not a disc: the glow you see is the air AROUND
+             * a source, and the source itself is already drawn there --
+             * its sprite, at its own brightness. Leaving the middle
+             * clear means no blend of any kind touches the core, so a
+             * fireball keeps its own colour however bright it is, and
+             * the halo can only ever add to its surroundings.
+             *
+             * Peaks near half the radius, zero at the centre and at the
+             * rim, both edges smooth so neither shows as a ring. */
+            const float r = rf_sqrtf_approx(r2);
+            float fall;
+            if (r < 0.42f) {
+                const float u = r * (1.0f / 0.42f);    /* 0 centre .. 1 peak */
+                fall = u * u;
+            } else {
+                const float u = (1.0f - r) * (1.0f / 0.58f); /* 1 peak .. 0 rim */
+                fall = u * u;
+            }
+            if (fall < 0.0f) fall = 0.0f;
             int a = (int)(fall * 15.0f + 0.5f);
             if (a > 15) a = 15;
             halo_texels[y * HALO_TEX + x] = (uint8_t)(0xF0 | a);
@@ -209,16 +230,25 @@ static void billboard(const r_camera_t *cam, float wx, float wy,
     r_tri_spr += 2;
 }
 
-/* Shared mode block: texture alpha times vertex alpha, ADDED over what
- * is already there rather than mixed with it -- light adds to a scene,
- * it does not replace it, and adding keeps two overlapping glows
- * brighter instead of averaging them back down. Z-tested, never
- * written. */
+/* Shared mode block.
+ *
+ * The blender is the plain lerp the vapor and the reflections already
+ * use, NOT the additive form this started with. The RDP's blender is
+ * not an adder: it computes (P*A + M*B) / (A + B), so a memory factor
+ * of ONE does not add light, it averages the pixel with the halo's own
+ * colour -- and over anything brighter than that colour the result is
+ * DARKER than what was there. On a fireball's white-hot core, where the
+ * halo's alpha peaks, that read as the centre saturating to black. It
+ * dirtied the sky the same way; drawing shafts behind the sky hid that
+ * symptom without addressing this cause.
+ *
+ * With INV_MUX_ALPHA the factors sum to one, the divide is a no-op, and
+ * the result is an honest mix. Z-tested, never written. */
 static void halo_mode(void)
 {
     rdpq_set_mode_standard();
     rdpq_mode_combiner(RDPQ_COMBINER1((0, 0, 0, SHADE), (TEX0, 0, SHADE, 0)));
-    rdpq_mode_blender(RDPQ_BLENDER((IN_RGB, IN_ALPHA, MEMORY_RGB, ONE)));
+    rdpq_mode_blender(RDPQ_BLENDER((IN_RGB, IN_ALPHA, MEMORY_RGB, INV_MUX_ALPHA)));
     rdpq_mode_alphacompare(0);
     rdpq_mode_zbuf(true, false);
     rdpq_mode_filter(FILTER_BILINEAR);
@@ -273,7 +303,17 @@ void r_halo_flush(const r_camera_t *cam)
             /* sqrt.s is a native VR4300 instruction; no libm here. */
             const float radius = 1.0f / sqrtf(l->inv_r2);
             const float m = l->intensity > 0.0f ? 1.0f / l->intensity : 0.0f;
-            const float r = l->ir * m, g = l->ig * m, b = l->ib * m;
+            /* Carried toward white rather than used as the raw hue. The
+             * blender mixes toward this colour, so a saturated one pulls
+             * the channels it lacks DOWNWARDS -- a red light over grey
+             * stone dimmed the green and blue instead of adding red, and
+             * the pixel came out darker than it started. Glow is bright
+             * first and coloured second; mixing toward white makes the
+             * blend brighten every channel and merely tint the hue. */
+            const float hr = l->ir * m, hg = l->ig * m, hb = l->ib * m;
+            const float r = 0.45f + 0.55f * hr;
+            const float g = 0.45f + 0.55f * hg;
+            const float b = 0.45f + 0.55f * hb;
 
             /* Half the light's reach: the glow in the air is tighter than
              * the light it throws on the walls, which is what keeps a
