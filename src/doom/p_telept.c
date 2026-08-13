@@ -22,6 +22,13 @@
 #include "doomdef.h"
 #include "doomstat.h"
 
+#ifndef D_RUMBLE
+#define D_RUMBLE 0
+#endif
+#if D_RUMBLE
+#include "../d_rumble.h"
+#endif
+
 #include "s_sound.h"
 
 #include "p_local.h"
@@ -132,6 +139,14 @@ EV_Teleport
 		thing->oldy     = thing->y;
 		thing->oldz     = thing->z;
 		thing->oldangle = thing->angle;
+
+#if D_RUMBLE
+		// The lurch of arriving somewhere else. Output-only: it
+		// consumes no random stream and touches no simulation
+		// state, so demo playback is unaffected.
+		if (thing->player == &players[consoleplayer])
+		    D_RumbleAdd (0.85f);
+#endif
 		return 1;
 	    }	
 	}
