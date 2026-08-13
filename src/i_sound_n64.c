@@ -194,11 +194,32 @@ void S_StartSound(void *origin_p, int sfx_id)
     wav64_t *w = sfx_get(sfx_id);
     if (!w) return;
 
-    /* A free channel, else the quietest one. Doom drops the new sound instead;
-     * taking the quietest keeps the loudest -- nearest -- events audible,
-     * which is what the attenuation is trying to express anyway. */
+    /* One voice per source, as vanilla's S_getChannel does: a sound from
+     * an origin already playing STOPS that one first.
+     *
+     * This was missing, and the chainsaw made it obvious. A_WeaponReady
+     * restarts sfx_sawidl every tic while the saw is out -- 35 times a
+     * second against a 0.68-second sample -- so without replacement each
+     * copy layered on a fresh channel until all eight were growling out
+     * of step. It reads as heavy reverb, and it starves every other
+     * sound in the level. Only origin-bearing sounds replace; global
+     * ones (menu, intermission) have no source to match. */
     int pick = -1;
-    for (int i = 0; i < SFX_CHANNELS; i++)
+    if (origin) {
+        for (int i = 0; i < SFX_CHANNELS; i++)
+            if (chan[i].origin == origin) {
+                if (mixer_ch_playing(i)) mixer_ch_stop(i);
+                chan[i].origin = NULL;
+                pick = i;
+                break;
+            }
+    }
+
+    /* Otherwise a free channel, else the quietest one. Doom drops the new
+     * sound instead; taking the quietest keeps the loudest -- nearest --
+     * events audible, which is what the attenuation is trying to express
+     * anyway. */
+    for (int i = 0; pick < 0 && i < SFX_CHANNELS; i++)
         if (!mixer_ch_playing(i)) { pick = i; break; }
 
     if (pick < 0) {
