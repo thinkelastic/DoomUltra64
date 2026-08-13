@@ -48,13 +48,17 @@ void r_halo_init(void)
             if (a > 15) a = 15;
             halo_texels[y * HALO_TEX + x] = (uint8_t)(0xF0 | a);
 
-            /* SHAFT: soft at the left and right edges, and fading from
-             * top to bottom -- the light thins as it falls away from the
-             * opening. The horizontal profile is the same smooth curve
-             * so the beam has no hard sides. */
-            const float hx = 1.0f - dx * dx;           /* 0 at sides */
+            /* SHAFT: a column, not a blob. Alpha is flat across the
+             * width apart from a soften at each side so the edge is not
+             * a hard line, and falls from full at the opening to nothing
+             * at the floor. Square-sided the whole way down -- a ray,
+             * which is what light through a hole in a roof looks like;
+             * the earlier radial profile bulged and read as a cloud. */
+            const float ax = dx < 0.0f ? -dx : dx;     /* 0 centre, 1 side */
+            float edge = ax > 0.84f ? (1.0f - ax) * (1.0f / 0.16f) : 1.0f;
+            if (edge < 0.0f) edge = 0.0f;
             const float vy = 1.0f - ((float)y / (float)(HALO_TEX - 1));
-            float s = hx * hx * (0.25f + 0.75f * vy);
+            float s = edge * (0.12f + 0.88f * vy);
             if (s < 0.0f) s = 0.0f;
             int sa = (int)(s * 15.0f + 0.5f);
             if (sa > 15) sa = 15;
@@ -197,15 +201,13 @@ static void billboard(const r_camera_t *cam, float wx, float wy,
     r_tri_spr += 2;
 }
 
-void r_halo_flush(const r_camera_t *cam)
+/* Shared mode block: texture alpha times vertex alpha, ADDED over what
+ * is already there rather than mixed with it -- light adds to a scene,
+ * it does not replace it, and adding keeps two overlapping glows
+ * brighter instead of averaging them back down. Z-tested, never
+ * written. */
+static void halo_mode(void)
 {
-    const int nlights = r_light_count();
-    if (!num_shafts && !nlights) return;
-
-    /* Texture alpha times vertex alpha, added over what is already there
-     * rather than mixed with it: light adds to a scene, it does not
-     * replace it, and adding keeps two overlapping glows brighter
-     * instead of averaging them back down. Z-tested, never written. */
     rdpq_set_mode_standard();
     rdpq_mode_combiner(RDPQ_COMBINER1((0, 0, 0, SHADE), (TEX0, 0, SHADE, 0)));
     rdpq_mode_blender(RDPQ_BLENDER((IN_RGB, IN_ALPHA, MEMORY_RGB, ONE)));
@@ -213,28 +215,44 @@ void r_halo_flush(const r_camera_t *cam)
     rdpq_mode_zbuf(true, false);
     rdpq_mode_filter(FILTER_BILINEAR);
     rdpq_mode_tlut(TLUT_NONE);
+}
 
-    /* Shafts first: they are the larger, dimmer thing, and a halo inside
-     * one should add on top of it. */
-    if (num_shafts) {
-        rdpq_texparms_t tp = {0};
-        rdpq_tex_upload(TILE0, &shaft_surf, &tp);
-        r_tri_group_begin();
+/* Shafts draw BEFORE the sky, and that placement is the whole fix for
+ * the smear the first version left across the backdrop: the sky pass
+ * tests depth but never writes it, so a beam drawn afterwards passed
+ * the test everywhere sky showed and hung over it. Drawn first, the sky
+ * covers exactly the part that is behind it and the beam survives only
+ * where it belongs -- falling through the room below the opening. */
+void r_shaft_flush(const r_camera_t *cam)
+{
+    if (!num_shafts) return;
 
-        for (int i = 0; i < num_shafts; i++) {
-            const shaftjob_t *s = &shafts[i];
-            /* Daylight through a hole: warm white, scaled by how bright
-             * the sector under it actually is. Strongest at the opening,
-             * gone by the floor -- the texture carries that gradient, and
-             * the vertex alpha sets its scale. */
-            const float k = 0.42f * s->lum;
-            billboard(cam, s->cx, s->cy, s->half_w, s->top, s->bot,
-                      1.00f, 0.97f, 0.86f, k, 0.0f);
-        }
+    halo_mode();
+    rdpq_texparms_t tp = {0};
+    rdpq_tex_upload(TILE0, &shaft_surf, &tp);
+    r_tri_group_begin();
+
+    for (int i = 0; i < num_shafts; i++) {
+        const shaftjob_t *s = &shafts[i];
+        /* Daylight through a hole: warm white, scaled by how bright the
+         * sector under it actually is. The texture carries the fall from
+         * the opening to the floor; the vertex alpha sets its scale. */
+        const float k = 0.42f * s->lum;
+        billboard(cam, s->cx, s->cy, s->half_w, s->top, s->bot,
+                  1.00f, 0.97f, 0.86f, k, 0.0f);
     }
+    num_shafts = 0;
+}
+
+void r_halo_flush(const r_camera_t *cam)
+{
+    const int nlights = r_light_count();
+    if (!nlights) return;
+
+    halo_mode();
 
     /* Halos: one per live light, in its own colour. */
-    if (nlights) {
+    {
         rdpq_texparms_t tp = {0};
         rdpq_tex_upload(TILE0, &halo_surf, &tp);
         r_tri_group_begin();
@@ -257,13 +275,14 @@ void r_halo_flush(const r_camera_t *cam)
             float a = 0.30f * l->intensity;
             if (a > 0.42f) a = 0.42f;
 
-            const float half_h = radius * 0.5f;
+            /* Half the reach, times the light's own halo fraction --
+             * a half again for anything that flies or detonates. */
+            const float half_h = radius * 0.5f * r_light_halo[i];
             billboard(cam, l->x, l->y, half_h,
                       l->z + half_h, l->z - half_h, r, g, b, a, a);
         }
     }
 
-    num_shafts = 0;
 }
 
 #endif /* R_HALO */

@@ -15,9 +15,19 @@ void r_light_reset(void)
     r_light_num = 0;
 }
 
+float r_light_halo[R_LIGHT_MAX];
+static float halo_next = 1.0f;
+
+void r_light_halo_next(float frac) { halo_next = frac; }
+
 void r_light_add(float x, float y, float z, float radius, float intensity,
                  float r, float g, float b)
 {
+    /* Taken and cleared at entry, so a rejected light cannot leave its
+     * scale latched for whoever comes next. */
+    const float halo = halo_next;
+    halo_next = 1.0f;
+
     if (radius <= 0.0f || intensity <= 0.0f) return;
 
     if (r_light_num == R_LIGHT_MAX) {
@@ -35,6 +45,7 @@ void r_light_add(float x, float y, float z, float radius, float intensity,
     l->x = x; l->y = y; l->z = z;
     l->inv_r2    = 1.0f / (radius * radius);
     l->intensity = intensity;
+    r_light_halo[r_light_num] = halo;
     /* Premultiplied; callers keep the max tint channel at 1.0 so intensity
      * remains the max channel (see the header's convention note). */
     l->ir = intensity * r;

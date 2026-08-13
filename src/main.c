@@ -954,6 +954,11 @@ int main(void)
         /* Backdrop last, depth-tested: it fills only the pixels the world
          * left untouched, and only in the columns the walk saw sky. */
         { int D_InLevel(void); int D_AutomapActive(void);
+          /* Beams before the backdrop: the sky covers the part of a
+           * shaft that is behind it, which is what keeps the beam out
+           * of the sky instead of smeared across it. */
+          if (level_loaded && D_InLevel() && !D_AutomapActive())
+              r_shaft_flush(&cam);
           if (level_loaded && D_InLevel() && !D_AutomapActive()) r_sky_draw(&cam);
           /* Vapor last among the world passes: translucency needs every
            * opaque pixel behind it -- walls, flats, sprites, sky --

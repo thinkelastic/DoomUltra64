@@ -45,9 +45,13 @@ void r_halo_begin(void);
 void r_shaft_add(const r_polypt_t *pts, int npts,
                  float floor_h, float ceil_h, int lightlevel);
 
-/* Draw the shafts, then a halo for every live dynamic light. After the
- * world and the sprites; before the vapor, which is thicker and belongs
- * in front. */
+/* The beams. BEFORE the sky pass: the sky tests depth without writing
+ * it, so a beam drawn after it hangs over the backdrop instead of
+ * behind it. */
+void r_shaft_flush(const r_camera_t *cam);
+
+/* A halo for every live dynamic light. After the sky, so a fireball
+ * still glows against open air. */
 void r_halo_flush(const r_camera_t *cam);
 
 #else
@@ -57,6 +61,7 @@ static inline void r_halo_begin(void) {}
 static inline void r_shaft_add(const r_polypt_t *pts, int npts,
                                float floor_h, float ceil_h, int lightlevel)
 { (void)pts; (void)npts; (void)floor_h; (void)ceil_h; (void)lightlevel; }
+static inline void r_shaft_flush(const r_camera_t *cam) { (void)cam; }
 static inline void r_halo_flush(const r_camera_t *cam) { (void)cam; }
 
 #endif /* R_HALO */

@@ -1347,6 +1347,19 @@ void D_LightsUpdate(void)
             case MT_BRUISERSHOT: radius = 320.0f; intensity = 0.80f;
                                  cr = 0.55f; cg = 1.00f; cb = 0.40f; break;
 #if D_KEYLIGHT
+            /* Armour sits in the same class as the keys: a pickup worth
+             * spotting across a dark room, glowing its own colour --
+             * green for the jacket (MISC0), blue for the megaarmour
+             * (MISC1). The bonus helmets are deliberately NOT here: they
+             * come in dozens (E1M1 alone places twenty-five), and eight
+             * of them would fill the light registry with things nobody
+             * came looking for. */
+            case MT_MISC0:                           /* green armour  */
+                radius = 192.0f; intensity = key_lum;
+                cr = 0.38f; cg = 1.00f; cb = 0.42f; break;
+            case MT_MISC1:                           /* blue armour   */
+                radius = 192.0f; intensity = key_lum;
+                cr = 0.40f; cg = 0.58f; cb = 1.00f; break;
             /* Key cards and skulls: MISC4/5/6 are blue/red/yellow
              * cards, MISC7/8/9 the yellow/red/blue skulls. 192 units,
              * not 256: a sphere twice a wall's height washed a whole bay
@@ -1387,6 +1400,20 @@ void D_LightsUpdate(void)
                 break;
             }
             default: continue;
+        }
+
+        /* The glow IN THE AIR is half the reach for anything that flies
+         * or detonates: the light a fireball throws is wide, the fireball
+         * itself is small, and at full size the halo read as a fog bank
+         * rather than a burning thing. Keys, muzzle flashes and the
+         * emissive floors keep theirs. */
+        switch (mo->type) {
+            case MT_ROCKET: case MT_BARREL:
+            case MT_TROOPSHOT: case MT_HEADSHOT: case MT_BRUISERSHOT:
+            case MT_PLASMA: case MT_BFG:
+                r_light_halo_next(0.5f);
+                break;
+            default: break;
         }
 
         const float mx = (float)mo->x / 65536.0f;

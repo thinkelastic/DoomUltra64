@@ -50,6 +50,19 @@ typedef struct {
 
 /* Exposed so the query below can inline. Written only by reset/add. */
 extern r_light_t r_lights[R_LIGHT_MAX];
+
+/* How big the visible glow IN THE AIR is, as a fraction of the light's
+ * reach on surfaces. A parallel array rather than a field, deliberately:
+ * r_light_t is two D-cache lines exactly and the per-vertex query reads
+ * every byte of it, while this is read once per light per frame by the
+ * halo pass alone. Explosions and projectiles want a tighter glow than
+ * their reach suggests -- the light a fireball throws is wide, the
+ * fireball itself is small. */
+extern float r_light_halo[R_LIGHT_MAX];
+
+/* Set the halo fraction for the NEXT r_light_add. Resets to 1.0 after,
+ * so a caller that does not care never thinks about it. */
+void r_light_halo_next(float frac);
 extern int       r_light_num;
 
 /* Clear the frame's list. Called once per frame before the BSP walk, since the
