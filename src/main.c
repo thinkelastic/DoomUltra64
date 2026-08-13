@@ -956,6 +956,19 @@ int main(void)
                 snprintf(hud + hud_n, sizeof hud - (size_t)hud_n,
                          " r%u/%u", rsp_idle, rdp_busy);
             }
+#elif R_REFLECT
+            /* Reflection + rumble self-report, same idea: R<regions
+             * queued>/<ghost triangles drawn> and P<pak detected>. Standing
+             * at a pool that shows R3/0 means ghosts were culled; R0/0
+             * means the floor never registered; P0 means the controller
+             * never presented a Rumble Pak, and no software can fix that. */
+            if (hud_n > 0 && (size_t)hud_n < sizeof hud) {
+                extern int r_refl_dbg_regions, r_refl_dbg_tris;
+                snprintf(hud + hud_n, sizeof hud - (size_t)hud_n,
+                         " R%d/%d P%d/%d", r_refl_dbg_regions, r_refl_dbg_tris,
+                         joypad_get_rumble_supported(JOYPAD_PORT_1) ? 1 : 0,
+                         (int)joypad_get_accessory_type(JOYPAD_PORT_1));
+            }
 #else
             (void)hud_n;
 #endif

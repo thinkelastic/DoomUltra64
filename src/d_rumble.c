@@ -14,6 +14,7 @@
  * live in d_bridge.c.
  */
 #include <libdragon.h>
+#include <string.h>
 #include "d_rumble.h"
 
 static float level;      /* current energy; decays per frame */
@@ -30,13 +31,26 @@ void D_RumbleAdd(float amount)
 void D_RumbleFrame(void)
 {
 #if D_FORCERUMBLE
-    /* Diagnostic build: drive the motor without asking the controller
-     * whether it has one, and self-pulse every four seconds so no game
-     * event is needed. For third-party pads with built-in rumble that
-     * skip the accessory handshake. NEVER a default: the motor command
-     * writes into pak address space, and a Controller Pak sitting there
-     * would be corrupted. */
-    { static int fr; if (++fr >= 240) fr = 0; if (fr == 1) D_RumbleAdd(0.9f); }
+    /* RAW probe. joypad_set_rumble_active may itself be gated behind the
+     * library's detection, which would make a "forced" pulse through it
+     * vacuous -- so this speaks the Rumble Pak wire protocol directly:
+     * 32 bytes of 0x01 to pak address 0xC000 turns the motor on, zeros
+     * turn it off, one second on every four. No detection anywhere in
+     * the path. NEVER a default: these writes land inside a real
+     * Controller Pak's memory if one is seated. */
+    {
+        static int fr;
+        uint8_t block[32];
+        if (++fr >= 240) fr = 0;
+        if (fr == 1) {
+            memset(block, 0x01, sizeof block);
+            joybus_accessory_write(0, 0xC000, block);
+        } else if (fr == 60) {
+            memset(block, 0x00, sizeof block);
+            joybus_accessory_write(0, 0xC000, block);
+        }
+    }
+    return;
 #else
     if (!joypad_get_rumble_supported(JOYPAD_PORT_1)) {
         /* Pak pulled mid-game: make sure the state machine lets go. */
