@@ -1174,15 +1174,11 @@ void D_LightsUpdate(void)
         if (hp < last_health && last_health - hp > hurt)
             hurt = last_health - hp;
         if (hurt > 0) {
-            /* Any hit must be FELT: the motor needs ~100 ms spun up
-             * before it registers, so a bare damage/40 made a pistol
-             * graze a single-frame blip no hardware can show -- proven
-             * on an Analogue 3D where explosions thumped and hits were
-             * silent. Floor every hit at a solid tap and let heavy ones
-             * approach a full charge. */
-            float a = 0.35f + (float)hurt * (1.0f / 60.0f);
-            if (a > 1.0f) a = 1.0f;
-            D_RumbleAdd(a);
+            /* Getting hit is one flat, solid thump -- no scaling, no
+             * attenuation of any kind, by request from the couch. Only
+             * the explosion concussion below varies (with distance),
+             * and a blast that also wounds you stacks both. */
+            D_RumbleAdd(0.6f);
         }
         last_dmg    = dc;
         last_health = hp;
