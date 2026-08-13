@@ -731,15 +731,19 @@ void r_reflect_flush(const r_camera_t *cam)
              * double the flat pass's worst banding sag (~2^-7). */
             const float dc_hi = j->depth * eh / (cam->z - zi_hi);
             const float dc_lo = j->depth * eh / (cam->z - zi_lo);
-            /* MINUS: nearer than the plane, so the ghost wins the pool's
-             * own pixels (including its banding sag) and loses to true
-             * occluders. The brief +2^-6 era was the z-push design's
-             * leftover -- with the push reverted it put every ghost
-             * BEHIND its pool and the real RDP culled them all, R7/42
-             * submitted and zero visible. Neighbour bleed, the reason
-             * the sign once flipped, is the region clip's job now. */
-            float z_hi = 1.0f - R_FLAT_NEAR / dc_hi - (1.0f / 64.0f);
-            float z_lo = 1.0f - R_FLAT_NEAR / dc_lo - (1.0f / 64.0f);
+            /* The ghost must sit NEARER than the pool's own z but by an
+             * amount that shrinks with depth, like everything else in
+             * z-space. A constant 2^-6 bias swallowed hundreds of world
+             * units at distance -- monsters plainly in front of a far
+             * pool lost the z-fight and the mirror drew through them.
+             * The margins in depth-proportional form: the pool draws at
+             * 1 - 3.5/d (FLAT_Z_NEAR) sagging at most ~0.67/d under its
+             * banding; the ghost at 1 - 4.5/dc undercuts sag with margin
+             * at every distance, and any occluder nearer than 8/9 of the
+             * pool's depth beats the ghost -- so only things practically
+             * standing IN the pool lose, which is what a mirror wants. */
+            float z_hi = 1.0f - (R_FLAT_NEAR + 0.5f) / dc_hi;
+            float z_lo = 1.0f - (R_FLAT_NEAR + 0.5f) / dc_lo;
             if (z_hi > 1.0f) z_hi = 1.0f;
             if (z_lo > 1.0f) z_lo = 1.0f;
             if (z_hi < 0.0f) z_hi = 0.0f;
@@ -952,9 +956,9 @@ static void reflect_walls_emit(const r_camera_t *cam)
             v[c][7] = ta[row] * iw;
             v[c][8] = iw;
             {
-                /* -2^-6, nearer than the plane: see the thing emitter. */
+                /* Depth-proportional bias: see the thing emitter. */
                 const float dc = d * eh / (cam->z - zi);
-                float z = 1.0f - R_FLAT_NEAR / dc - (1.0f / 64.0f);
+                float z = 1.0f - (R_FLAT_NEAR + 0.5f) / dc;
                 if (z > 1.0f) z = 1.0f;
                 if (z < 0.0f) z = 0.0f;
                 v[c][9] = z;
