@@ -902,11 +902,17 @@ R_HOT static void render_subsector(int num)
             }
             r_sprite_add(cur_cam, &t, sh,
                          (mo->frame & FF_FULLBRIGHT) ? -1 : lit_ll,
-                         /* Smoke and bullet puffs read better as haze
-                          * than as cardboard: route them to the sprite
-                          * pass's translucent tail. */
+                         /* Things that are vapour or energy rather than
+                          * objects read better as haze than as cardboard:
+                          * smoke and bullet puffs, and the teleport and
+                          * item-respawn fogs -- the green flash at both
+                          * ends of a teleport is light, and you should be
+                          * able to see the room through it. Routed to the
+                          * sprite pass's translucent tail. */
                          (mo->type == MT_SMOKE || mo->type == MT_PUFF)
-                             ? 0.6f : 1.0f);
+                             ? 0.6f
+                         : (mo->type == MT_TFOG || mo->type == MT_IFOG)
+                             ? 0.7f : 1.0f);
 
 #if R_REFLECT
             /* Over a glowing liquid: queue the mirror image. No polygon is
