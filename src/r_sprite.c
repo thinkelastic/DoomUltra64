@@ -434,6 +434,11 @@ void r_sprite_flush(void)
  * bottom instead, leaving the pistol half-buried under the bar. */
 #define PSPRITE_YSHIFT (SCREEN_H - 200 - 32)
 
+/* Muzzle-flash opacity. Bright saturated art over the weapon: high
+ * enough to read as a flare through composite video, low enough that
+ * the gun stays visible under it. */
+#define PSPRITE_FLASH_ALPHA 0.65f
+
 void r_psprite_draw(void)
 {
     int D_PSpriteGet(int i, void **tex, int *x, int *y);
@@ -446,6 +451,34 @@ void r_psprite_draw(void)
     for (int i = 0; i < 2; i++) {
         void *raw; int px, py;
         if (!D_PSpriteGet(i, &raw, &px, &py)) continue;
+
+        /* The flash layer (ps_flash, index 1) is LIGHT, not an object:
+         * every weapon's muzzle flash, from the pistol's white to the
+         * plasma and BFG's green, is one sprite laid over the gun. Drawn
+         * blended it reads as a flare with the weapon showing through
+         * instead of a solid cutout pasted on top.
+         *
+         * COPY mode cannot blend -- it is a straight four-texels-per-clock
+         * copy -- so this one layer steps out of the UI bracket's mode
+         * into the 1-cycle pipeline and hands COPY back afterwards, for
+         * the status bar that follows. Alpha rides PRIM, not SHADE: a
+         * texture rectangle carries no shade coefficients. The cutout
+         * compare stays on, so fully transparent texels are still
+         * discarded before they reach the blender. */
+        const int is_flash = (i == 1);
+        if (is_flash) {
+            rdpq_set_mode_standard();
+            rdpq_mode_combiner(RDPQ_COMBINER1((0, 0, 0, TEX0),
+                                              (TEX0, 0, PRIM, 0)));
+            rdpq_mode_blender(RDPQ_BLENDER((IN_RGB, IN_ALPHA,
+                                            MEMORY_RGB, INV_MUX_ALPHA)));
+            rdpq_mode_alphacompare(1);
+            rdpq_mode_filter(FILTER_POINT);
+            rdpq_mode_zbuf(false, false);
+            rdpq_mode_tlut(TLUT_RGBA16);
+            rdpq_set_prim_color(RGBA32(255, 255, 255,
+                                       (int)(PSPRITE_FLASH_ALPHA * 255.0f)));
+        }
 
         const dt64_tex_t *tex = (const dt64_tex_t *)raw;
         const int w = tex->width, h = tex->height;
@@ -476,6 +509,9 @@ void r_psprite_draw(void)
                 r_tri_spr++;
             }
         }
+
+        /* Hand the bracket's own mode back: D_UI_Draw follows. */
+        if (is_flash) { void V_BeginUI(void); V_BeginUI(); }
     }
 }
 

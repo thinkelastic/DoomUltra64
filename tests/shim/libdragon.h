@@ -51,6 +51,8 @@ static inline void rdpq_mode_blender(int b) { (void)b; }
 #define RDPQ_FOG_STANDARD          1
 
 static inline void rdpq_set_mode_standard(void) {}
+static inline void rdpq_set_mode_copy(bool transparency) { (void)transparency; }
+static inline void rdpq_set_prim_color(color_t c) { (void)c; }
 static inline void rdpq_mode_tlut(rdpq_tlut_t t) { (void)t; }
 static inline void rdpq_mode_combiner(int c) { (void)c; }
 static inline void rdpq_set_fog_color(color_t c) { (void)c; }

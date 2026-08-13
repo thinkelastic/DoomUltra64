@@ -113,6 +113,12 @@ int rdpq_tex_upload(rdpq_tile_t tile, const surface_t *tex,
 
 /* Fixed-function screen rectangle (COPY-mode UI blits, weapon tiles). The
  * mock only counts it: the paths under geometric test draw triangles. */
+/* The weapon layer's mode bracket lives in v_draw.c, which the harness
+ * does not compile: r_psprite_draw hands the bracket back after drawing
+ * the muzzle flash blended, and the harness models neither UI modes nor
+ * psprites. A no-op keeps the link honest without pretending to. */
+void V_BeginUI(void) {}
+
 void rdpq_texture_rectangle(rdpq_tile_t tile, float x0, float y0,
                             float x1, float y1, float s, float t)
 {
