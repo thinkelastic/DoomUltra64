@@ -334,7 +334,7 @@ static void flow_update(void)
     flow_u = u - rf_floorf(u * cur_inv_period) * cur_period;
     flow_v = v - rf_floorf(v * cur_inv_period) * cur_period;
 #if R_LIQUIDRIPPLE
-    ripple_t = t * 0.19f;
+    ripple_t = t * 0.095f;      /* halved from play: a swell, not a chop */
 #endif
 }
 #endif

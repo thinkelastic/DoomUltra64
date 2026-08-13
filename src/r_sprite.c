@@ -23,6 +23,10 @@
 #include "r_flat.h"     /* R_FLAT_NEAR: the depth scale walls and flats share */
 #include "r_tri.h"
 
+#ifndef R_REFLWOBBLE
+#define R_REFLWOBBLE 0
+#endif
+
 #include <math.h>
 #include <string.h>
 
@@ -90,6 +94,43 @@ typedef struct {
 } reflregion_t;
 static reflregion_t reflreg[REFL_REGION_MAX];
 static int          numreflreg;
+
+#if R_REFLWOBBLE
+/* A reflection on moving water is not a mirror -- it is a mirror that the
+ * surface keeps bending. Now that the liquid itself drifts and swells, a
+ * geometrically perfect ghost underneath it reads as glass.
+ *
+ * The bend is a horizontal displacement that varies with DEPTH BELOW THE
+ * PLANE and with time, so the image shears in bands rather than sliding
+ * as a block: the further under the surface a row of the image sits, the
+ * further the water has carried it sideways. Amplitude is a fraction of
+ * the image's own projected width, not a pixel count, so a distant
+ * reflection wobbles by as much of itself as a near one does.
+ *
+ * Driven off the same clock as the liquid's own ripple, so the surface
+ * and what it reflects move in sympathy rather than arguing. */
+#define WOBBLE_AMP    0.13f     /* of the image's half-width */
+#define WOBBLE_K      0.055f    /* per world unit of depth below the plane */
+
+static float wobble_t;
+
+static void wobble_update(void)
+{
+    extern int   leveltime;
+    extern float d_subtic;
+    /* Halved with the liquid's ripple: the two share a clock, and they
+     * have to keep sharing it or the surface and its reflection start
+     * moving to different rhythms. */
+    wobble_t = ((float)leveltime + d_subtic) * 0.095f;
+}
+
+/* Sideways shift, in the caller's own screen units. */
+static inline float wobble_at(float depth_below, float half_width_px)
+{
+    return WOBBLE_AMP * half_width_px *
+           sinf(depth_below * WOBBLE_K + wobble_t);
+}
+#endif
 
 /* Self-report for the HWSTAT line: how many footprints the walk queued
  * and how many ghost triangles actually reached the RDP this frame. The
@@ -720,6 +761,10 @@ void r_reflect_flush(const r_camera_t *cam)
     if (!numrefl) return;
 #endif
 
+#if R_REFLWOBBLE
+    wobble_update();
+#endif
+
     /* Blended, z-tested, never z-written. Texture alpha rides through the
      * combiner's alpha channel, so transparent texels leave the memory
      * pixel alone and solid ones mix at the vertex alpha. Point sampling
@@ -798,17 +843,32 @@ void r_reflect_flush(const r_camera_t *cam)
             if (a_hi <= 0.0f) continue;
             if (a_lo < 0.0f) a_lo = 0.0f;
 
+#if R_REFLWOBBLE
+            /* One shift per edge of the band, so the row is not merely
+             * moved but sheared -- which is what carries the eye from one
+             * band to the next as a continuous wave rather than a stack
+             * of offset strips. */
+            const float hw = (float)tex->width * j->scale_x * 0.5f;
+            const float wob_hi = wobble_at(j->plane_h - zi_hi, hw);
+            const float wob_lo = wobble_at(j->plane_h - zi_lo, hw);
+#else
+            const float wob_hi = 0.0f, wob_lo = 0.0f;
+#endif
+
             for (int s0 = 0; s0 < w; s0 += tw) {
                 const int s1 = s0 + tw > w ? w : s0 + tw;
                 const float x0 = x_left + (float)s0 * j->scale_x;
                 const float x1 = x_left + (float)s1 * j->scale_x;
-                if (x1 < 0.0f || x0 > (float)SCREEN_W) continue;
+                if (x1 + wob_hi < 0.0f && x1 + wob_lo < 0.0f) continue;
+                if (x0 + wob_hi > (float)SCREEN_W &&
+                    x0 + wob_lo > (float)SCREEN_W) continue;
 
                 dt64_upload_tile(TILE0, tex, NULL, s0, t0, s1, t1);
                 stat_uploads++;
 
                 float v[4][10];
-                const float xs[4] = { x0, x1, x1, x0 };
+                const float xs[4] = { x0 + wob_hi, x1 + wob_hi,
+                                      x1 + wob_lo, x0 + wob_lo };
                 const float ys[4] = { y_top, y_top, y_bot, y_bot };
                 const float ss[4] = { (float)s0, (float)s1, (float)s1, (float)s0 };
                 const float ts[4] = { (float)t1, (float)t1, (float)t0, (float)t0 };
@@ -967,6 +1027,18 @@ static void reflect_walls_emit(const r_camera_t *cam)
         /* Corner rows: [x,y, r,g,b,a, s,t, invw, z]. Perspective-correct
          * s via invw; the alpha fade to zero at the band's foot is what
          * reads as water. */
+#if R_REFLWOBBLE
+        /* The wall's ghost bends with the same water. Its half-width in
+         * pixels is half the span between the projected endpoints. */
+        const float hw_w = (xr - xl) * 0.5f;
+        const float wob_t_ = wobble_at(r->plane_h - zi_top,
+                                       hw_w < 0.0f ? -hw_w : hw_w);
+        const float wob_b_ = wobble_at(r->plane_h - zi_bot,
+                                       hw_w < 0.0f ? -hw_w : hw_w);
+#else
+        const float wob_t_ = 0.0f, wob_b_ = 0.0f;
+#endif
+
         float v[4][10];
         const float za[2] = { zi_top, zi_bot };
         const float ta[2] = { t_top,  t_bot  };
@@ -984,7 +1056,7 @@ static void reflect_walls_emit(const r_camera_t *cam)
             const float o_ = side ? o2 : o1;  (void)o_;
             const float iw = side ? iw2 : iw1;
             const float zi = za[row];
-            v[c][0] = side ? xr : xl;
+            v[c][0] = (side ? xr : xl) + (row ? wob_b_ : wob_t_);
             v[c][1] = cy - (zi - cam->z) * cam->focal_y * iw;
             v[c][2] = r->sr; v[c][3] = r->sg; v[c][4] = r->sb;
             v[c][5] = aa[row];

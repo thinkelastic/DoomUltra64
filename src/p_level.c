@@ -221,7 +221,23 @@ void p_level_anim_init(void)
 
         anim_t *a = &anims[numanims];
         a->numframes = 0;
-        a->speed = animdefs[i].speed ? animdefs[i].speed : 8;
+        /* Vanilla runs every animation at 8 tics a frame. The liquids
+         * cycle at half that rate here -- 16 tics, ~2.2 Hz -- because
+         * they no longer rely on the frame swap to look alive: the
+         * surface drifts and swells continuously underneath it, and at
+         * vanilla's rate the swap reads as a flicker fighting that
+         * motion rather than adding to it. Fire, switches and the rest
+         * keep Doom's timing, which is the whole of their animation. */
+        {
+            static const char *const liquid[] = {
+                "NUKAGE", "LAVA", "SLIME", "BLOOD", "FWATER", "SWATER"
+            };
+            int base = animdefs[i].speed ? animdefs[i].speed : 8;
+            for (unsigned q = 0; q < sizeof liquid / sizeof liquid[0]; q++)
+                if (!strncmp(animdefs[i].startname, liquid[q],
+                             strlen(liquid[q]))) { base *= 2; break; }
+            a->speed = base;
+        }
         for (int f = s; f <= e; f++) {
             const int idx = p_level_resolve(order_name(flats, f), pfx);
             if (idx >= 0) a->frame[a->numframes++] = (int16_t)idx;
