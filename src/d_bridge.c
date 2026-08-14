@@ -20,7 +20,6 @@
 int   p_level_resolve(const char *name, const char *prefix);
 void *p_level_resolve_ptr(const char *name, const char *prefix);
 void *p_level_thing_sprite(int type);
-int   p_level_thing_top(int type);   /* feet-to-top of a thing's art */
 
 #include "doom/doomtype.h"
 #include "doom/doomkeys.h"
@@ -1650,10 +1649,20 @@ void D_LightsUpdate(void)
          * not just below it: the flame is what is lit, and putting the
          * centre under it only spread the pool back down the stand. The
          * barrel's ooze is the same idea upside down -- it glows at the
-         * rim, which is the top of the can. */
+         * rim, which is the top of the can.
+         *
+         * The sprite comes from R_SpriteFrame, the same call the renderer
+         * draws the thing with. It must: the only other lookup here keys
+         * on DOOMEDNUM, the number in the WAD's THINGS lump, and mo->type
+         * is an mobjtype_t -- a different numbering entirely. Asking it
+         * for MT_MISC31 got a miss and a zero, so every flame quietly
+         * stayed at the middle of its 16-unit collision box and none of
+         * this did anything at all. */
         if (flame_top) {
-            const int topo = p_level_thing_top(mo->type);
-            if (topo > 0) mz = (float)mo->z / 65536.0f + (float)topo;
+            const dt64_tex_t *spr =
+                (const dt64_tex_t *)R_SpriteFrame(mo->sprite, mo->frame, 0);
+            if (spr && spr->topoffset > 0)
+                mz = (float)mo->z / 65536.0f + (float)spr->topoffset;
         }
         r_light_add(mx, my, mz, radius, intensity, cr, cg, cb);
     }

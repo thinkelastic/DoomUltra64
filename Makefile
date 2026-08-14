@@ -354,6 +354,15 @@ N64_CFLAGS += -DD_SMOKETRAIL=$(SMOKETRAIL)
 HALO ?= 1
 N64_CFLAGS += -DR_HALO=$(HALO)
 
+# SHAFT=0 keeps the halos around lights but drops the beams that fall
+# through sky openings. They are separable because they are different
+# claims: a halo says "this light is bright", which needs no geometry to
+# be right, while a beam says "the hole above you is THERE", which does --
+# and a beam whose placement reads wrong is worse than no beam. Requires
+# HALO=1; with HALO=0 both are gone anyway.
+SHAFT ?= 1
+N64_CFLAGS += -DR_SHAFT=$(SHAFT)
+
 # REFLECT=1 draws mirror images of things standing over glowing liquid --
 # a monster wading through nukage reflects in it, dimmed and tinted the
 # pool's own hue. The image is masked to pool pixels by the z-buffer alone

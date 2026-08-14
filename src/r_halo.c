@@ -173,6 +173,10 @@ static void shaft_boxify(shaftjob_t *s, float x0, float y0,
 void r_shaft_add(const r_polypt_t *pts, int npts,
                  float floor_h, float ceil_h, int lightlevel)
 {
+#if !R_SHAFT
+    (void)pts; (void)npts; (void)floor_h; (void)ceil_h; (void)lightlevel;
+    return;
+#else
     if (npts < 3 || num_shafts >= SHAFT_MAX) return;
     if (ceil_h - floor_h < 32.0f) return;          /* no room to fall */
     if (lightlevel < SHAFT_MIN_LIGHT) return;      /* a dark hole, not a beam */
@@ -247,6 +251,7 @@ void r_shaft_add(const r_polypt_t *pts, int npts,
     } else {
         shaft_boxify(s, x0, y0, x1, y1);
     }
+#endif /* R_SHAFT */
 }
 
 /* --- drawing ------------------------------------------------------------- */
@@ -413,68 +418,58 @@ static void shaft_prism(const r_camera_t *cam, const shaftjob_t *s, float k)
         if (inside) return;
     }
 
-    /* WHERE THE SHEET STANDS. Through the middle of the well, not on the
-     * rim nearest the eye.
+    /* THE WHOLE FALL OF LIGHT, not a slice of it.
      *
-     * A hole is not flat. The one this was measured against is 96 units
-     * across and 257 DEEP, so looking along its length its near rim is a
-     * quarter of a room closer than its far one. A sheet hung on the near
-     * rim puts the entire fall of light that far in front of the opening
-     * it supposedly comes from, and it reads as a pale panel standing in
-     * the corridor rather than as light dropping through the roof. Cutting
-     * the outline at the mid depth and standing the sheet there puts it
-     * under the middle of the hole, which is where the eye expects it.
+     * A well is a volume: the same plan shape at the ceiling and on the
+     * floor, with the light between. Two earlier tries drew a single
+     * surface of it -- the rim nearest the eye, which put the fall a
+     * quarter of a room in front of the opening, and then the cut at mid
+     * depth, which is worse: a lone quad hanging in the middle of the
+     * shaft with air on both sides, reading as a square panel rather than
+     * as a column of light.
      *
-     * For a convex plan the cut is two crossings, and they are the beam's
-     * two side edges. */
-    const float dmid = (dmin + dmax) * 0.5f;
-    if (dmid < NEARP) return;
-
-    float oa = 0.0f, ob = 0.0f;
-    int nc = 0;
-    for (int i = 0; i < n && nc < 2; i++) {
-        const int j = i + 1 < n ? i + 1 : 0;
-        if ((depth[i] < dmid) == (depth[j] < dmid)) continue;
-        const float t = (dmid - depth[i]) / (depth[j] - depth[i]);
-        const float o = sx[i] + (sx[j] - sx[i]) * t;
-        if (nc == 0) oa = o; else ob = o;
-        nc++;
-    }
-    if (nc < 2) return;
-    if (ob < oa) { const float tmp = oa; oa = ob; ob = tmp; }
-
-    const float iw = 1.0f / dmid;
-    const float xa = cxs + oa * cam->focal_x * iw;
-    const float xb = cxs + ob * cam->focal_x * iw;
-    if (xb - xa < 1.0f) return;
-    if (xb < 0.0f || xa > (float)SCREEN_W) return;
-
-    /* WHERE THE BEAM BEGINS. At the opening's LOWER rim.
+     * What the eye should see is the volume's whole screen footprint. For
+     * a plan polygon extruded straight down, that footprint is bounded by
+     * the widest projection of the outline (every corner, each at its own
+     * depth), by the opening above, and by the pool of light on the floor
+     * below -- and the floor pool is the part that gives the beam its
+     * height, because a 257-deep footprint of lit floor covers a lot of
+     * screen. One quad over that footprint fills the shaft, and being one
+     * quad it cannot composite over itself anywhere.
      *
-     * The rim projects over a range -- for a plane above the eye the far
-     * side is the low one -- and light is only in the room once it is past
-     * the whole of it. Starting at the sheet's own mid-depth height would
-     * put the top edge inside the roof's thickness, which is what made the
-     * beam look like it began above the ceiling from a distance. */
-    float y_top = -1e9f;
+     * The top is the opening's LOWER rim: the rim projects over a range,
+     * and the light is only in the room once it is past all of it. The
+     * bottom is the NEAREST floor, which is the lowest the pool reaches. */
+    float X0 = 1e9f, X1 = -1e9f;
+    float y_top = -1e9f, y_bot = -1e9f;
+    int seen = 0;
     for (int i = 0; i < n; i++) {
         if (depth[i] < NEARP) continue;
-        const float y = cys - (s->top - cam->z) * cam->focal_y / depth[i];
-        if (y > y_top) y_top = y;
+        const float iwi = 1.0f / depth[i];
+        const float x = cxs + sx[i] * cam->focal_x * iwi;
+        if (x < X0) X0 = x;
+        if (x > X1) X1 = x;
+        const float yt = cys - (s->top - cam->z) * cam->focal_y * iwi;
+        const float yb = cys - (s->bot - cam->z) * cam->focal_y * iwi;
+        if (yt > y_top) y_top = yt;      /* lowest rim: the far one */
+        if (yb > y_bot) y_bot = yb;      /* lowest floor: the near one */
+        seen++;
     }
-    {
-        const float y_mid = cys - (s->top - cam->z) * cam->focal_y * iw;
-        if (y_top < y_mid) y_top = y_mid;
-    }
-    const float y_bot = cys - (s->bot - cam->z) * cam->focal_y * iw;
-    if (y_top >= y_bot) return;
+    if (seen < 2) return;
+    if (X1 - X0 < 1.0f || y_bot - y_top < 1.0f) return;
+    if (X1 < 0.0f || X0 > (float)SCREEN_W) return;
     if (y_bot < 0.0f || y_top > (float)SCREEN_H) return;
+
+    /* Depth for the z test: the middle of the well. The footprint spans
+     * the whole of it, so neither end is right, and the near rim loses to
+     * nothing while the far rim ties with the wall behind the shaft. */
+    const float iw = 2.0f / (dmin + dmax);
 
     /* Depth-proportional bias, as the billboards use. */
     float z = 1.0f - (R_FLAT_NEAR + 0.6f) * iw;
     if (z < 0.0f) z = 0.0f;
 
-    const float xs[4] = { xa, xb, xb, xa };
+    const float xs[4] = { X0, X1, X1, X0 };
     const float ys[4] = { y_top, y_top, y_bot, y_bot };
     const float ss[4] = { 0.0f, (float)HALO_TEX, (float)HALO_TEX, 0.0f };
     const float ts[4] = { 0.0f, 0.0f, (float)HALO_TEX, (float)HALO_TEX };

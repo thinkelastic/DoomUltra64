@@ -1062,18 +1062,6 @@ dt64_tex_t *p_level_thing_sprite(int type)
     return base ? resolve_sprite(base) : NULL;
 }
 
-/* How far above its feet a thing's art reaches, in map units -- topoffset
- * is exactly that, and map units are sprite pixels. The standing lights
- * use it to sit their light at the flame instead of at the middle of a
- * collision box: those boxes are 16 units tall whatever the prop, so a
- * tall torch's flame is six times higher than the box says. 0 when the
- * type has no sprite in the ROM. */
-int p_level_thing_top(int type)
-{
-    const dt64_tex_t *t = p_level_thing_sprite(type);
-    return t ? (int)t->topoffset : 0;
-}
-
 /* As p_level_resolve, but yields the texture itself and NULL when the name is
  * not in the ROM. Sprite lookup needs to distinguish "no such frame" from
  * "index 0", which the index form cannot express. */
