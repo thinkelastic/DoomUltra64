@@ -50,6 +50,22 @@ void r_shaft_add(const r_polypt_t *pts, int npts,
  * behind it. */
 void r_shaft_flush(const r_camera_t *cam);
 
+/* A BEAD: a small glow that is not a light.
+ *
+ * Some things glow without lighting the room -- a barrel's ooze, the
+ * luminous stuff on a corpse. Routing those through the dynamic light
+ * registry cannot work, and the barrel proves why: to be safe it must be
+ * the DIMMEST entry there, because barrels cluster in eights and eviction
+ * ranks by intensity, so a barrel is thrown out by any torch, lamp or key
+ * in the room -- and a light that has been evicted has no halo either. The
+ * two requirements are in direct conflict through one number.
+ *
+ * A bead separates them: it never enters the registry, lights nothing, and
+ * simply draws. Cheap enough to be unbudgeted at this count; it is one
+ * quad. */
+void r_bead_add(float x, float y, float z, float half_h,
+                float r, float g, float b, float a);
+
 /* A halo for every live dynamic light. After the sky, so a fireball
  * still glows against open air. */
 void r_halo_flush(const r_camera_t *cam);
@@ -62,6 +78,10 @@ static inline void r_shaft_add(const r_polypt_t *pts, int npts,
                                float floor_h, float ceil_h, int lightlevel)
 { (void)pts; (void)npts; (void)floor_h; (void)ceil_h; (void)lightlevel; }
 static inline void r_shaft_flush(const r_camera_t *cam) { (void)cam; }
+static inline void r_bead_add(float x, float y, float z, float half_h,
+                              float r, float g, float b, float a)
+                   { (void)x; (void)y; (void)z; (void)half_h;
+                     (void)r; (void)g; (void)b; (void)a; }
 static inline void r_halo_flush(const r_camera_t *cam) { (void)cam; }
 
 #endif /* R_HALO */

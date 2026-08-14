@@ -138,7 +138,22 @@ typedef struct {
 static shaftjob_t shafts[SHAFT_MAX];
 static int        num_shafts;
 
-void r_halo_begin(void) { num_shafts = 0; }
+/* --- beads: glows that are not lights (see r_halo.h) -------------------- */
+#define BEAD_MAX 16
+typedef struct { float x, y, z, h, r, g, b, a; } bead_t;
+static bead_t beads[BEAD_MAX];
+static int    num_beads;
+
+void r_bead_add(float x, float y, float z, float half_h,
+                float r, float g, float b, float a)
+{
+    if (num_beads >= BEAD_MAX || half_h <= 0.0f || a <= 0.0f) return;
+    bead_t *d = &beads[num_beads++];
+    d->x = x; d->y = y; d->z = z; d->h = half_h;
+    d->r = r; d->g = g; d->b = b; d->a = a;
+}
+
+void r_halo_begin(void) { num_shafts = 0; num_beads = 0; }
 
 /* Replace an outline with its own bounding rectangle, wound the same way
  * whatever came in. Used when a well is too many-cornered to carry and
@@ -571,7 +586,9 @@ void r_halo_flush(const r_camera_t *cam) { (void)cam; }
 void r_halo_flush(const r_camera_t *cam)
 {
     const int nlights = r_light_count();
-    if (!nlights) return;
+    /* Beads are not lights, so an empty registry must not skip them --
+     * a barrel glowing in an unlit cellar is exactly the case that matters. */
+    if (!nlights && !num_beads) return;
 
     halo_mode();
 
@@ -626,6 +643,17 @@ void r_halo_flush(const r_camera_t *cam)
             billboard(cam, l->x, l->y, half_h,
                       hz + half_h, hz - half_h, r, g, b, a, a);
         }
+
+        /* Beads ride the same upload and mode block -- same texture, same
+         * blend, same z rule. They are drawn here rather than in their own
+         * pass purely to avoid a second bind. */
+        for (int i = 0; i < num_beads; i++) {
+            const bead_t *d = &beads[i];
+            billboard(cam, d->x, d->y, d->h,
+                      d->z + d->h, d->z - d->h,
+                      d->r, d->g, d->b, d->a, d->a);
+        }
+        num_beads = 0;
     }
 
 }

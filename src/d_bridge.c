@@ -42,6 +42,7 @@ void *p_level_thing_sprite(int type);
 #include "doom/umapinfo.h"
 #include "doom/sounds.h"
 
+#include "r_halo.h"
 #include "r_light.h"
 #include "doom/am_map.h"
 #include "dt64.h"
@@ -1556,13 +1557,33 @@ void D_LightsUpdate(void)
                  * frames -- monotonic with the art, no state-table
                  * spelunking. */
 #if D_KEYLIGHT
-                /* Under KEYLIGHT with the other standing lights: it is
-                 * scenery that glows, not an event. */
+                /* An INTACT barrel glows but does not light the room, and
+                 * those are different jobs that must not share a number.
+                 *
+                 * It was a registry light at intensity 0.20 -- correctly
+                 * the weakest thing there, because barrels cluster in
+                 * eights and eviction ranks by intensity, so it must never
+                 * be what crowds out a fireball. But that made it the
+                 * FIRST thing evicted by any torch, lamp or key in the
+                 * room, and an evicted light has no halo: the glow simply
+                 * never appeared. One number cannot be both dim enough to
+                 * yield a slot and bright enough to be seen.
+                 *
+                 * So the ooze is a BEAD (see r_halo.h): it never enters
+                 * the registry, lights nothing, cannot be evicted, and
+                 * draws unconditionally. Sized and placed from the art --
+                 * a 7-unit bead at the rim of a 32-unit can. */
                 if (mo->health > 0) {
-                    radius = 112.0f; intensity = 0.20f;
-                    cr = 0.42f; cg = 1.00f; cb = 0.38f;
-                    flame_top = 1;
-                    break;
+                    const dt64_tex_t *bs =
+                        (const dt64_tex_t *)R_SpriteFrame(mo->sprite,
+                                                          mo->frame, 0);
+                    const float top = bs && bs->topoffset > 0
+                                    ? (float)bs->topoffset : 28.0f;
+                    r_bead_add((float)mo->x / 65536.0f,
+                               (float)mo->y / 65536.0f,
+                               (float)mo->z / 65536.0f + top * 0.92f,
+                               7.0f, 0.42f, 1.00f, 0.38f, 0.30f);
+                    continue;
                 }
 #else
                 if (mo->health > 0) continue;
@@ -1702,20 +1723,6 @@ void D_LightsUpdate(void)
             /* A barrel going up is the biggest fireball in the game and
              * carries a wider glow than the things that merely fly. */
             case MT_BARREL:
-#if D_KEYLIGHT
-                /* An INTACT barrel is not an explosion: a tiny glow on the
-                 * ooze at the rim. 112 * 0.5 * 0.12 gives a 13-unit-tall
-                 * bead on a 32-unit can. Its alpha is set explicitly
-                 * because the usual 0.30*intensity would give 0.06 off a
-                 * light deliberately kept dim -- barrels cluster, and the
-                 * registry evicts by intensity, so it must stay the
-                 * weakest thing in there while still being SEEN. */
-                if (mo->health > 0) {
-                    r_light_halo_next(0.12f);
-                    r_light_halo_alpha_next(0.26f);
-                    break;
-                }
-#endif
                 r_light_halo_next(0.325f);
                 break;
             case MT_ROCKET:
