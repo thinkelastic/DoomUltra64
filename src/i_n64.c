@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <malloc.h>
+#include <sys/stat.h>
 
 /* --- game state ------------------------------------------------------- */
 
@@ -233,12 +234,82 @@ static char save_last_backend = '-';
 static int  save_last_errno;
 static char save_last_path[80];
 
+/* Make the canonical saves folder if the card has not got one.
+ *
+ * fopen(...,"wb") does not create a missing directory, so a card without
+ * sd:/Doom/saves/ fell through every candidate to the root -- and if the
+ * root refuses the write too there is nowhere left, which is the failure a
+ * player sees as an error on the save menu. Nothing here ever created the
+ * folder; the comment below merely noted that the missing ones "cost
+ * nothing", which is true of the attempt and not of the outcome.
+ *
+ * libdragon routes mkdir through its filesystem hook table (system.h), so
+ * whether it works depends on the SD driver. Ask once, ignore the answer,
+ * and carry on: a driver without the hook returns -1 and leaves us exactly
+ * where we already were. Both levels are attempted because the parent has
+ * to exist first, and an existing one simply fails with EEXIST. */
+/* The folder the IWAD was actually found in, set at boot. Empty until
+ * then, and empty for a cartridge with the IWAD baked in -- in which case
+ * the compiled-in list below is all there is to go on. */
+static char data_dir[40];
+
+void D_SetDataDir(const char *dir)
+{
+    if (dir) snprintf(data_dir, sizeof data_dir, "%s", dir);
+}
+
+static void save_dir_ensure(void)
+{
+    static bool tried;
+    if (tried) return;
+    tried = true;
+
+    /* Beside the game first. The trailing slash has to come off for
+     * mkdir, and "sd:/" itself is a root that always exists and must not
+     * be mangled into "sd:". */
+    if (data_dir[0]) {
+        char d[48];
+        snprintf(d, sizeof d, "%ssaves", data_dir);
+        mkdir(d, 0777);
+    }
+    /* The compiled-in fallback, for a baked-in IWAD or a card laid out
+     * the conventional way. */
+    mkdir("sd:/Doom", 0777);
+    mkdir("sd:/Doom/saves", 0777);
+}
+
 /* The caller already built a filename ("doom_0.sav"); only the directory
  * in front of it is ours to choose. */
+/* The search list, built once: the two directories derived from where the
+ * IWAD was actually found, then the compiled-in ones. Derived first is
+ * what makes a card laid out any other way work -- sd:/Games/Doom/ and the
+ * like -- rather than only the three spellings someone thought of.
+ *
+ * A runtime list rather than negative sentinel indices, because sd_write
+ * already spends -1 on "the directory that worked last time". */
+#define SAVE_DIR_MAX (2 + (int)(sizeof save_dirs / sizeof save_dirs[0]))
+static const char *save_dir_list[SAVE_DIR_MAX];
+static int         save_dir_n;
+static char        derived_saves[48];
+
+static void save_dirs_build(void)
+{
+    if (save_dir_n) return;
+    if (data_dir[0]) {
+        snprintf(derived_saves, sizeof derived_saves, "%ssaves/", data_dir);
+        save_dir_list[save_dir_n++] = derived_saves;
+        save_dir_list[save_dir_n++] = data_dir;
+    }
+    for (unsigned i = 0; i < sizeof save_dirs / sizeof save_dirs[0]; i++)
+        save_dir_list[save_dir_n++] = save_dirs[i];
+}
+
 static void save_path(char *out, size_t cap, int dir, const char *name)
 {
     const char *slash = strrchr(name, '/');
-    snprintf(out, cap, "%s%s", save_dirs[dir], slash ? slash + 1 : name);
+    save_dirs_build();
+    if (dir < 0 || dir >= save_dir_n) dir = 0;
+    snprintf(out, cap, "%s%s", save_dir_list[dir], slash ? slash + 1 : name);
 }
 
 /* Open a slot for reading, trying each directory until one has it. */
@@ -250,10 +321,11 @@ static FILE *sd_open_read(const char *name)
         FILE *f = fopen(path, "rb");
         if (f) return f;
     }
-    for (unsigned d = 0; d < sizeof save_dirs / sizeof save_dirs[0]; d++) {
-        save_path(path, sizeof path, (int)d, name);
+    save_dirs_build();
+    for (int d = 0; d < save_dir_n; d++) {
+        save_path(path, sizeof path, d, name);
         FILE *f = fopen(path, "rb");
-        if (f) { save_dir_known = (int)d; return f; }
+        if (f) { save_dir_known = d; return f; }
     }
     return NULL;
 }
@@ -287,7 +359,12 @@ static boolean sd_read(const char *name, byte *buffer, size_t cap,
 static boolean sd_write(const char *name, const byte *buffer, size_t size)
 {
     char path[80];
-    const int ndirs = (int)(sizeof save_dirs / sizeof save_dirs[0]);
+
+    /* Before the first write, not before every one: the flag inside makes
+     * this a no-op after the first call. */
+    save_dir_ensure();
+    save_dirs_build();
+    const int ndirs = save_dir_n;
 
     /* -1 means "the directory that already worked", then each in order.
      * fopen for writing does not create a missing directory, so the ones

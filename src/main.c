@@ -179,6 +179,14 @@ static void scene_init(void)
             snprintf(path, sizeof path, "%s%s", iwad_dirs[d], iwad_names[i]);
             if ((wad_ok = wad_open(path))) {
                 debugf("wad: using %s\n", path);
+                /* Remember WHERE, so saves can go beside the game rather
+                 * than at a path compiled in. This is the only thing the
+                 * console actually knows about where it was launched from:
+                 * there is no "my ROM's directory" to ask for, but the
+                 * folder that yielded the IWAD is the same folder in every
+                 * arrangement a player is likely to have. */
+                { void D_SetDataDir(const char *dir);
+                  D_SetDataDir(iwad_dirs[d]); }
                 break;
             }
         }
