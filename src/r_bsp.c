@@ -59,15 +59,19 @@ int D_TextureIsMirror(int picnum);
 #include "r_wall.h"
 
 #if D_KEYLIGHT
-/* Sector light as the renderer should use it: clamped, and taken down 30%
- * where a standing light does the lighting instead. See D_BuildLampSectors
- * -- a torch's room was lit twice, once by the level that stood in for the
- * flame and once by the flame. */
+/* Sector light as the renderer should use it: clamped, and HALVED where a
+ * standing light does the lighting instead. See D_BuildLampSectors -- a
+ * torch's room was lit twice, once by the level that stood in for the
+ * flame and once by the flame. Taking only 30% off left the ambient still
+ * doing most of the work and the flame reading as a tint on top of it;
+ * at half, the pool around the flame is plainly the brighter thing and
+ * the corners it does not reach fall away, which is the whole point of
+ * standing a torch there. */
 int D_SectorHasLamp(int secnum);
 static inline int sec_light(const sector_t *sc)
 {
     int l = sc->lightlevel < 0 ? 0 : sc->lightlevel > 255 ? 255 : sc->lightlevel;
-    if (D_SectorHasLamp((int)(sc - sectors))) l = (l * 179) >> 8;   /* x0.70 */
+    if (D_SectorHasLamp((int)(sc - sectors))) l >>= 1;              /* x0.50 */
     return l;
 }
 #else

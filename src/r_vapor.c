@@ -7,6 +7,7 @@
 #include "d_glow.h"
 #include "r_fastmath.h"
 #include "r_flat.h"          /* R_FLAT_NEAR family of constants */
+#include "r_light.h"         /* the same per-vertex query the flats use */
 #include "r_tri.h"
 
 #include <libdragon.h>
@@ -258,18 +259,40 @@ void r_vapor_flush(const r_camera_t *cam)
         const float rr = (float)st->r * (1.0f / 255.0f);
         const float gg = (float)st->g * (1.0f / 255.0f);
         const float bb = (float)st->b * (1.0f / 255.0f);
+        /* The room's own light level, which the layer used to ignore
+         * entirely: haze in an unlit cellar was as bright as haze in a
+         * floodlit hall, because the style colour went to every corner
+         * unchanged. */
+        const float amb = (float)j->light * (1.0f / 255.0f);
         const float aa = (float)st->a * (1.0f / 255.0f) * breathe;
         const float finv = r_fog_inv[j->light];
         const float dzf  = dz * cam->focal_y;
+        const float vz   = j->h;          /* where the layer hangs, for the light query */
 
         float sv[VAP_CLIP_MAX][10];
         for (int i = 0; i < n; i++) {
             const float iw = 1.0f / clip[i].d;
             sv[i][0] = cx + clip[i].o * cam->focal_x * iw;
             sv[i][1] = cy - dzf * iw;
-            sv[i][2] = rr;
-            sv[i][3] = gg;
-            sv[i][4] = bb;
+            /* Lit per corner, not one flat wash over the whole bank.
+             *
+             * Every vertex carried the style's colour, so a layer was
+             * uniformly bright from end to end whatever was happening
+             * underneath it, and read as a painted sheet lying on the
+             * pool rather than as something suspended in the room. Each
+             * corner now takes the light where it actually is -- the
+             * same query the flat below it uses -- so the haze brightens
+             * under a torch, and a fireball crossing the pool sweeps a
+             * gradient across the smoke instead of leaving it flat. */
+            float la[3] = { 0.0f, 0.0f, 0.0f };
+            r_light_at_rgb(clip[i].wx, clip[i].wy, vz, la);
+            float lr = amb + la[0], lg = amb + la[1], lb = amb + la[2];
+            if (lr > 1.0f) lr = 1.0f;
+            if (lg > 1.0f) lg = 1.0f;
+            if (lb > 1.0f) lb = 1.0f;
+            sv[i][2] = rr * lr;
+            sv[i][3] = gg * lg;
+            sv[i][4] = bb * lb;
             /* The haze thins with the same falloff that dims the world
              * around it, so a distant pool's layer fades with its room. */
             sv[i][5] = aa * r_vis(clip[i].d, finv);

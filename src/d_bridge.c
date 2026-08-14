@@ -1626,12 +1626,14 @@ void D_LightsUpdate(void)
          * at knee height. The art knows better: topoffset is the distance
          * from a thing's feet to the top of its sprite, and the flame is
          * the top of these sprites -- 15 units up a candle, 92 up a tall
-         * torch. Just short of the very top, where the flame's body is
-         * rather than its last wisp. The barrel's ooze is the same idea
-         * upside down: it glows at the rim, which is the top of the can. */
+         * torch. The light's CENTRE goes there, at the top of the art and
+         * not just below it: the flame is what is lit, and putting the
+         * centre under it only spread the pool back down the stand. The
+         * barrel's ooze is the same idea upside down -- it glows at the
+         * rim, which is the top of the can. */
         if (flame_top) {
             const int topo = p_level_thing_top(mo->type);
-            if (topo > 0) mz = (float)mo->z / 65536.0f + (float)topo * 0.85f;
+            if (topo > 0) mz = (float)mo->z / 65536.0f + (float)topo;
         }
         r_light_add(mx, my, mz, radius, intensity, cr, cg, cb);
     }

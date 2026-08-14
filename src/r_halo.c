@@ -79,7 +79,16 @@ void r_halo_init(void)
             float edge = ax > 0.84f ? (1.0f - ax) * (1.0f / 0.16f) : 1.0f;
             if (edge < 0.0f) edge = 0.0f;
             const float vy = 1.0f - ((float)y / (float)(HALO_TEX - 1));
-            float s = edge * (0.12f + 0.88f * vy);
+            /* Fade IN at the head as well as out at the foot. The beam
+             * used to reach full strength on its very first row, which
+             * drew a hard horizontal line across the top and read as a
+             * pasted card rather than as light entering the room -- the
+             * more so wherever the geometry starts the beam below the
+             * ceiling it comes through. Light arriving through a hole has
+             * no edge; it accumulates over the first stretch of air. */
+            const float head = vy > 0.82f ? (1.0f - vy) * (1.0f / 0.18f)
+                                          : 1.0f;
+            float s = edge * head * (0.12f + 0.88f * vy);
             if (s < 0.0f) s = 0.0f;
             int sa = (int)(s * 15.0f + 0.5f);
             if (sa > 15) sa = 15;
@@ -357,12 +366,33 @@ static void shaft_prism(const r_camera_t *cam, const shaftjob_t *s, float k)
     }
     const float wind = area >= 0.0f ? 1.0f : -1.0f;
 
-    /* Project every corner once. */
-    float depth[SHAFT_PTS_MAX], sx[SHAFT_PTS_MAX];
+    /* Project every corner once, and with it the one extra number the
+     * beam needs: how much FURTHER along the same eye ray the outline's
+     * far side lies. See the note on the top edge below -- the beam is
+     * positioned at the near rim but BEGINS at the far one, and the ratio
+     * is what connects them without a second projection. */
+    float depth[SHAFT_PTS_MAX], sx[SHAFT_PTS_MAX], farscale[SHAFT_PTS_MAX];
     for (int i = 0; i < n; i++) {
         const float dx = s->px[i] - cam->x, dy = s->py[i] - cam->y;
         depth[i] = dx * cs + dy * sn;
         sx[i]    = dx * sn - dy * cs;          /* lateral, not yet screen */
+
+        /* Largest multiple of the eye->corner vector still landing on the
+         * outline. 1.0 at the corner itself, so a ray that grazes the
+         * shape leaves the beam starting exactly where it is. */
+        float best = 1.0f;
+        for (int e = 0; e < n; e++) {
+            const int f = e + 1 < n ? e + 1 : 0;
+            const float ex = s->px[f] - s->px[e], ey = s->py[f] - s->py[e];
+            const float den = dx * ey - dy * ex;
+            if (den > -1e-6f && den < 1e-6f) continue;
+            const float rx = s->px[e] - cam->x, ry = s->py[e] - cam->y;
+            const float u = (rx * dy - ry * dx) / den;      /* along the edge */
+            if (u < 0.0f || u > 1.0f) continue;
+            const float t = (rx * ey - ry * ex) / den;      /* along the ray */
+            if (t > best) best = t;
+        }
+        farscale[i] = best;
     }
 
     /* Standing IN the well, every edge faces you and the chain wraps the
@@ -381,20 +411,17 @@ static void shaft_prism(const r_camera_t *cam, const shaftjob_t *s, float k)
 
     const float NEARP = 12.0f;
 
-    /* Where the beam BEGINS.
+    /* The lowest the opening's rim projects to anywhere: its far rim, for
+     * a plane above the eye. No part of the beam starts above this.
      *
-     * The prism's true silhouette runs up to the NEAR rim of the opening,
-     * which for a plane above the eye projects HIGHEST -- and that hung a
-     * bright slab up inside the recess above the doorway, in a place no
-     * light comes out of. What a beam actually does is emerge at the
-     * hole's lower rim and fall from there, so the whole beam starts at
-     * the lowest point the rim projects to, which is the FAR rim: greater
-     * depth, lower on screen.
-     *
-     * Kept as a clamp on the near chain rather than by drawing the far
-     * chain instead. The far chain would put the top edge in the right
-     * place and get the WIDTH wrong -- it sits further away, so it
-     * projects narrower than the opening the beam is supposed to fill. */
+     * The per-corner far depth below cannot do it alone, and the reason is
+     * worth writing down: a ray through a SILHOUETTE corner grazes the
+     * outline and exits where it entered, so its far depth IS its near
+     * depth and the top edge there stays at the near rim -- which head-on
+     * is both corners of the only near edge, and the beam reaches the full
+     * height of the recess again. The two together give what is wanted:
+     * the corner term lowers the edge wherever the geometry has depth to
+     * give, this floors it everywhere else. */
     float y_start = -1e9f;
     for (int i = 0; i < n; i++) {
         if (depth[i] < NEARP) continue;
@@ -402,20 +429,30 @@ static void shaft_prism(const r_camera_t *cam, const shaftjob_t *s, float k)
         if (y > y_start) y_start = y;
     }
 
+
     /* The near chain, and the screen span it covers, in one pass. Edges
      * are gathered before drawing because the texture must be mapped
      * across the total span. */
     int   ne = 0;
     float X0 = 1e9f, X1 = -1e9f;
     float pd[SHAFT_PTS_MAX * 2], px_[SHAFT_PTS_MAX * 2];
+    float pf[SHAFT_PTS_MAX * 2];
 
     for (int i = 0; i < n; i++) {
         const int j = i + 1 < n ? i + 1 : 0;
         const float ex = s->px[j] - s->px[i], ey = s->py[j] - s->py[i];
         const float rx = cam->x - s->px[i],   ry = cam->y - s->py[i];
-        /* The eye is on the OUTSIDE of an edge that faces it. Taking the
-         * inside half picks the far chain, which projects narrower than
-         * the opening -- the beam would not fill the hole. */
+        /* The NEAR chain: the edges the eye is outside of.
+         *
+         * It has to be this one, and not the far chain that the top edge
+         * is measured from. Both chains run between the same two
+         * silhouette vertices, so either covers the right screen span --
+         * but a quad's DEPTH is what the z-buffer tests it by, and the
+         * outline's far rim sits at the far wall of the room the beam
+         * falls in. Drawn there the beam ties or loses against that wall
+         * and vanishes completely. Positioned at the near rim it is
+         * inside the room, in front of everything it should be in front
+         * of. */
         if ((ex * ry - ey * rx) * wind >= 0.0f) continue;
 
         float da = depth[i], db = depth[j], oa = sx[i], ob = sx[j];
@@ -434,6 +471,7 @@ static void shaft_prism(const r_camera_t *cam, const shaftjob_t *s, float k)
 
         pd[ne * 2] = da; pd[ne * 2 + 1] = db;
         px_[ne * 2] = xa; px_[ne * 2 + 1] = xb;
+        pf[ne * 2] = farscale[i]; pf[ne * 2 + 1] = farscale[j];
         ne++;
     }
     if (!ne || X1 - X0 < 1.0f) return;
@@ -446,15 +484,26 @@ static void shaft_prism(const r_camera_t *cam, const shaftjob_t *s, float k)
         const float xa = px_[e * 2], xb = px_[e * 2 + 1];
         const float iwa = 1.0f / da, iwb = 1.0f / db;
 
-        float yta = cys - (s->top - cam->z) * cam->focal_y * iwa;
-        float ytb = cys - (s->top - cam->z) * cam->focal_y * iwb;
-        const float yba = cys - (s->bot - cam->z) * cam->focal_y * iwa;
-        const float ybb = cys - (s->bot - cam->z) * cam->focal_y * iwb;
-        /* Start at the hole's lower rim, not up inside the recess. */
+        /* Where the beam BEGINS, per corner rather than as one flat line.
+         *
+         * The prism's true silhouette runs up to the NEAR rim, which for
+         * a plane above the eye projects HIGHEST -- and that hung a bright
+         * slab up inside the recess above a doorway, where no light comes
+         * out. Light emerges at the hole's LOWER rim, which is the far
+         * one. So the top edge is projected at the far rim's depth while
+         * the quad keeps the near rim's position and z: it starts where
+         * the light does, and still follows the opening's perspective
+         * along its length instead of being clamped to a flat line. */
+        const float iwta = 1.0f / (da * pf[e * 2]);
+        const float iwtb = 1.0f / (db * pf[e * 2 + 1]);
+        float yta = cys - (s->top - cam->z) * cam->focal_y * iwta;
+        float ytb = cys - (s->top - cam->z) * cam->focal_y * iwtb;
         if (y_start > -1e8f) {
             if (yta < y_start) yta = y_start;
             if (ytb < y_start) ytb = y_start;
         }
+        const float yba = cys - (s->bot - cam->z) * cam->focal_y * iwa;
+        const float ybb = cys - (s->bot - cam->z) * cam->focal_y * iwb;
         if (yta >= yba && ytb >= ybb) continue;     /* nothing left to fall */
         if ((yba < 0.0f && ybb < 0.0f) ||
             (yta > (float)SCREEN_H && ytb > (float)SCREEN_H)) continue;
