@@ -1661,8 +1661,14 @@ void D_LightsUpdate(void)
         if (flame_top) {
             const dt64_tex_t *spr =
                 (const dt64_tex_t *)R_SpriteFrame(mo->sprite, mo->frame, 0);
-            if (spr && spr->topoffset > 0)
+            if (spr && spr->topoffset > 0) {
                 mz = (float)mo->z / 65536.0f + (float)spr->topoffset;
+                /* The light radiates from the top of the stand; the fire
+                 * is the body just under it. An eighth of the art's height
+                 * puts the glow on the flame instead of straddling the
+                 * topmost pixel with half of itself in the air above. */
+                r_light_halo_drop_next((float)spr->topoffset * 0.125f);
+            }
         }
         r_light_add(mx, my, mz, radius, intensity, cr, cg, cb);
     }

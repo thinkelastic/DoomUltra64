@@ -418,62 +418,59 @@ static void shaft_prism(const r_camera_t *cam, const shaftjob_t *s, float k)
         if (inside) return;
     }
 
-    /* THE WHOLE FALL OF LIGHT, not a slice of it.
+    /* THE WIDEST VERTICAL SLICE OF THE WELL, as a real surface.
      *
-     * A well is a volume: the same plan shape at the ceiling and on the
-     * floor, with the light between. Two earlier tries drew a single
-     * surface of it -- the rim nearest the eye, which put the fall a
-     * quarter of a room in front of the opening, and then the cut at mid
-     * depth, which is worse: a lone quad hanging in the middle of the
-     * shaft with air on both sides, reading as a square panel rather than
-     * as a column of light.
+     * Every version before this drew the beam as a screen-space rectangle:
+     * four corners sharing ONE depth, so the texture was interpolated flat
+     * and the whole beam z-tested as though it stood at a single distance
+     * while it actually spans 257 units of it. That is the perspective
+     * being wrong -- not the outline, but the fact that the quad was never
+     * a surface in the world at all.
      *
-     * What the eye should see is the volume's whole screen footprint. For
-     * a plan polygon extruded straight down, that footprint is bounded by
-     * the widest projection of the outline (every corner, each at its own
-     * depth), by the opening above, and by the pool of light on the floor
-     * below -- and the floor pool is the part that gives the beam its
-     * height, because a 257-deep footprint of lit floor covers a lot of
-     * screen. One quad over that footprint fills the shaft, and being one
-     * quad it cannot composite over itself anywhere.
-     *
-     * The top is the opening's LOWER rim: the rim projects over a range,
-     * and the light is only in the room once it is past all of it. The
-     * bottom is the NEAREST floor, which is the lowest the pool reaches. */
-    float X0 = 1e9f, X1 = -1e9f;
-    float y_top = -1e9f, y_bot = -1e9f;
-    int seen = 0;
+     * It is one now. Take the outline's two SILHOUETTE corners -- the ones
+     * projecting furthest left and right, which are the widest chord of the
+     * hole as seen from here -- and stand a quad between them from ceiling
+     * to floor. Vertical edges in the world stay vertical on screen for a
+     * camera that never pitches, so the sides are upright; the top and
+     * bottom edges slant exactly as the opening and the pool of light
+     * beneath it do, because each end carries its OWN depth. That also
+     * gives the texture a real w to divide by, so the fall from opening to
+     * floor foreshortens with distance instead of being painted evenly
+     * down a flat card. */
+    int li = -1, ri = -1;
+    float lx = 1e9f, rx = -1e9f;
     for (int i = 0; i < n; i++) {
         if (depth[i] < NEARP) continue;
-        const float iwi = 1.0f / depth[i];
-        const float x = cxs + sx[i] * cam->focal_x * iwi;
-        if (x < X0) X0 = x;
-        if (x > X1) X1 = x;
-        const float yt = cys - (s->top - cam->z) * cam->focal_y * iwi;
-        const float yb = cys - (s->bot - cam->z) * cam->focal_y * iwi;
-        if (yt > y_top) y_top = yt;      /* lowest rim: the far one */
-        if (yb > y_bot) y_bot = yb;      /* lowest floor: the near one */
-        seen++;
+        const float x = cxs + sx[i] * cam->focal_x / depth[i];
+        if (x < lx) { lx = x; li = i; }
+        if (x > rx) { rx = x; ri = i; }
     }
-    if (seen < 2) return;
-    if (X1 - X0 < 1.0f || y_bot - y_top < 1.0f) return;
-    if (X1 < 0.0f || X0 > (float)SCREEN_W) return;
-    if (y_bot < 0.0f || y_top > (float)SCREEN_H) return;
+    if (li < 0 || ri < 0 || li == ri) return;
+    if (rx - lx < 1.0f) return;
+    if (rx < 0.0f || lx > (float)SCREEN_W) return;
 
-    /* Depth for the z test: the middle of the well. The footprint spans
-     * the whole of it, so neither end is right, and the near rim loses to
-     * nothing while the far rim ties with the wall behind the shaft. */
-    const float iw = 2.0f / (dmin + dmax);
+    const float iwl = 1.0f / depth[li], iwr = 1.0f / depth[ri];
+    const float ytl = cys - (s->top - cam->z) * cam->focal_y * iwl;
+    const float ytr = cys - (s->top - cam->z) * cam->focal_y * iwr;
+    const float ybl = cys - (s->bot - cam->z) * cam->focal_y * iwl;
+    const float ybr = cys - (s->bot - cam->z) * cam->focal_y * iwr;
+    if (ytl >= ybl && ytr >= ybr) return;
+    if ((ybl < 0.0f && ybr < 0.0f) ||
+        (ytl > (float)SCREEN_H && ytr > (float)SCREEN_H)) return;
 
-    /* Depth-proportional bias, as the billboards use. */
-    float z = 1.0f - (R_FLAT_NEAR + 0.6f) * iw;
-    if (z < 0.0f) z = 0.0f;
+    /* Depth-proportional bias, as the billboards use -- per end now. */
+    float zl = 1.0f - (R_FLAT_NEAR + 0.6f) * iwl;
+    float zr = 1.0f - (R_FLAT_NEAR + 0.6f) * iwr;
+    if (zl < 0.0f) zl = 0.0f;
+    if (zr < 0.0f) zr = 0.0f;
 
-    const float xs[4] = { X0, X1, X1, X0 };
-    const float ys[4] = { y_top, y_top, y_bot, y_bot };
+    const float xs[4] = { lx,  rx,  rx,  lx  };
+    const float ys[4] = { ytl, ytr, ybr, ybl };
     const float ss[4] = { 0.0f, (float)HALO_TEX, (float)HALO_TEX, 0.0f };
     const float ts[4] = { 0.0f, 0.0f, (float)HALO_TEX, (float)HALO_TEX };
-    const float as[4] = { k, k, 0.0f, 0.0f };
+    const float ws[4] = { iwl, iwr, iwr, iwl };
+    const float zq[4] = { zl,  zr,  zr,  zl  };
+    const float as[4] = { k,   k,   0.0f, 0.0f };
 
     float v[4][10];
     for (int i = 0; i < 4; i++) {
@@ -481,8 +478,8 @@ static void shaft_prism(const r_camera_t *cam, const shaftjob_t *s, float k)
         v[i][2] = 1.00f; v[i][3] = 0.97f; v[i][4] = 0.86f;
         v[i][5] = as[i];
         v[i][6] = ss[i]; v[i][7] = ts[i];
-        v[i][8] = iw;
-        v[i][9] = z;
+        v[i][8] = ws[i];
+        v[i][9] = zq[i];
     }
     r_tri_quad(&TRIFMT_HALO, v[0], v[1], v[2], v[3]);
     r_tri_spr += 2;
@@ -560,8 +557,13 @@ void r_halo_flush(const r_camera_t *cam)
             /* Half the reach, times the light's own halo fraction --
              * a half again for anything that flies or detonates. */
             const float half_h = radius * 0.5f * r_light_halo[i];
+            /* Centred on the FIRE, which for a flame is a body just under
+             * the top of the art rather than the topmost pixel the light
+             * itself radiates from -- see r_light_halo_drop_next. Zero for
+             * everything else, so a fireball's glow still sits on it. */
+            const float hz = l->z - r_light_halo_dz[i];
             billboard(cam, l->x, l->y, half_h,
-                      l->z + half_h, l->z - half_h, r, g, b, a, a);
+                      hz + half_h, hz - half_h, r, g, b, a, a);
         }
     }
 

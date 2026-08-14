@@ -76,6 +76,15 @@ void r_light_eye(float x, float y);
 /* Set the halo fraction for the NEXT r_light_add. Resets to 1.0 after,
  * so a caller that does not care never thinks about it. */
 void r_light_halo_next(float frac);
+
+/* How far the visible glow sits BELOW the light's own centre, in world
+ * units, for the next r_light_add; resets to 0. They are not always the
+ * same place. A flame lights a room from the top of its stand, which is
+ * where the light belongs -- but the fire itself is a body just under
+ * that, and a glow centred on the topmost pixel hangs half of itself in
+ * the air above the prop. */
+void r_light_halo_drop_next(float dz);
+extern float r_light_halo_dz[R_LIGHT_MAX];
 extern int       r_light_num;
 
 /* Clear the frame's list. Called once per frame before the BSP walk, since the
@@ -226,6 +235,7 @@ static inline int r_light_count(void) { return r_light_num; }
 
 static inline void  r_light_reset(void) { }
 static inline void  r_light_eye(float x, float y) { (void)x; (void)y; }
+static inline void  r_light_halo_drop_next(float dz) { (void)dz; }
 static inline void  r_light_add(float x, float y, float z, float rad, float i,
                                 float r, float g, float b)
                     { (void)x; (void)y; (void)z; (void)rad; (void)i;
