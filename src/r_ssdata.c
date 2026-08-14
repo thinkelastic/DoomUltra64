@@ -209,7 +209,28 @@ static void store_poly(int ssnum, vec2_t *poly, int n, int *ptcursor)
      * does not fill identically on both sides and which shows as a hairline
      * between floor or ceiling patches. A fraction of a unit of overlap closes
      * it. Cells at different heights overlap by the same negligible amount,
-     * and the depth buffer settles which is in front. */
+     * and the depth buffer settles which is in front.
+     *
+     * THAT LAST SENTENCE IS ONLY TRUE AT DIFFERENT HEIGHTS. Two COPLANAR
+     * cells -- a floor meeting a neighbouring floor at the same height, in
+     * a different sector with a different flat or light level -- emit
+     * exactly the same depth over the whole overlap band: for a horizontal
+     * plane z is affine in screen y and independent of screen x, so the
+     * band is a perfect tie and the winner is whichever the texture
+     * bucketing happened to draw first. Its texture and shade then cover
+     * up to ~1.5 world units of its neighbour, which is 3.5 px at depth 48
+     * and 1 px at 162 -- a few stray coloured pixels in a line along the
+     * seam, and the reason a clear-colour probe finds nothing: an overlap
+     * never leaves a pixel uncovered. The IWADs are full of these: 10-21%
+     * of two-sided lines join coplanar sectors with different art. */
+#ifndef R_FLATNUDGE
+#define R_FLATNUDGE 75          /* hundredths of a world unit */
+#endif
+/* Divided, NOT multiplied by 0.01f: that constant is not representable in
+ * binary, so 75 * 0.01f is 0.749999983 and every vertex moved in its last
+ * bits -- 1890 pixels off the reference for a lever that was supposed to
+ * be neutral at its default. 75/100.0f is exactly 0.75. */
+#define FLAT_NUDGE ((float)R_FLATNUDGE / 100.0f)
     float cxp = 0.0f, cyp = 0.0f;
     for (int i = 0; i < n; i++) { cxp += poly[i].x; cyp += poly[i].y; }
     cxp /= (float)n; cyp /= (float)n;
@@ -218,7 +239,7 @@ static void store_poly(int ssnum, vec2_t *poly, int n, int *ptcursor)
     for (int i = 0; i < n; i++) {
         const float ox = poly[i].x - cxp, oy = poly[i].y - cyp;
         const float len = sqrtf(ox * ox + oy * oy);
-        const float k = len > 1e-3f ? (1.0f + 0.75f / len) : 1.0f;
+        const float k = len > 1e-3f ? (1.0f + FLAT_NUDGE / len) : 1.0f;
         poly[i].x = cxp + ox * k;
         poly[i].y = cyp + oy * k;
 

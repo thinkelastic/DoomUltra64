@@ -85,6 +85,16 @@ void r_light_halo_next(float frac);
  * the air above the prop. */
 void r_light_halo_drop_next(float dz);
 extern float r_light_halo_dz[R_LIGHT_MAX];
+
+/* Halo alpha, when the light's own intensity is the wrong measure of how
+ * brightly the thing should GLOW. The two are usually the same question --
+ * a fireball that lights a room hard should blaze -- but not always: a
+ * barrel's ooze is a small emissive detail that must be clearly visible
+ * while lighting almost nothing, and it has to stay dim as a LIGHT because
+ * barrels come in clusters of eight and the registry evicts by intensity.
+ * 0 means "derive it from intensity", which is what everything else does. */
+void r_light_halo_alpha_next(float a);
+extern float r_light_halo_a[R_LIGHT_MAX];
 extern int       r_light_num;
 
 /* Clear the frame's list. Called once per frame before the BSP walk, since the
@@ -236,6 +246,7 @@ static inline int r_light_count(void) { return r_light_num; }
 static inline void  r_light_reset(void) { }
 static inline void  r_light_eye(float x, float y) { (void)x; (void)y; }
 static inline void  r_light_halo_drop_next(float dz) { (void)dz; }
+static inline void  r_light_halo_alpha_next(float a) { (void)a; }
 static inline void  r_light_add(float x, float y, float z, float rad, float i,
                                 float r, float g, float b)
                     { (void)x; (void)y; (void)z; (void)rad; (void)i;

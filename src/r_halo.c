@@ -606,7 +606,13 @@ void r_halo_flush(const r_camera_t *cam)
              * muzzle flash a flash rather than a fog bank. Alpha rides
              * the light's own intensity, capped so a barrel's 1.3 does
              * not blow the screen out. */
-            float a = 0.30f * l->intensity;
+            /* Intensity is the usual measure of how brightly a light
+             * should glow, but not always the right one -- see
+             * r_light_halo_alpha_next. A light that carries its own alpha
+             * uses it verbatim. */
+            float a = r_light_halo_a[i] > 0.0f
+                    ? r_light_halo_a[i]
+                    : 0.30f * l->intensity;
             if (a > 0.42f) a = 0.42f;
 
             /* Half the reach, times the light's own halo fraction --

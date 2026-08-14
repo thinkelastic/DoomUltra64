@@ -18,11 +18,14 @@ void r_light_reset(void)
 float r_light_halo[R_LIGHT_MAX];
 float r_light_prio[R_LIGHT_MAX];
 float r_light_halo_dz[R_LIGHT_MAX];
+float r_light_halo_a[R_LIGHT_MAX];
 static float halo_next = 1.0f;
 static float halo_dz_next;
+static float halo_a_next;
 
 void r_light_halo_next(float frac) { halo_next = frac; }
 void r_light_halo_drop_next(float dz) { halo_dz_next = dz; }
+void r_light_halo_alpha_next(float a) { halo_a_next = a; }
 
 /* Where the eye is, for ranking slots. Set once a frame before the walk. */
 static float eye_x, eye_y;
@@ -36,8 +39,10 @@ void r_light_add(float x, float y, float z, float radius, float intensity,
      * scale latched for whoever comes next. */
     const float halo = halo_next;
     const float halo_dz = halo_dz_next;
+    const float halo_a  = halo_a_next;
     halo_next = 1.0f;
     halo_dz_next = 0.0f;
+    halo_a_next = 0.0f;
 
     if (radius <= 0.0f || intensity <= 0.0f) return;
 
@@ -79,6 +84,7 @@ void r_light_add(float x, float y, float z, float radius, float intensity,
     l->intensity = intensity;
     r_light_halo[slot] = halo;
     r_light_halo_dz[slot] = halo_dz;
+    r_light_halo_a[slot] = halo_a;
     r_light_prio[slot] = prio;
     /* Premultiplied; callers keep the max tint channel at 1.0 so intensity
      * remains the max channel (see the header's convention note). */

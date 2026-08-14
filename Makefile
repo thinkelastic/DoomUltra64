@@ -98,6 +98,25 @@ N64_CFLAGS += -DR_SHOW=$(SHOW)
 FLATDBG ?= 0
 N64_CFLAGS += -DR_FLATDBG=$(FLATDBG)
 
+# FLATNUDGE=<hundredths of a unit> is how far each subsector polygon's
+# vertices are pushed outward from their own centroid, to close the
+# T-junction hairlines that neighbouring BSP cells would otherwise leave.
+# It buys that by making neighbours OVERLAP -- which is fine at different
+# heights, where depth settles it, and is exactly the stray-coloured-line
+# seam artifact where two COPLANAR floors of different art meet. 0 removes
+# the overlap and should re-open the cracks it was hiding; negative shrinks
+# the polygons and opens them unmistakably, which is the falsification.
+FLATNUDGE ?= 75
+N64_CFLAGS += -DR_FLATNUDGE=$(FLATNUDGE)
+
+# VIFILTER=0 disables the VI's coverage-based resample filter at 320. That
+# filter is what smooths the 320-wide framebuffer up to the VI's 640-wide
+# output, and it blends on polygon edges using the coverage the RDP wrote
+# there -- which is a candidate for stray coloured pixels along a seam
+# between two primitives. Off means harder, more aliased edges.
+VIFILTER ?= 1
+N64_CFLAGS += -DD_VIFILTER=$(VIFILTER)
+
 # FLATZ=<tenths> sets the flats' z near constant, against the 4.0 walls
 # and sprites use.
 #

@@ -688,7 +688,20 @@ int main(void)
      * Disabled there so wide mode actually shows the resolution. */
     display_init(R_WIDE ? RESOLUTION_640x240 : RESOLUTION_320x240,
                  DEPTH_16_BPP, 3, GAMMA_NONE,
+#if defined(D_VIFILTER) && D_VIFILTER == 0
+                 /* The VI's resample filter reads the COVERAGE bits the RDP
+                  * writes at polygon edges and blends those pixels with
+                  * their neighbours during scanout. Two primitives sharing
+                  * an edge each write partial coverage there, so the filter
+                  * blends on the seam and emits a pixel that is neither
+                  * polygon's colour -- a line of stray colour between
+                  * triangles, produced after the framebuffer is finished
+                  * and so invisible to every check that reads it. This
+                  * turns it off: harder edges, no seam blending. */
+                 FILTERS_DISABLED);
+#else
                  R_WIDE ? FILTERS_DISABLED : FILTERS_RESAMPLE);
+#endif
 
     /* Audio before the arenas claim the heap. audio_init reserves DMA buffers
      * the AI reads directly; starting it with the heap nearly full does not

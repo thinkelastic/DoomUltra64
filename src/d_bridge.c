@@ -1702,6 +1702,20 @@ void D_LightsUpdate(void)
             /* A barrel going up is the biggest fireball in the game and
              * carries a wider glow than the things that merely fly. */
             case MT_BARREL:
+#if D_KEYLIGHT
+                /* An INTACT barrel is not an explosion: a tiny glow on the
+                 * ooze at the rim. 112 * 0.5 * 0.12 gives a 13-unit-tall
+                 * bead on a 32-unit can. Its alpha is set explicitly
+                 * because the usual 0.30*intensity would give 0.06 off a
+                 * light deliberately kept dim -- barrels cluster, and the
+                 * registry evicts by intensity, so it must stay the
+                 * weakest thing in there while still being SEEN. */
+                if (mo->health > 0) {
+                    r_light_halo_next(0.12f);
+                    r_light_halo_alpha_next(0.26f);
+                    break;
+                }
+#endif
                 r_light_halo_next(0.325f);
                 break;
             case MT_ROCKET:
