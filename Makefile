@@ -119,6 +119,15 @@ N64_CFLAGS += -DR_FLATNUDGE=$(FLATNUDGE)
 FLATWELD ?= 0
 N64_CFLAGS += -DR_FLATWELD=$(FLATWELD)
 
+# VERTEXROUND=<tenths of a quarter-pixel> biases triangle vertices before
+# they are floored to the RDP's s13.2 grid: +5 is half a step up, -5 half
+# a step down, 0 is the shipped floor. Diagnostic. If two sides of a
+# shared edge disagree by less than one step, which way the quantiser
+# leans decides who claims the boundary pixel -- so a systematic bias
+# shows as better one way and worse the other. +5 measured worse.
+VERTEXROUND ?= 0
+N64_CFLAGS += -DR_VERTEX_ROUND=$(VERTEXROUND)
+
 # VIFILTER=0 disables the VI's coverage-based resample filter at 320. That
 # filter is what smooths the 320-wide framebuffer up to the VI's 640-wide
 # output, and it blends on polygon edges using the coverage the RDP wrote
