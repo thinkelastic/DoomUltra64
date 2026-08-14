@@ -25,6 +25,7 @@
 #include "r_wall.h"
 #include "r_wipe.h"
 #include "scene.h"
+#include "d_seam.h"
 
 #if D_RSPQPROF
 /* Not reached from libdragon.h. Brings RSPQ_PROFILE in with it. */
@@ -745,6 +746,12 @@ int main(void)
      * which is otherwise invisible: bad state renders as a blank screen. */
     rdpq_debug_start();
 #endif
+#if D_SEAMPROBE
+    /* Starts the same trace engine DEBUG_RDP does -- a second start just
+     * re-clears its state before the hook lands -- and hangs the command
+     * hook on it. See d_seam.h. */
+    d_seam_init();
+#endif
 
     scene_init();
 
@@ -893,6 +900,11 @@ int main(void)
          * BSP walk in the pipelined frame; buying back an entire class of
          * motion artifacts with it is the easy trade. The sky pass still
          * draws only its clamped span. */
+#if D_SEAMPROBE && !defined(D_CLEARCOL)
+        /* The seam probe needs a clear no game art wears, and needs to
+         * know it exactly to scan for it. CLEARCOL still overrides. */
+        #define D_CLEARCOL 255, 0, 255
+#endif
 #ifdef D_CLEARCOL
         /* Gap probe: any pixel no primitive covered keeps this colour, so
          * two builds with different values differ exactly on the holes. */
@@ -1123,7 +1135,7 @@ int main(void)
         /* submit_us is stamped inside the HWSTAT bracket above, before the
          * instrumentation text -- not here, where it would time the ruler. */
 
-#if DEBUG_RDP || D_POSEHASH
+#if DEBUG_RDP || D_POSEHASH || D_SEAMPROBE
         /* Blocking in the validator build: the debug workflow reads the
          * CPU/RDP split and wants deterministic frame boundaries.
          *
@@ -1133,10 +1145,17 @@ int main(void)
          * depends on how fast that particular ROM runs. Two builds then
          * disagree on almost every frame for reasons that have nothing to do
          * with what is being tested, which is exactly the false regression
-         * this harness exists to rule out. */
+         * this harness exists to rule out.
+         *
+         * SEAMPROBE scans the buffer for clear-coloured pixels, so the
+         * frame must be finished, and its dump frames must not interleave
+         * with the next frame's commands. */
         rdpq_detach_wait();
         frame_total_us = TICKS_TO_US(TICKS_SINCE(t_start));
         display_show(fb);
+#if D_SEAMPROBE
+        d_seam_frame(fb, color_to_packed16(D_CLEAR_(D_CLEARCOL, 255)));
+#endif
 #else
         /* The pipelined tail. sync_full's callback stamps when the RDP went
          * idle -- the same span the old rdpq_detach_wait measured -- and

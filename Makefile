@@ -170,6 +170,14 @@ ifneq ($(CLEARCOL),)
 N64_CFLAGS += -DD_CLEARCOL=$(CLEARCOL)
 endif
 
+# SEAMPROBE=1 is the seam microscope (src/d_seam.c): magenta clear, a scan
+# of every finished frame for pixels nothing drew, and a one-shot dump of
+# the real RDP triangle stream -- the words the RSP assembled -- the first
+# time a stable sighting appears. Slow (validator on, blocking detach);
+# diagnosis only. Stand at the seam and hold still.
+SEAMPROBE ?= 0
+N64_CFLAGS += -DD_SEAMPROBE=$(SEAMPROBE)
+
 # TRICPU=1 computes triangle setup on the VR4300 instead of the RSP; see
 # R_TRI_CPU in src/r_wall.h. Both paths feed the same RSP overlay, so this is
 # a clean A/B for which unit the frame is actually waiting on.
@@ -629,6 +637,9 @@ src += src/d_rumble.c
 endif
 ifeq ($(HALO),1)
 src += src/r_halo.c
+endif
+ifeq ($(SEAMPROBE),1)
+src += src/d_seam.c
 endif
 
 # floorf/ceilf as instructions instead of libm calls, for the WHOLE link.
