@@ -1245,6 +1245,10 @@ void D_LightsUpdate(void)
     const float px = (float)pl->mo->x / 65536.0f;
     const float py = (float)pl->mo->y / 65536.0f;
 
+    /* Before anything registers: the registry ranks slots by what a light
+     * is worth from here, and a lit room now offers it more than eight. */
+    r_light_eye(px, py);
+
 #if D_RUMBLE
     /* The chainsaw is the one weapon you feel the whole time it is out.
      * Idle it idles: a low floor the duty-cycle dither turns into a slow
@@ -1303,6 +1307,15 @@ void D_LightsUpdate(void)
      * One breath shared by every key on the level, one sine per gametic. */
 #if D_KEYLIGHT
     const float key_lum = 0.34f + 0.06f * fm_sinf((float)leveltime * 0.10f);
+
+    /* Flame, not breath: torches and candles flicker rather than pulse.
+     * Two sines well off each other's period, so the sum never repeats
+     * on a beat the eye can catch -- the same trick the vapor uses for
+     * its churn. One evaluation a tic, shared by every flame in the
+     * level; they are all the same fire. */
+    const float torch_lum = 0.46f
+                          + 0.05f * fm_sinf((float)leveltime * 0.41f)
+                          + 0.03f * fm_sinf((float)leveltime * 0.97f);
 #endif
 
     /* The weapon's flash. ps_flash carries a state only while the frame that
@@ -1404,6 +1417,43 @@ void D_LightsUpdate(void)
              * come in dozens (E1M1 alone places twenty-five), and eight
              * of them would fill the light registry with things nobody
              * came looking for. */
+            /* Standing lights: the props Doom draws as light sources but
+             * never lights anything with. Colours from the art -- the
+             * torch families are literally blue, green and red, the
+             * lamps and candles a warm white. Deliberately below the
+             * projectiles in the registry, above nothing: a room full of
+             * torches must still yield its slots to a fireball, but a
+             * torch outranks nothing else and should hold its slot in a
+             * quiet room. Radius scales with the prop: a candle pools
+             * light at its own feet, a tall lamp fills a corner. */
+            case MT_MISC41:                          /* tall blue torch */
+                radius = 352.0f; intensity = torch_lum;
+                cr = 0.42f; cg = 0.55f; cb = 1.00f; break;
+            case MT_MISC44:                          /* short blue torch */
+                radius = 256.0f; intensity = torch_lum * 0.85f;
+                cr = 0.42f; cg = 0.55f; cb = 1.00f; break;
+            case MT_MISC42:                          /* tall green torch */
+                radius = 352.0f; intensity = torch_lum;
+                cr = 0.45f; cg = 1.00f; cb = 0.48f; break;
+            case MT_MISC45:                          /* short green torch */
+                radius = 256.0f; intensity = torch_lum * 0.85f;
+                cr = 0.45f; cg = 1.00f; cb = 0.48f; break;
+            case MT_MISC43:                          /* tall red torch */
+                radius = 352.0f; intensity = torch_lum;
+                cr = 1.00f; cg = 0.42f; cb = 0.30f; break;
+            case MT_MISC46:                          /* short red torch */
+                radius = 256.0f; intensity = torch_lum * 0.85f;
+                cr = 1.00f; cg = 0.42f; cb = 0.30f; break;
+            case MT_MISC29:                          /* techno floor lamp */
+            case MT_MISC31:                          /* floor lamp       */
+                radius = 320.0f; intensity = torch_lum * 0.95f;
+                cr = 1.00f; cg = 0.95f; cb = 0.82f; break;
+            case MT_MISC50:                          /* candelabra */
+                radius = 224.0f; intensity = torch_lum * 0.80f;
+                cr = 1.00f; cg = 0.88f; cb = 0.62f; break;
+            case MT_MISC49:                          /* candle */
+                radius = 128.0f; intensity = torch_lum * 0.55f;
+                cr = 1.00f; cg = 0.86f; cb = 0.58f; break;
             case MT_MISC0:                           /* green armour  */
                 radius = 192.0f; intensity = key_lum;
                 cr = 0.38f; cg = 1.00f; cb = 0.42f; break;

@@ -16,9 +16,15 @@ void r_light_reset(void)
 }
 
 float r_light_halo[R_LIGHT_MAX];
+float r_light_prio[R_LIGHT_MAX];
 static float halo_next = 1.0f;
 
 void r_light_halo_next(float frac) { halo_next = frac; }
+
+/* Where the eye is, for ranking slots. Set once a frame before the walk. */
+static float eye_x, eye_y;
+
+void r_light_eye(float x, float y) { eye_x = x; eye_y = y; }
 
 void r_light_add(float x, float y, float z, float radius, float intensity,
                  float r, float g, float b)
@@ -30,30 +36,49 @@ void r_light_add(float x, float y, float z, float radius, float intensity,
 
     if (radius <= 0.0f || intensity <= 0.0f) return;
 
-    if (r_light_num == R_LIGHT_MAX) {
-        /* Full: keep the brighter set rather than whichever arrived first.
-         * Peak intensity is the proxy -- the caller has already scaled it by
-         * distance to the eye, so a dim distant flash loses to a near one. */
+    /* What a slot is worth keeping FOR, which is not the same as how
+     * bright it is at its own centre: a torch across the hall and a torch
+     * at your elbow register identically, and only one of them is worth a
+     * slot. Inverse-square once the eye is outside the light's reach,
+     * flat inside it -- so anything actually lighting you ranks by its own
+     * brightness, and everything beyond falls away with distance. */
+    const float ex = x - eye_x, ey = y - eye_y;
+    const float d2 = ex * ex + ey * ey, r2 = radius * radius;
+    const float prio = d2 <= r2 ? intensity : intensity * r2 / d2;
+
+    int slot;
+    if (r_light_num < R_LIGHT_MAX) {
+        slot = r_light_num++;
+    } else {
+        /* Full: keep the set worth the most, not whichever arrived first.
+         *
+         * The count must NOT be rewound to the evicted slot to do this.
+         * It used to be, and since every query loops i < r_light_num, the
+         * first eviction in a frame silently dropped every light above
+         * the evicted index out of the render AND let the next arrival
+         * overwrite a live slot without any comparison at all. Nothing
+         * showed while the registry never filled -- lights were transient,
+         * a flash here and a fireball there. The standing lamps and
+         * torches are the first that are simply always on, so a lit room
+         * now fills all eight slots and holds them. */
         int weakest = 0;
         for (int i = 1; i < R_LIGHT_MAX; i++)
-            if (r_lights[i].intensity < r_lights[weakest].intensity) weakest = i;
-        if (r_lights[weakest].intensity >= intensity) return;
-        r_light_num = weakest;         /* overwrite it, restored below */
+            if (r_light_prio[i] < r_light_prio[weakest]) weakest = i;
+        if (r_light_prio[weakest] >= prio) return;
+        slot = weakest;
     }
 
-    r_light_t *l = &r_lights[r_light_num];
+    r_light_t *l = &r_lights[slot];
     l->x = x; l->y = y; l->z = z;
-    l->inv_r2    = 1.0f / (radius * radius);
+    l->inv_r2    = 1.0f / r2;
     l->intensity = intensity;
-    r_light_halo[r_light_num] = halo;
+    r_light_halo[slot] = halo;
+    r_light_prio[slot] = prio;
     /* Premultiplied; callers keep the max tint channel at 1.0 so intensity
      * remains the max channel (see the header's convention note). */
     l->ir = intensity * r;
     l->ig = intensity * g;
     l->ib = intensity * b;
-
-    if (r_light_num < R_LIGHT_MAX) r_light_num++;
-    else                           r_light_num = R_LIGHT_MAX;
 }
 
 #endif /* D_DYNLIGHT */

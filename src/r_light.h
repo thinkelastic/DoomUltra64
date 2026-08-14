@@ -30,10 +30,10 @@
 
 #if D_DYNLIGHT
 
-/* Enough for a firefight without the per-vertex loop growing teeth. Lights
- * past this are dropped nearest-first, which is the right thing to keep: the
- * furthest contribute least and are most likely already below a palette step.
- */
+/* Enough for a firefight without the per-vertex loop growing teeth. Once
+ * it is full, the slot worth least HERE is the one that goes -- see
+ * r_light_prio: the furthest contribute least and are most likely already
+ * below a palette step. */
 #define R_LIGHT_MAX 8
 
 typedef struct {
@@ -44,7 +44,8 @@ typedef struct {
      * tint's max channel is 1.0, so intensity == max(ir,ig,ib) -- which is
      * what keeps the scalar query and the per-channel query in agreement
      * (the scalar add equals the coloured add's largest channel) and keeps
-     * the eviction-by-intensity rule meaningful. 32 bytes: two D-lines. */
+     * ranking slots by intensity meaningful. 32 bytes: two D-lines -- which
+     * is why prio and the halo scale live in parallel arrays, not here. */
     float ir, ig, ib;
 } r_light_t;
 
@@ -59,6 +60,18 @@ extern r_light_t r_lights[R_LIGHT_MAX];
  * their reach suggests -- the light a fireball throws is wide, the
  * fireball itself is small. */
 extern float r_light_halo[R_LIGHT_MAX];
+
+/* What each slot is worth keeping, for eviction. A parallel array for the
+ * same reason as the halo scales: r_light_t is two D-cache lines exactly
+ * and the per-vertex query reads every byte of it, while this is read only
+ * when a ninth light arrives in a frame. */
+extern float r_light_prio[R_LIGHT_MAX];
+
+/* Where the eye is, so a slot can be ranked by what it is worth HERE
+ * rather than by its brightness at its own centre. Set once a frame,
+ * before the walk; a light added without it still ranks, just from
+ * wherever the eye last was. */
+void r_light_eye(float x, float y);
 
 /* Set the halo fraction for the NEXT r_light_add. Resets to 1.0 after,
  * so a caller that does not care never thinks about it. */
@@ -212,6 +225,7 @@ static inline int r_light_count(void) { return r_light_num; }
 #else
 
 static inline void  r_light_reset(void) { }
+static inline void  r_light_eye(float x, float y) { (void)x; (void)y; }
 static inline void  r_light_add(float x, float y, float z, float rad, float i,
                                 float r, float g, float b)
                     { (void)x; (void)y; (void)z; (void)rad; (void)i;
