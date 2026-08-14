@@ -503,6 +503,25 @@ static void r_wall_modes(void)
      * holds only because r_flat_flush follows r_flush_walls in the
      * frame. Changing the filter here changes theirs too. */
 
+    /* Coverage OFF, explicitly.
+     *
+     * In 16-bit colour the RDP keeps 3 bits of COVERAGE per pixel, in
+     * RDRAM's hidden 9th bit per byte plus the alpha bit -- the "9th bit"
+     * the hardware is known for. With antialias enabled the blender writes
+     * a pixel in proportion to that coverage, and where two primitives
+     * share an edge each sees only PART of the pixel: both can decline to
+     * write it, and the background shows through as a dotted run along the
+     * seam, appearing or not depending which side of the quarter-pixel
+     * grid the edge falls on. That is exactly the artifact being chased.
+     *
+     * rdpq_set_mode_standard is documented to leave antialias off, so this
+     * should be redundant -- but "should be" was carrying the whole
+     * argument, and the passes that follow install custom blender formulas
+     * (halos, vapor, reflections), which is precisely what antialias would
+     * borrow if anything ever turned it on. Asserting it costs one SOM bit
+     * and removes the assumption. */
+    rdpq_mode_antialias(AA_NONE);
+
     /* Depth test and write. Walls would not need this on their own, but they
      * share the frame with depth-buffered floors. */
     rdpq_mode_zbuf(true, true);
