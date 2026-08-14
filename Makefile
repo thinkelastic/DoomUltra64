@@ -92,6 +92,38 @@ N64_CFLAGS += -DR_TRIFAST=$(TRIFAST)
 SHOW ?= 0
 N64_CFLAGS += -DR_SHOW=$(SHOW)
 
+# FLATDBG=1 paints each depth band of each flat a flat colour, so the
+# polygons a floor or ceiling is really built from are visible on screen.
+# For attributing a geometry artifact to a primitive instead of guessing.
+FLATDBG ?= 0
+N64_CFLAGS += -DR_FLATDBG=$(FLATDBG)
+
+# FLATZ=<tenths> sets the flats' z near constant, against the 4.0 walls
+# and sprites use.
+#
+# It was 3.5, biasing flats BEHIND the walls so a wall won every shared
+# edge -- chosen to stop floor texture wedging through a wall at a grazing
+# angle. It overshot. Half a unit of depth per unit distance is a wide
+# margin, and where two walls converge on a ceiling corner the wall's win
+# stops being a hairline and becomes a notch several pixels across, with
+# the wall showing where the ceiling should be. It moves with the view
+# angle, because how far each surface's linearly-interpolated z sags from
+# the true curve depends on how the primitive is foreshortened.
+#
+# At 4.3 the flats win instead, by a smaller margin than they were losing
+# by. Confirmed on hardware: the corner notch is gone and nothing wedges
+# through a wall.
+FLATZ ?= 43
+N64_CFLAGS += -DR_FLATZ=$(FLATZ)
+
+# CLEARCOL=r,g,b paints the framebuffer clear that colour instead of black.
+# A gap probe: any pixel no primitive covered keeps it, so two builds with
+# different values differ on exactly the holes and nowhere else.
+CLEARCOL ?=
+ifneq ($(CLEARCOL),)
+N64_CFLAGS += -DD_CLEARCOL=$(CLEARCOL)
+endif
+
 # TRICPU=1 computes triangle setup on the VR4300 instead of the RSP; see
 # R_TRI_CPU in src/r_wall.h. Both paths feed the same RSP overlay, so this is
 # a clean A/B for which unit the frame is actually waiting on.

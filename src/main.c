@@ -872,7 +872,17 @@ int main(void)
          * BSP walk in the pipelined frame; buying back an entire class of
          * motion artifacts with it is the easy trade. The sky pass still
          * draws only its clamped span. */
+#ifdef D_CLEARCOL
+        /* Gap probe: any pixel no primitive covered keeps this colour, so
+         * two builds with different values differ exactly on the holes. */
+        /* Through a variadic indirection: argument splitting happens
+         * before expansion, so RGBA32(D_CLEARCOL, 255) would see two
+         * arguments, not four. */
+        #define D_CLEAR_(...) RGBA32(__VA_ARGS__)
+        rdpq_clear(D_CLEAR_(D_CLEARCOL, 255));
+#else
         rdpq_clear(RGBA32(0, 0, 0, 255));
+#endif
         rdpq_clear_z(0xFFFC);
 
 

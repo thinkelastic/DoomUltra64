@@ -394,19 +394,14 @@ static void shaft_prism(const r_camera_t *cam, const shaftjob_t *s, float k)
     }
     const float wind = area >= 0.0f ? 1.0f : -1.0f;
 
-    /* Project every corner once. */
     float depth[SHAFT_PTS_MAX], sx[SHAFT_PTS_MAX];
-    float dmin = 1e9f, dmax = -1e9f;
     for (int i = 0; i < n; i++) {
         const float dx = s->px[i] - cam->x, dy = s->py[i] - cam->y;
         depth[i] = dx * cs + dy * sn;
         sx[i]    = dx * sn - dy * cs;
-        if (depth[i] < dmin) dmin = depth[i];
-        if (depth[i] > dmax) dmax = depth[i];
     }
 
-    /* Standing IN the well there is no silhouette to trace, and nothing
-     * sensible to draw from inside a column of light. */
+    /* Standing IN the well there is no silhouette to trace. */
     {
         int inside = 1;
         for (int i = 0; i < n && inside; i++) {
@@ -418,71 +413,131 @@ static void shaft_prism(const r_camera_t *cam, const shaftjob_t *s, float k)
         if (inside) return;
     }
 
-    /* THE WIDEST VERTICAL SLICE OF THE WELL, as a real surface.
+    /* FOLLOW THE OUTLINE, one quad per edge of the near chain.
      *
-     * Every version before this drew the beam as a screen-space rectangle:
-     * four corners sharing ONE depth, so the texture was interpolated flat
-     * and the whole beam z-tested as though it stood at a single distance
-     * while it actually spans 257 units of it. That is the perspective
-     * being wrong -- not the outline, but the fact that the quad was never
-     * a surface in the world at all.
+     * This was a single quad spanning the widest chord of the hole -- the
+     * two silhouette corners, joined straight. On a rectangular opening
+     * seen at an angle those two are OPPOSITE corners, so the chord cuts
+     * clean across an outline that actually bends at the corner between
+     * them: the top edge overshoots the ceiling on one side of the bend
+     * and falls short of it on the other, and the corner comes out as a
+     * jagged cutout rather than square. The fix is not a bias, it is to
+     * stop cutting corners off -- the chain of edges IS the shape.
      *
-     * It is one now. Take the outline's two SILHOUETTE corners -- the ones
-     * projecting furthest left and right, which are the widest chord of the
-     * hole as seen from here -- and stand a quad between them from ceiling
-     * to floor. Vertical edges in the world stay vertical on screen for a
-     * camera that never pitches, so the sides are upright; the top and
-     * bottom edges slant exactly as the opening and the pool of light
-     * beneath it do, because each end carries its OWN depth. That also
-     * gives the texture a real w to divide by, so the fall from opening to
-     * floor foreshortens with distance instead of being painted evenly
-     * down a flat card. */
-    int li = -1, ri = -1;
-    float lx = 1e9f, rx = -1e9f;
+     * The chain is monotonic across the screen for a convex outline, so
+     * consecutive quads meet exactly at a shared projected vertex and
+     * tile the beam edge to edge, covering every pixel once. Two of them
+     * over one pixel would be composited twice by the lerp blender and
+     * show as a bright seam.
+     *
+     * The near chain, specifically, and that is only safe now: it reaches
+     * up to the rim closest to the eye, which is inside the roof's
+     * thickness, and the beam used to be biased in FRONT of the flats and
+     * painted straight over the ceiling there. Losing to the ceiling, the
+     * recess hides that part by itself -- which is what should have been
+     * doing the work all along. */
+    int   ne = 0;
+    float X0 = 1e9f, X1 = -1e9f;
+    float pd[SHAFT_PTS_MAX * 2], pxs[SHAFT_PTS_MAX * 2];
+
     for (int i = 0; i < n; i++) {
-        if (depth[i] < NEARP) continue;
-        const float x = cxs + sx[i] * cam->focal_x / depth[i];
-        if (x < lx) { lx = x; li = i; }
-        if (x > rx) { rx = x; ri = i; }
+        const int j = i + 1 < n ? i + 1 : 0;
+        const float ex = s->px[j] - s->px[i], ey = s->py[j] - s->py[i];
+        const float rx = cam->x - s->px[i],   ry = cam->y - s->py[i];
+        if ((ex * ry - ey * rx) * wind >= 0.0f) continue;   /* faces away */
+
+        float da = depth[i], db = depth[j], oa = sx[i], ob = sx[j];
+        if (da < NEARP && db < NEARP) continue;
+        if (da < NEARP) { const float t = (NEARP - da) / (db - da);
+                          oa += (ob - oa) * t; da = NEARP; }
+        else if (db < NEARP) { const float t = (NEARP - db) / (da - db);
+                          ob += (oa - ob) * t; db = NEARP; }
+
+        const float xa = cxs + oa * cam->focal_x / da;
+        const float xb = cxs + ob * cam->focal_x / db;
+        if (xa < X0) X0 = xa;
+        if (xa > X1) X1 = xa;
+        if (xb < X0) X0 = xb;
+        if (xb > X1) X1 = xb;
+
+        pd[ne * 2] = da;  pd[ne * 2 + 1] = db;
+        pxs[ne * 2] = xa; pxs[ne * 2 + 1] = xb;
+        ne++;
     }
-    if (li < 0 || ri < 0 || li == ri) return;
-    if (rx - lx < 1.0f) return;
-    if (rx < 0.0f || lx > (float)SCREEN_W) return;
+    if (!ne || X1 - X0 < 1.0f) return;
+    if (X1 < 0.0f || X0 > (float)SCREEN_W) return;
 
-    const float iwl = 1.0f / depth[li], iwr = 1.0f / depth[ri];
-    const float ytl = cys - (s->top - cam->z) * cam->focal_y * iwl;
-    const float ytr = cys - (s->top - cam->z) * cam->focal_y * iwr;
-    const float ybl = cys - (s->bot - cam->z) * cam->focal_y * iwl;
-    const float ybr = cys - (s->bot - cam->z) * cam->focal_y * iwr;
-    if (ytl >= ybl && ytr >= ybr) return;
-    if ((ybl < 0.0f && ybr < 0.0f) ||
-        (ytl > (float)SCREEN_H && ytr > (float)SCREEN_H)) return;
+    /* The texture spans the whole beam rather than repeating per quad, so
+     * its soft side edges appear once at the two outer ends and not at
+     * every internal seam. */
+    const float inv_span = (float)HALO_TEX / (X1 - X0);
 
-    /* Depth-proportional bias, as the billboards use -- per end now. */
-    float zl = 1.0f - (R_FLAT_NEAR + 0.6f) * iwl;
-    float zr = 1.0f - (R_FLAT_NEAR + 0.6f) * iwr;
-    if (zl < 0.0f) zl = 0.0f;
-    if (zr < 0.0f) zr = 0.0f;
+    /* BEHIND the flats. The beam's top edge lies on the ceiling plane, so
+     * along the rim it is coplanar with the ceiling; carrying the halos'
+     * "slightly nearer" bias (4.6 against the flats' 3.5) made it win
+     * those pixels and paint over the ceiling triangles. A halo wants that
+     * bias because it wraps a sprite at its own depth; a beam meets a
+     * surface it should lose to. The margin is wide -- the RDP
+     * interpolates z linearly and every primitive sags toward the camera
+     * mid-span against the convex 1/d curve, which is what FLAT_Z_NEAR
+     * exists to out-bias between walls and flats. */
+    #define SHAFT_Z_NEAR 2.6f
 
-    const float xs[4] = { lx,  rx,  rx,  lx  };
-    const float ys[4] = { ytl, ytr, ybr, ybl };
-    const float ss[4] = { 0.0f, (float)HALO_TEX, (float)HALO_TEX, 0.0f };
-    const float ts[4] = { 0.0f, 0.0f, (float)HALO_TEX, (float)HALO_TEX };
-    const float ws[4] = { iwl, iwr, iwr, iwl };
-    const float zq[4] = { zl,  zr,  zr,  zl  };
-    const float as[4] = { k,   k,   0.0f, 0.0f };
+    for (int e = 0; e < ne; e++) {
+        const float da = pd[e * 2],  db = pd[e * 2 + 1];
+        const float xa = pxs[e * 2], xb = pxs[e * 2 + 1];
+        const float iwa = 1.0f / da, iwb = 1.0f / db;
 
-    float v[4][10];
-    for (int i = 0; i < 4; i++) {
-        v[i][0] = xs[i]; v[i][1] = ys[i];
-        v[i][2] = 1.00f; v[i][3] = 0.97f; v[i][4] = 0.86f;
-        v[i][5] = as[i];
-        v[i][6] = ss[i]; v[i][7] = ts[i];
-        v[i][8] = ws[i];
-        v[i][9] = zq[i];
+        /* Start ABOVE the opening and let the ceiling cut it back.
+         *
+         * The beam's top edge and the ceiling's rim are the same world
+         * points projected by two different pieces of code -- the flat
+         * pass with its own banding and near constant, this with mine --
+         * and they disagree by a fraction of a pixel. Ending the beam
+         * exactly at the rim leaves that disagreement showing as a sliver
+         * at the corners, present or not depending on which way the
+         * rounding fell, which is to say depending on the angle. Running
+         * it up into the roof instead costs nothing: the beam loses the
+         * depth test to the ceiling, so the ceiling trims it to its own
+         * edge exactly, and whatever the two passes disagree about is
+         * hidden inside solid roof. */
+        const float top_over = s->top + 24.0f;
+        const float yta = cys - (top_over - cam->z) * cam->focal_y * iwa;
+        const float ytb = cys - (top_over - cam->z) * cam->focal_y * iwb;
+        const float yba = cys - (s->bot - cam->z) * cam->focal_y * iwa;
+        const float ybb = cys - (s->bot - cam->z) * cam->focal_y * iwb;
+        if (yta >= yba && ytb >= ybb) continue;
+        if ((yba < 0.0f && ybb < 0.0f) ||
+            (yta > (float)SCREEN_H && ytb > (float)SCREEN_H)) continue;
+
+        float za = 1.0f - SHAFT_Z_NEAR * iwa;
+        float zb = 1.0f - SHAFT_Z_NEAR * iwb;
+        if (za < 0.0f) za = 0.0f;
+        if (zb < 0.0f) zb = 0.0f;
+
+        const float sa = (xa - X0) * inv_span;
+        const float sb = (xb - X0) * inv_span;
+
+        const float xs[4] = { xa,  xb,  xb,  xa  };
+        const float ys[4] = { yta, ytb, ybb, yba };
+        const float ss[4] = { sa,  sb,  sb,  sa  };
+        const float ts[4] = { 0.0f, 0.0f, (float)HALO_TEX, (float)HALO_TEX };
+        const float ws[4] = { iwa, iwb, iwb, iwa };
+        const float zq[4] = { za,  zb,  zb,  za  };
+        const float as[4] = { k,   k,   0.0f, 0.0f };
+
+        float v[4][10];
+        for (int i = 0; i < 4; i++) {
+            v[i][0] = xs[i]; v[i][1] = ys[i];
+            v[i][2] = 1.00f; v[i][3] = 0.97f; v[i][4] = 0.86f;
+            v[i][5] = as[i];
+            v[i][6] = ss[i]; v[i][7] = ts[i];
+            v[i][8] = ws[i];
+            v[i][9] = zq[i];
+        }
+        r_tri_quad(&TRIFMT_HALO, v[0], v[1], v[2], v[3]);
+        r_tri_spr += 2;
     }
-    r_tri_quad(&TRIFMT_HALO, v[0], v[1], v[2], v[3]);
-    r_tri_spr += 2;
 }
 
 void r_shaft_flush(const r_camera_t *cam)

@@ -70,6 +70,22 @@
 /* World units per texel after the 2:1 downsample in the build tool. */
 #define FLAT_UNITS_PER_TEXEL 2.0f
 
+#ifndef R_FLATDBG
+#define R_FLATDBG 0
+#endif
+#if R_FLATDBG
+/* Diagnostic: paint every depth band of every flat a different flat colour,
+ * so the polygon structure a flat is actually built from is visible on the
+ * television. A misplaced or short primitive shows as a wrongly-shaped
+ * patch of one colour rather than as a subtle notch in a texture. Not a
+ * shipping option; there is no texture and no shading under this. */
+static int cur_banddbg;
+static const float flatdbg_col[6][3] = {
+    { 1.0f, 0.2f, 0.2f }, { 0.2f, 1.0f, 0.2f }, { 0.3f, 0.4f, 1.0f },
+    { 1.0f, 1.0f, 0.2f }, { 1.0f, 0.3f, 1.0f }, { 0.2f, 1.0f, 1.0f },
+};
+#endif
+
 /* Texture repeat period, in texels. Flats are 32x32. */
 #define FLAT_PERIOD 32.0f
 
@@ -102,7 +118,10 @@
  * outcome: a vertical surface at the same depth as a floor edge is in
  * front of it. Sprites keep the shared constant and thus beat the floor
  * they stand on. */
-#define FLAT_Z_NEAR 3.5f
+#ifndef R_FLATZ
+#define R_FLATZ 35            /* tenths: 35 = 3.5, the shipped bias */
+#endif
+#define FLAT_Z_NEAR ((float)R_FLATZ * 0.1f)
 /* Eight, not four. Bands step geometrically by FLAT_MAX_DEPTH_RATIO, so
  * the count sets how much depth the invariant actually covers: at the old
  * 4.0 ratio four bands reached 256:1 and spanned any real floor, but
@@ -644,6 +663,9 @@ static void draw_one(const r_camera_t *cam, const r_polypt_t *pts, int npts,
         const int fn = clip_depth(rest, rn, bandbuf[cur ^ 1], edge[b + 1], true);
 #endif
 
+#if R_FLATDBG
+        cur_banddbg = b;
+#endif
         if (nn >= 3) EMIT_TIMED(near, nn);
 
         rn = fn;
@@ -931,6 +953,12 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
 #else
                 x3[i][2] = x3[i][3] = x3[i][4] = shade * vis;
 #endif
+#if R_FLATDBG
+                {
+                    const float *dc = flatdbg_col[cur_banddbg % 6];
+                    x3[i][2] = dc[0]; x3[i][3] = dc[1]; x3[i][4] = dc[2];
+                }
+#endif
                 x3[i][5] = 1.0f;
                 FAN_RIPPLE_DECL(&c[i])
                 x3[i][6] = c[i].wx * tscale - sorg + rs_;
@@ -995,6 +1023,12 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
         sv[i][4] = (b > 1.0f ? 1.0f : b) * vis;
 #else
         sv[i][2] = sv[i][3] = sv[i][4] = shade * vis;
+#endif
+#if R_FLATDBG
+        {
+            const float *dc = flatdbg_col[cur_banddbg % 6];
+            sv[i][2] = dc[0]; sv[i][3] = dc[1]; sv[i][4] = dc[2];
+        }
 #endif
         sv[i][5] = 1.0f;
         FAN_RIPPLE_DECL(&c[i])
