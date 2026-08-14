@@ -134,6 +134,7 @@ typedef struct {
     int16_t frame[ANIM_MAX_FRAMES];   /* texture indices, in order */
     uint8_t numframes;
     uint8_t speed;
+    uint8_t hold;                     /* never advance: see the liquid note */
 } anim_t;
 
 static anim_t   anims[ANIM_MAX];
@@ -221,22 +222,33 @@ void p_level_anim_init(void)
 
         anim_t *a = &anims[numanims];
         a->numframes = 0;
-        /* Vanilla runs every animation at 8 tics a frame. The liquids
-         * cycle at half that rate here -- 16 tics, ~2.2 Hz -- because
-         * they no longer rely on the frame swap to look alive: the
-         * surface drifts and swells continuously underneath it, and at
-         * vanilla's rate the swap reads as a flicker fighting that
-         * motion rather than adding to it. Fire, switches and the rest
-         * keep Doom's timing, which is the whole of their animation. */
+        a->hold = 0;
+        /* Vanilla runs every animation at 8 tics a frame, and for a liquid
+         * that frame swap IS the motion -- three or four hand-painted
+         * cells cycled forever. It is not motion here any more: the
+         * surface drifts and swells continuously underneath it (see
+         * r_flat.c), and the swap on top of that reads as a flicker
+         * fighting the flow rather than adding to it. Halving its rate
+         * only halved the argument, so the liquids now hold a single
+         * cell and let the drift do all of it. Fire, switches, the
+         * teleport pad and the rest keep Doom's timing, which is the
+         * whole of their animation.
+         *
+         * Held rather than pinned to frame 0: anim_xlat starts as the
+         * identity, so a sector keeps whatever cell the mapper laid down
+         * instead of every pool in the game snapping to the same one. */
         {
             static const char *const liquid[] = {
                 "NUKAGE", "LAVA", "SLIME", "BLOOD", "FWATER", "SWATER"
             };
-            int base = animdefs[i].speed ? animdefs[i].speed : 8;
+            a->speed = animdefs[i].speed ? animdefs[i].speed : 8;
+#if R_LIQUIDFLOW
             for (unsigned q = 0; q < sizeof liquid / sizeof liquid[0]; q++)
                 if (!strncmp(animdefs[i].startname, liquid[q],
-                             strlen(liquid[q]))) { base *= 2; break; }
-            a->speed = base;
+                             strlen(liquid[q]))) { a->hold = 1; break; }
+#else
+            (void)liquid;
+#endif
         }
         for (int f = s; f <= e; f++) {
             const int idx = p_level_resolve(order_name(flats, f), pfx);
@@ -255,6 +267,7 @@ void p_level_anim_tick(void)
     tics++;
     for (int i = 0; i < numanims; i++) {
         const anim_t *a = &anims[i];
+        if (a->hold) continue;              /* liquids: the drift is the motion */
         const int step = (tics / a->speed) % a->numframes;
         for (int f = 0; f < a->numframes; f++)
             anim_xlat[a->frame[f]] = a->frame[(f + step) % a->numframes];
@@ -1047,6 +1060,18 @@ dt64_tex_t *p_level_thing_sprite(int type)
 {
     const char *base = sprite_for_type((int16_t)type);
     return base ? resolve_sprite(base) : NULL;
+}
+
+/* How far above its feet a thing's art reaches, in map units -- topoffset
+ * is exactly that, and map units are sprite pixels. The standing lights
+ * use it to sit their light at the flame instead of at the middle of a
+ * collision box: those boxes are 16 units tall whatever the prop, so a
+ * tall torch's flame is six times higher than the box says. 0 when the
+ * type has no sprite in the ROM. */
+int p_level_thing_top(int type)
+{
+    const dt64_tex_t *t = p_level_thing_sprite(type);
+    return t ? (int)t->topoffset : 0;
 }
 
 /* As p_level_resolve, but yields the texture itself and NULL when the name is

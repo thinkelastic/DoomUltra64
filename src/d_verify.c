@@ -94,6 +94,10 @@ void D_LevelPostSetup(void)
 #if R_HALO
     { void D_BuildSkyWells(void); D_BuildSkyWells(); }
 #endif
+#if D_KEYLIGHT
+    /* After the things are spawned: this reads the sector thing lists. */
+    { void D_BuildLampSectors(void); D_BuildLampSectors(); }
+#endif
     R_BuildSubsectorData();
     r_pvs_load(gameepisode, gamemap);
     D_SetSky(gameepisode);

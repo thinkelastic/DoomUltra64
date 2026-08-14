@@ -58,6 +58,26 @@ int D_TextureIsMirror(int picnum);
 #include "r_vapor.h"
 #include "r_wall.h"
 
+#if D_KEYLIGHT
+/* Sector light as the renderer should use it: clamped, and taken down 30%
+ * where a standing light does the lighting instead. See D_BuildLampSectors
+ * -- a torch's room was lit twice, once by the level that stood in for the
+ * flame and once by the flame. */
+int D_SectorHasLamp(int secnum);
+static inline int sec_light(const sector_t *sc)
+{
+    int l = sc->lightlevel < 0 ? 0 : sc->lightlevel > 255 ? 255 : sc->lightlevel;
+    if (D_SectorHasLamp((int)(sc - sectors))) l = (l * 179) >> 8;   /* x0.70 */
+    return l;
+}
+#else
+static inline int sec_light(const sector_t *sc)
+{
+    return sc->lightlevel < 0 ? 0 : sc->lightlevel > 255 ? 255 : sc->lightlevel;
+}
+#endif
+
+
 /* Doom fixed-point to float. Map units are the same units the camera uses, so
  * no scaling beyond the fractional shift. */
 static inline float fx(fixed_t v) { return (float)v * (1.0f / (float)FRACUNIT); }
@@ -760,12 +780,10 @@ static void render_flats_inner(const subsector_t *ss)
           D_SectorIsSkyWell((int)(sec - sectors)))
         r_shaft_add(pts, rg->numpts, fx(sec->floorheight),
                     fx(sec->ceilingheight),
-                    sec->lightlevel < 0 ? 0 :
-                    sec->lightlevel > 255 ? 255 : sec->lightlevel); }
+                    sec_light(sec)); }
 #endif
 
-    const int light = sec->lightlevel < 0 ? 0 :
-                      sec->lightlevel > 255 ? 255 : sec->lightlevel;
+    const int light = sec_light(sec);
 
     const float fh = fx(sec->floorheight);
     const float ch = fx(sec->ceilingheight);
@@ -859,9 +877,7 @@ R_HOT static void render_subsector(int num)
     if (ss->sector->validcount != r_thing_vc) {
         ss->sector->validcount = r_thing_vc;
 
-        const int   lit_ll = ss->sector->lightlevel < 0 ? 0 :
-                             ss->sector->lightlevel > 255 ? 255 :
-                             ss->sector->lightlevel;
+        const int   lit_ll = sec_light(ss->sector);
         const float lit = (float)lit_ll * (1.0f / 255.0f);
 
         /* Camera position in Doom's fixed point, for the rotation formula. */
@@ -1053,9 +1069,7 @@ R_HOT static void render_subsector(int num)
          * every frame for a bit that sticks after the first. */
         if (!(ld->flags & ML_MAPPED)) ld->flags |= ML_MAPPED;
 
-        const uint8_t light = (uint8_t)(front->lightlevel < 0   ? 0 :
-                                        front->lightlevel > 255 ? 255 :
-                                        front->lightlevel);
+        const uint8_t light = (uint8_t)sec_light(front);
 
         /* Build the wall directly in cur_wall -- it is already the by-value
          * global the clippers read, and the struct copy that used to sit

@@ -26,6 +26,16 @@
 #ifndef R_LIQUIDFLOW
 #define R_LIQUIDFLOW 0
 #endif
+
+/* The swell rides ON the drift: same clock, same update, and its state
+ * lives inside the drift's own guard. So it exists only where the drift
+ * does -- LIQUIDRIPPLE=1 with LIQUIDFLOW=0 used to reference a ripple
+ * that had not been compiled and broke the build. */
+#if R_LIQUIDRIPPLE && R_LIQUIDFLOW && D_DYNLIGHT
+#define R_RIPPLE_ON 1
+#else
+#define R_RIPPLE_ON 0
+#endif
 #include "r_fastmath.h"
 #include "r_light.h"
 #include "r_tri.h"
@@ -294,7 +304,7 @@ static void draw_one(const r_camera_t *cam, const r_polypt_t *pts, int npts,
  * reveals the period by sliding along one axis. */
 static float flow_u, flow_v;
 
-#if R_LIQUIDRIPPLE
+#if R_RIPPLE_ON
 /* A swell across the surface, on top of the drift.
  *
  * Each vertex's texture coordinate is displaced by a sine of its WORLD
@@ -333,7 +343,7 @@ static void flow_update(void)
     const float u = t * 0.055f, v = t * 0.034f;
     flow_u = u - rf_floorf(u * cur_inv_period) * cur_period;
     flow_v = v - rf_floorf(v * cur_inv_period) * cur_period;
-#if R_LIQUIDRIPPLE
+#if R_RIPPLE_ON
     ripple_t = t * 0.095f;      /* halved from play: a swell, not a chop */
 #endif
 }
@@ -382,7 +392,7 @@ void r_flat_flush(const r_camera_t *cam)
             cur_tint[2] = jobs[i].tint[2] * (1.0f / 255.0f);
             cur_lit     = jobs[i].lit;
             cur_neutral = !cur_lit && jobs[i].glow == 0;
-#if R_LIQUIDRIPPLE
+#if R_RIPPLE_ON
             cur_ripple  = jobs[i].glow > 0;
 #endif
 #endif
@@ -780,7 +790,7 @@ static int clip_depth(const fvtx_t *in, int n, fvtx_t *out, float d0, bool keep_
  * FILE SCOPE on purpose: the reference path lives in the #else of
  * R_TRI_DIRECT, and defining this inside the direct branch left the host
  * harness -- the only build that compiles that path -- without it. */
-#if R_LIQUIDRIPPLE
+#if R_RIPPLE_ON
 #define FAN_RIPPLE_DECL(p)                                                  \
         float rs_ = 0.0f, rt_ = 0.0f;                                       \
         if (cur_ripple) ripple_at((p)->wx, (p)->wy, &rs_, &rt_);

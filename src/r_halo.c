@@ -379,10 +379,32 @@ static void shaft_prism(const r_camera_t *cam, const shaftjob_t *s, float k)
         if (inside) return;
     }
 
+    const float NEARP = 12.0f;
+
+    /* Where the beam BEGINS.
+     *
+     * The prism's true silhouette runs up to the NEAR rim of the opening,
+     * which for a plane above the eye projects HIGHEST -- and that hung a
+     * bright slab up inside the recess above the doorway, in a place no
+     * light comes out of. What a beam actually does is emerge at the
+     * hole's lower rim and fall from there, so the whole beam starts at
+     * the lowest point the rim projects to, which is the FAR rim: greater
+     * depth, lower on screen.
+     *
+     * Kept as a clamp on the near chain rather than by drawing the far
+     * chain instead. The far chain would put the top edge in the right
+     * place and get the WIDTH wrong -- it sits further away, so it
+     * projects narrower than the opening the beam is supposed to fill. */
+    float y_start = -1e9f;
+    for (int i = 0; i < n; i++) {
+        if (depth[i] < NEARP) continue;
+        const float y = cys - (s->top - cam->z) * cam->focal_y / depth[i];
+        if (y > y_start) y_start = y;
+    }
+
     /* The near chain, and the screen span it covers, in one pass. Edges
      * are gathered before drawing because the texture must be mapped
      * across the total span. */
-    const float NEARP = 12.0f;
     int   ne = 0;
     float X0 = 1e9f, X1 = -1e9f;
     float pd[SHAFT_PTS_MAX * 2], px_[SHAFT_PTS_MAX * 2];
@@ -392,8 +414,8 @@ static void shaft_prism(const r_camera_t *cam, const shaftjob_t *s, float k)
         const float ex = s->px[j] - s->px[i], ey = s->py[j] - s->py[i];
         const float rx = cam->x - s->px[i],   ry = cam->y - s->py[i];
         /* The eye is on the OUTSIDE of an edge that faces it. Taking the
-         * inside half instead picks the far chain, whose top edge projects
-         * lower -- the beam would come out visibly short. */
+         * inside half picks the far chain, which projects narrower than
+         * the opening -- the beam would not fill the hole. */
         if ((ex * ry - ey * rx) * wind >= 0.0f) continue;
 
         float da = depth[i], db = depth[j], oa = sx[i], ob = sx[j];
@@ -424,10 +446,16 @@ static void shaft_prism(const r_camera_t *cam, const shaftjob_t *s, float k)
         const float xa = px_[e * 2], xb = px_[e * 2 + 1];
         const float iwa = 1.0f / da, iwb = 1.0f / db;
 
-        const float yta = cys - (s->top - cam->z) * cam->focal_y * iwa;
+        float yta = cys - (s->top - cam->z) * cam->focal_y * iwa;
+        float ytb = cys - (s->top - cam->z) * cam->focal_y * iwb;
         const float yba = cys - (s->bot - cam->z) * cam->focal_y * iwa;
-        const float ytb = cys - (s->top - cam->z) * cam->focal_y * iwb;
         const float ybb = cys - (s->bot - cam->z) * cam->focal_y * iwb;
+        /* Start at the hole's lower rim, not up inside the recess. */
+        if (y_start > -1e8f) {
+            if (yta < y_start) yta = y_start;
+            if (ytb < y_start) ytb = y_start;
+        }
+        if (yta >= yba && ytb >= ybb) continue;     /* nothing left to fall */
         if ((yba < 0.0f && ybb < 0.0f) ||
             (yta > (float)SCREEN_H && ytb > (float)SCREEN_H)) continue;
 
@@ -476,12 +504,21 @@ void r_shaft_flush(const r_camera_t *cam)
         const shaftjob_t *s = &shafts[i];
         /* Daylight through a hole: warm white, scaled by how bright the
          * sector under it actually is. The texture carries the fall from
-         * the opening to the floor; the vertex alpha sets its scale. */
-        shaft_prism(cam, s, 0.42f * s->lum);
+         * the opening to the floor; the vertex alpha sets its scale. Half
+         * what it was -- at full strength the beam read as a solid pale
+         * slab rather than as light in the air. */
+        shaft_prism(cam, s, 0.21f * s->lum);
     }
     num_shafts = 0;
 }
 
+/* Halos are glows around DYNAMIC LIGHTS, so with the registry compiled out
+ * there is nothing to draw one around -- and the loop below reads the light
+ * array directly, which does not exist then. Shafts are unaffected: they
+ * come from sky wells, not from lights, and still draw. */
+#if !D_DYNLIGHT
+void r_halo_flush(const r_camera_t *cam) { (void)cam; }
+#else
 void r_halo_flush(const r_camera_t *cam)
 {
     const int nlights = r_light_count();
@@ -532,5 +569,6 @@ void r_halo_flush(const r_camera_t *cam)
     }
 
 }
+#endif /* D_DYNLIGHT */
 
 #endif /* R_HALO */

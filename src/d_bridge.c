@@ -20,6 +20,7 @@
 int   p_level_resolve(const char *name, const char *prefix);
 void *p_level_resolve_ptr(const char *name, const char *prefix);
 void *p_level_thing_sprite(int type);
+int   p_level_thing_top(int type);   /* feet-to-top of a thing's art */
 
 #include "doom/doomtype.h"
 #include "doom/doomkeys.h"
@@ -313,6 +314,50 @@ void D_BuildSkyWells(void)
         /* Sky on both sides: neither is a hole in anything. */
         sky_well[ld->frontsector - sectors] = 0;
         sky_well[ld->backsector  - sectors] = 0;
+    }
+}
+#endif
+
+#if D_KEYLIGHT
+/* Rooms lit by a standing light are dimmed, so the lamp does the lighting.
+ *
+ * A torch in vanilla is decoration standing in a room the mapper already
+ * lit to taste. Give it a real light and the room is lit twice: once by
+ * the sector level that was standing in for the flame, and again by the
+ * flame. Everything near a lamp washed out. Taking 30% off the sector
+ * level where a lamp stands hands that job to the light itself -- the
+ * pool around the flame comes back brighter than the ambient it replaced,
+ * and the corners the flame does not reach fall away, which is the whole
+ * point of putting a torch there.
+ *
+ * Marked once at load from the thing list, so the frame reads a byte. */
+static uint8_t *lamp_sector;
+
+int D_SectorHasLamp(int secnum)
+{
+    return lamp_sector && secnum >= 0 && secnum < numsectors
+        && lamp_sector[secnum];
+}
+
+void D_BuildLampSectors(void)
+{
+    lamp_sector = Z_Malloc(numsectors, PU_LEVEL, NULL);
+    if (!lamp_sector) return;
+    memset(lamp_sector, 0, numsectors);
+
+    for (int i = 0; i < numsectors; i++) {
+        for (const mobj_t *mo = sectors[i].thinglist; mo; mo = mo->snext) {
+            switch (mo->type) {
+                case MT_MISC41: case MT_MISC42: case MT_MISC43:
+                case MT_MISC44: case MT_MISC45: case MT_MISC46:
+                case MT_MISC29: case MT_MISC31:
+                case MT_MISC49: case MT_MISC50:
+                    lamp_sector[i] = 1;
+                    break;
+                default: break;
+            }
+            if (lamp_sector[i]) break;
+        }
     }
 }
 #endif
@@ -1361,6 +1406,9 @@ void D_LightsUpdate(void)
          * saturated enough to read on grey stone but shy of pure primaries,
          * which posterize against the 16-bit framebuffer. */
         float radius, intensity, cr, cg, cb;
+        /* Set by anything whose light comes from the top of its art
+         * rather than from the middle of its collision box. */
+        int flame_top = 0;
 #if D_RUMBLE
         float boom = 0.0f;   /* set by the explosion cases; fed after the cull */
 #endif
@@ -1381,11 +1429,27 @@ void D_LightsUpdate(void)
                 }
                 break;
             case MT_BARREL:
-                /* A standing barrel is furniture. A dying one is the game's
-                 * biggest practical fireball: flash hard, then decay with
-                 * the explosion animation's own frames -- monotonic with
-                 * the art, no state-table spelunking. */
+                /* A standing barrel glows at the rim: the art is a can of
+                 * something green and lit, and the ooze on top is the one
+                 * part of it that gives light. Small and dim on purpose --
+                 * barrels come in clusters of six and eight, and this must
+                 * never be what fills the registry when one of them goes
+                 * up. A dying one is the game's biggest practical fireball:
+                 * flash hard, then decay with the explosion animation's own
+                 * frames -- monotonic with the art, no state-table
+                 * spelunking. */
+#if D_KEYLIGHT
+                /* Under KEYLIGHT with the other standing lights: it is
+                 * scenery that glows, not an event. */
+                if (mo->health > 0) {
+                    radius = 112.0f; intensity = 0.20f;
+                    cr = 0.42f; cg = 1.00f; cb = 0.38f;
+                    flame_top = 1;
+                    break;
+                }
+#else
                 if (mo->health > 0) continue;
+#endif
                 {
                     const int fr = (int)(mo->frame & FF_FRAMEMASK);
                     intensity = 1.30f - 0.25f * (float)fr;
@@ -1428,31 +1492,40 @@ void D_LightsUpdate(void)
              * light at its own feet, a tall lamp fills a corner. */
             case MT_MISC41:                          /* tall blue torch */
                 radius = 352.0f; intensity = torch_lum;
+                flame_top = 1;
                 cr = 0.42f; cg = 0.55f; cb = 1.00f; break;
             case MT_MISC44:                          /* short blue torch */
                 radius = 256.0f; intensity = torch_lum * 0.85f;
+                flame_top = 1;
                 cr = 0.42f; cg = 0.55f; cb = 1.00f; break;
             case MT_MISC42:                          /* tall green torch */
                 radius = 352.0f; intensity = torch_lum;
+                flame_top = 1;
                 cr = 0.45f; cg = 1.00f; cb = 0.48f; break;
             case MT_MISC45:                          /* short green torch */
                 radius = 256.0f; intensity = torch_lum * 0.85f;
+                flame_top = 1;
                 cr = 0.45f; cg = 1.00f; cb = 0.48f; break;
             case MT_MISC43:                          /* tall red torch */
                 radius = 352.0f; intensity = torch_lum;
+                flame_top = 1;
                 cr = 1.00f; cg = 0.42f; cb = 0.30f; break;
             case MT_MISC46:                          /* short red torch */
                 radius = 256.0f; intensity = torch_lum * 0.85f;
+                flame_top = 1;
                 cr = 1.00f; cg = 0.42f; cb = 0.30f; break;
             case MT_MISC29:                          /* techno floor lamp */
             case MT_MISC31:                          /* floor lamp       */
                 radius = 320.0f; intensity = torch_lum * 0.95f;
+                flame_top = 1;
                 cr = 1.00f; cg = 0.95f; cb = 0.82f; break;
             case MT_MISC50:                          /* candelabra */
                 radius = 224.0f; intensity = torch_lum * 0.80f;
+                flame_top = 1;
                 cr = 1.00f; cg = 0.88f; cb = 0.62f; break;
             case MT_MISC49:                          /* candle */
                 radius = 128.0f; intensity = torch_lum * 0.55f;
+                flame_top = 1;
                 cr = 1.00f; cg = 0.86f; cb = 0.58f; break;
             case MT_MISC0:                           /* green armour  */
                 radius = 192.0f; intensity = key_lum;
@@ -1543,8 +1616,23 @@ void D_LightsUpdate(void)
 
         /* Height of the projectile's middle, so a fireball lights the floor
          * under it and the ceiling above rather than the plane it sits on. */
-        const float mz = (float)mo->z / 65536.0f
-                       + (float)mo->height / 65536.0f * 0.5f;
+        float mz = (float)mo->z / 65536.0f
+                 + (float)mo->height / 65536.0f * 0.5f;
+
+        /* Anything that burns burns at the TOP of the prop, not at the
+         * middle of its collision box. Those boxes are 16 units tall
+         * whatever the thing is, so a candelabra lit from its middle put
+         * the pool of light under the stand and a tall torch's flame sat
+         * at knee height. The art knows better: topoffset is the distance
+         * from a thing's feet to the top of its sprite, and the flame is
+         * the top of these sprites -- 15 units up a candle, 92 up a tall
+         * torch. Just short of the very top, where the flame's body is
+         * rather than its last wisp. The barrel's ooze is the same idea
+         * upside down: it glows at the rim, which is the top of the can. */
+        if (flame_top) {
+            const int topo = p_level_thing_top(mo->type);
+            if (topo > 0) mz = (float)mo->z / 65536.0f + (float)topo * 0.85f;
+        }
         r_light_add(mx, my, mz, radius, intensity, cr, cg, cb);
     }
 
