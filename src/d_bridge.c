@@ -1713,6 +1713,20 @@ void D_LightsUpdate(void)
             default: continue;
         }
 
+        const float mx = (float)mo->x / 65536.0f;
+        const float my = (float)mo->y / 65536.0f;
+        const float dx = mx - px, dy = my - py;
+        /* Culled BEFORE the halo scale is armed, and that order is the
+         * whole point. r_light_halo_next arms a value that only
+         * r_light_add takes and clears, so a light rejected between the
+         * two leaves its scale armed for whoever is added next -- and it
+         * outlives the frame, since r_light_reset does not touch it.
+         * Standing lights made that permanent rather than occasional:
+         * a torch beyond the cull is culled every frame of the level, and
+         * the key card at your feet inherited its 0.13 and glowed at a
+         * seventh of its size. */
+        if (dx * dx + dy * dy > CULL * CULL) continue;
+
         /* The glow IN THE AIR is a QUARTER of the reach for anything
          * that flies or detonates: the light a fireball throws is wide,
          * the fireball itself is small, and anything larger reads as a
@@ -1737,26 +1751,39 @@ void D_LightsUpdate(void)
              * units BELOW the wick as well as above, swallowing the whole
              * prop and the floor around it. Centred on the flame it still
              * read as a haze over the furniture rather than as the flame
-             * burning. These fractions put every one of them at roughly
-             * 20-25 units, which is the size of the fire in the art. */
+             * burning. These fractions size the glow to the part of the
+             * art that is ACTUALLY ON FIRE -- 20-25 units, which for a
+             * torch is most of the flame. */
             case MT_MISC41: case MT_MISC42: case MT_MISC43:  /* tall torch  */
                 r_light_halo_next(0.13f); break;
             case MT_MISC44: case MT_MISC45: case MT_MISC46:  /* short torch */
                 r_light_halo_next(0.18f); break;
-            case MT_MISC29: case MT_MISC31:                  /* lamps       */
-                r_light_halo_next(0.15f); break;
             case MT_MISC50:                                  /* candelabra  */
                 r_light_halo_next(0.20f); break;
             case MT_MISC49:                                  /* candle      */
                 r_light_halo_next(0.28f); break;
+            /* A LAMP IS NOT A FLAME, and one fraction for both was the
+             * whole of the trouble. A torch burns from z+50 to z+92, 42
+             * units of its art, so a 46-unit glow sits inside the fire.
+             * A lamp's light is a BAND: the floor lamp's bulb is four
+             * rows of a 48-unit sprite (z+37..z+40), the techno lamp's
+             * panel twelve of an 80 (z+61..z+72), and everything else is
+             * dark housing. At the torches' scale the glow came out as
+             * tall as the whole floor lamp and stood 19 units over its
+             * head -- centred on the bulb to within a unit, but reading
+             * as a haze floating above the prop rather than as the bulb
+             * lit, because the drop is an eighth of the art's height and
+             * shrinks with the prop while the glow's size never did.
+             *
+             * Sized to the band instead, each clears its own housing by
+             * about five units and the glow stays on what emits it. */
+            case MT_MISC31:                                  /* floor lamp  */
+                r_light_halo_next(0.06f); break;
+            case MT_MISC29:                                  /* techno lamp */
+                r_light_halo_next(0.09f); break;
 #endif
             default: break;
         }
-
-        const float mx = (float)mo->x / 65536.0f;
-        const float my = (float)mo->y / 65536.0f;
-        const float dx = mx - px, dy = my - py;
-        if (dx * dx + dy * dy > CULL * CULL) continue;
 
 #if D_RUMBLE
         /* Concussion falls off linearly to nothing at 600 units. Fed per
