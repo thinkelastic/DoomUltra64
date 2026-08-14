@@ -1592,6 +1592,26 @@ void D_LightsUpdate(void)
             case MT_PLASMA: case MT_BFG:
                 r_light_halo_next(0.25f);
                 break;
+#if D_KEYLIGHT
+            /* A flame is a few inches across; its REACH is thirty feet.
+             * At the default full fraction the glow came out half the
+             * reach tall -- 176 units for a tall torch, so it hung 176
+             * units BELOW the wick as well as above, swallowing the whole
+             * prop and the floor around it. Centred on the flame it still
+             * read as a haze over the furniture rather than as the flame
+             * burning. These fractions put every one of them at roughly
+             * 20-25 units, which is the size of the fire in the art. */
+            case MT_MISC41: case MT_MISC42: case MT_MISC43:  /* tall torch  */
+                r_light_halo_next(0.13f); break;
+            case MT_MISC44: case MT_MISC45: case MT_MISC46:  /* short torch */
+                r_light_halo_next(0.18f); break;
+            case MT_MISC29: case MT_MISC31:                  /* lamps       */
+                r_light_halo_next(0.15f); break;
+            case MT_MISC50:                                  /* candelabra  */
+                r_light_halo_next(0.20f); break;
+            case MT_MISC49:                                  /* candle      */
+                r_light_halo_next(0.28f); break;
+#endif
             default: break;
         }
 

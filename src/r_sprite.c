@@ -127,10 +127,24 @@ static void wobble_update(void)
     wobble_t = ((float)leveltime + d_subtic) * 0.095f;
 }
 
-/* Sideways shift, in the caller's own screen units. */
+/* How far below the waterline the ripple reaches full throw. */
+#define WOBBLE_ANCHOR 22.0f
+
+/* Sideways shift, in the caller's own screen units.
+ *
+ * ANCHORED AT THE WATERLINE. The shift used to be a plain sine of depth,
+ * which is non-zero at depth zero -- so the very row where the reflection
+ * meets the thing it reflects slid from side to side, and the image came
+ * unstuck from its own object at the pool's edge. A reflection is welded
+ * to its source at the surface and free below it: the throw now ramps
+ * from nothing at the contact line to full a short way under, which keeps
+ * the join fixed while the body of the image still rides the swell. */
 static inline float wobble_at(float depth_below, float half_width_px)
 {
-    return WOBBLE_AMP * half_width_px *
+    float grip = depth_below * (1.0f / WOBBLE_ANCHOR);
+    if (grip < 0.0f) grip = 0.0f;
+    if (grip > 1.0f) grip = 1.0f;
+    return WOBBLE_AMP * half_width_px * grip *
            sinf(depth_below * WOBBLE_K + wobble_t);
 }
 #endif
