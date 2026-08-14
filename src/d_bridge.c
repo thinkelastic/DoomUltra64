@@ -358,6 +358,28 @@ void D_BuildLampSectors(void)
             if (lamp_sector[i]) break;
         }
     }
+
+    /* Reach one sector further, and the reason is the whole point of the
+     * dim. Light does not stop at a linedef -- a lamp with a 320-unit
+     * reach pours straight through the doorway beside it -- but the dim
+     * did, so the neighbours took all of the flame's light and none of the
+     * step back that pays for it. The room came out BRIGHTER than vanilla
+     * everywhere, which is the opposite of standing a lamp in the dark.
+     *
+     * From a snapshot, so this spreads exactly one sector and does not
+     * cascade across the level. */
+    uint8_t *seed = Z_Malloc(numsectors, PU_LEVEL, NULL);
+    if (!seed) return;
+    memcpy(seed, lamp_sector, numsectors);
+
+    for (int i = 0; i < numlines; i++) {
+        const line_t *ld = &lines[i];
+        if (!ld->frontsector || !ld->backsector) continue;
+        const int f = (int)(ld->frontsector - sectors);
+        const int b = (int)(ld->backsector  - sectors);
+        if (seed[f]) lamp_sector[b] = 1;
+        if (seed[b]) lamp_sector[f] = 1;
+    }
 }
 #endif
 
@@ -1357,7 +1379,12 @@ void D_LightsUpdate(void)
      * on a beat the eye can catch -- the same trick the vapor uses for
      * its churn. One evaluation a tic, shared by every flame in the
      * level; they are all the same fire. */
-    const float torch_lum = 0.46f
+    /* Bright enough to BE the room's light, now that the sector level has
+     * stepped back to make room for it (see sec_light in r_bsp.c). Held
+     * under the projectiles' floor of 0.75 on purpose: the registry ranks
+     * slots by intensity, and a corridor of torches must never be able to
+     * evict the fireball crossing it. */
+    const float torch_lum = 0.66f
                           + 0.05f * fm_sinf((float)leveltime * 0.41f)
                           + 0.03f * fm_sinf((float)leveltime * 0.97f);
 #endif
