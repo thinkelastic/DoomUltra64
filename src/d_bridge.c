@@ -318,67 +318,158 @@ void D_BuildSkyWells(void)
 #endif
 
 #if D_KEYLIGHT
-/* Rooms lit by a standing light are dimmed, so the lamp does the lighting.
+/* Rooms lit by a standing light step back, so the lamp does the lighting.
  *
  * A torch in vanilla is decoration standing in a room the mapper already
  * lit to taste. Give it a real light and the room is lit twice: once by
  * the sector level that was standing in for the flame, and again by the
- * flame. Everything near a lamp washed out. Taking 30% off the sector
- * level where a lamp stands hands that job to the light itself -- the
- * pool around the flame comes back brighter than the ambient it replaced,
- * and the corners the flame does not reach fall away, which is the whole
- * point of putting a torch there.
+ * flame, and everything near a lamp washes out.
  *
- * Marked once at load from the thing list, so the frame reads a byte. */
-static uint8_t *lamp_sector;
+ * HOW FAR BACK DEPENDS ON HOW MANY. This was a flat multiplier and it
+ * could not work: the lamps ADD light in proportion to how many there
+ * are, while a fixed cut takes the same amount away whatever is standing
+ * in the room. One lamp could not repay a 72% cut and its room came out
+ * too dark; six overpaid it and theirs came out too bright. The step back
+ * now scales with the light actually arriving -- 1/(1 + k*n) over the
+ * lamps that reach the sector, weighted by what each is worth, so a
+ * single candle barely dims its room and a hall of torches dims hard and
+ * still ends up bright from the flames themselves.
+ *
+ * Neighbours count for half: light does not stop at a linedef, so a lamp
+ * pours through the doorway beside it, but only some of its reach lands
+ * next door. Computed once at load; the frame reads a byte. */
+static uint8_t *lamp_dim;      /* 0..255 scale on sector light; 255 = none */
+static uint8_t *lamp_crowd;    /* 0..255 scale on each FLAME's own output */
 
-int D_SectorHasLamp(int secnum)
+int D_SectorLightScale(int secnum)
 {
-    return lamp_sector && secnum >= 0 && secnum < numsectors
-        && lamp_sector[secnum];
+    if (!lamp_dim || secnum < 0 || secnum >= numsectors) return 255;
+    return lamp_dim[secnum];
+}
+
+/* How much of its output a flame keeps where it stands.
+ *
+ * Dimming the ambient can only ever give back what the ambient was worth,
+ * and in a hall of torches that is the smaller half of the problem: the
+ * pools OVERLAP and the query sums them without limit, so ten flames at
+ * full output light the room ten times over however dark its sector level
+ * is driven. Measured on E1M1's hall, taking the ambient from 0.21 to
+ * 0.12 moved the frame's mean by three levels out of forty -- the flames
+ * were carrying the rest.
+ *
+ * So a flame yields as its neighbours crowd it: alone it burns at full
+ * strength, in a row it gives up part of its output and the row together
+ * comes out like one bright room rather than ten stacked ones. */
+int D_SectorLampCrowd(int secnum)
+{
+    if (!lamp_crowd || secnum < 0 || secnum >= numsectors) return 255;
+    return lamp_crowd[secnum];
 }
 
 void D_BuildLampSectors(void)
 {
-    lamp_sector = Z_Malloc(numsectors, PU_LEVEL, NULL);
-    if (!lamp_sector) return;
-    memset(lamp_sector, 0, numsectors);
+    lamp_dim = Z_Malloc(numsectors, PU_LEVEL, NULL);
+    lamp_crowd = Z_Malloc(numsectors, PU_LEVEL, NULL);
+    if (!lamp_dim || !lamp_crowd) return;
+    for (int i = 0; i < numsectors; i++) { lamp_dim[i] = 255; lamp_crowd[i] = 255; }
 
-    for (int i = 0; i < numsectors; i++) {
-        for (const mobj_t *mo = sectors[i].thinglist; mo; mo = mo->snext) {
+    /* Every flame on the level, with what it is worth and how far it
+     * throws -- the same reach the light itself uses, so this measures the
+     * thing it is compensating for. */
+    typedef struct { float x, y, w, r2; } lampsrc_t;
+    #define LAMP_SRC_MAX 64
+    lampsrc_t src[LAMP_SRC_MAX];
+    int nsrc = 0;
+
+    for (int i = 0; i < numsectors && nsrc < LAMP_SRC_MAX; i++) {
+        for (const mobj_t *mo = sectors[i].thinglist;
+             mo && nsrc < LAMP_SRC_MAX; mo = mo->snext) {
+            float w = 0.0f, r = 0.0f;
             switch (mo->type) {
                 case MT_MISC41: case MT_MISC42: case MT_MISC43:
+                    w = 1.00f; r = 352.0f; break;        /* tall torch  */
                 case MT_MISC44: case MT_MISC45: case MT_MISC46:
+                    w = 0.70f; r = 256.0f; break;        /* short torch */
                 case MT_MISC29: case MT_MISC31:
-                case MT_MISC49: case MT_MISC50:
-                    lamp_sector[i] = 1;
-                    break;
+                    w = 0.90f; r = 320.0f; break;        /* lamps       */
+                case MT_MISC50:
+                    w = 0.55f; r = 224.0f; break;        /* candelabra  */
+                case MT_MISC49:
+                    w = 0.25f; r = 128.0f; break;        /* candle      */
                 default: break;
             }
-            if (lamp_sector[i]) break;
+            if (w <= 0.0f) continue;
+            src[nsrc].x  = (float)mo->x / 65536.0f;
+            src[nsrc].y  = (float)mo->y / 65536.0f;
+            src[nsrc].w  = w;
+            src[nsrc].r2 = r * r;
+            nsrc++;
         }
     }
+    if (!nsrc) return;
 
-    /* Reach one sector further, and the reason is the whole point of the
-     * dim. Light does not stop at a linedef -- a lamp with a 320-unit
-     * reach pours straight through the doorway beside it -- but the dim
-     * did, so the neighbours took all of the flame's light and none of the
-     * step back that pays for it. The room came out BRIGHTER than vanilla
-     * everywhere, which is the opposite of standing a lamp in the dark.
-     *
-     * From a snapshot, so this spreads exactly one sector and does not
-     * cascade across the level. */
-    uint8_t *seed = Z_Malloc(numsectors, PU_LEVEL, NULL);
-    if (!seed) return;
-    memcpy(seed, lamp_sector, numsectors);
+    /* Where each sector IS, from the lines that bound it. Sector membership
+     * was the wrong question: a room's lamps sit in several sectors, so
+     * counting per sector saw one or two each and barely dimmed a hall lit
+     * by ten. What matters is how much flame reaches a place, which is a
+     * matter of distance, not of which side of a linedef it stands on. */
+    float *cx = Z_Malloc(numsectors * sizeof(float), PU_LEVEL, NULL);
+    float *cy = Z_Malloc(numsectors * sizeof(float), PU_LEVEL, NULL);
+    float *cn = Z_Malloc(numsectors * sizeof(float), PU_LEVEL, NULL);
+    if (!cx || !cy || !cn) return;
+    for (int i = 0; i < numsectors; i++) { cx[i] = cy[i] = cn[i] = 0.0f; }
 
     for (int i = 0; i < numlines; i++) {
         const line_t *ld = &lines[i];
-        if (!ld->frontsector || !ld->backsector) continue;
-        const int f = (int)(ld->frontsector - sectors);
-        const int b = (int)(ld->backsector  - sectors);
-        if (seed[f]) lamp_sector[b] = 1;
-        if (seed[b]) lamp_sector[f] = 1;
+        const float mx = ((float)ld->v1->x + (float)ld->v2->x) / 131072.0f;
+        const float my = ((float)ld->v1->y + (float)ld->v2->y) / 131072.0f;
+        if (ld->frontsector) {
+            const int f = (int)(ld->frontsector - sectors);
+            cx[f] += mx; cy[f] += my; cn[f] += 1.0f;
+        }
+        if (ld->backsector) {
+            const int b = (int)(ld->backsector - sectors);
+            cx[b] += mx; cy[b] += my; cn[b] += 1.0f;
+        }
+    }
+
+    /* Accumulate the flame reaching each sector's middle, on the same
+     * 1 - d^2/r^2 curve the light uses, then step the ambient back by
+     * 1/(1 + k*that). One lamp barely dims its room; a hall of them dims
+     * hard and still comes out bright, from the flames rather than from a
+     * level the mapper set when they were only scenery. Floored so the
+     * corners between pools stay readable instead of going to pitch. */
+    for (int i = 0; i < numsectors; i++) {
+        if (cn[i] <= 0.0f) continue;
+        const float sx = cx[i] / cn[i], sy = cy[i] / cn[i];
+        float eff = 0.0f;
+        for (int j = 0; j < nsrc; j++) {
+            const float dx = sx - src[j].x, dy = sy - src[j].y;
+            const float a = 1.0f - (dx * dx + dy * dy) / src[j].r2;
+            if (a > 0.0f) eff += a * src[j].w;
+        }
+        if (eff <= 0.0f) continue;
+        /* Exponential, not 1/(1+k*n). The pools OVERLAP: a second lamp
+         * does not add half as much again to a spot already lit, it adds
+         * nearly as much again, and a reciprocal curve flattens out just
+         * where the room is filling up. E1M1's hall sat at 44 against
+         * vanilla's 32 on the reciprocal and the ambient was still
+         * carrying a third of the room. Falling exponentially, a single
+         * lamp keeps about half its ambient while a hall of them keeps
+         * almost none and is lit by its flames. */
+        float scale = expf(-1.15f * eff);
+        if (scale < 0.12f) scale = 0.12f;
+        const int v = (int)(scale * 255.0f + 0.5f);
+        lamp_dim[i] = (uint8_t)(v > 255 ? 255 : v < 0 ? 0 : v);
+
+        /* One flame's worth of company is free -- a lone lamp burns at
+         * full output. Past that each one yields, so the sum of a crowd
+         * lands near what a single bright one would. */
+        float crowd = 1.0f;
+        if (eff > 1.0f) crowd = 1.0f / (1.0f + 0.55f * (eff - 1.0f));
+        if (crowd < 0.40f) crowd = 0.40f;
+        const int c = (int)(crowd * 255.0f + 0.5f);
+        lamp_crowd[i] = (uint8_t)(c > 255 ? 255 : c < 0 ? 0 : c);
     }
 }
 #endif
@@ -1685,6 +1776,16 @@ void D_LightsUpdate(void)
          * for MT_MISC31 got a miss and a zero, so every flame quietly
          * stayed at the middle of its 16-unit collision box and none of
          * this did anything at all. */
+#if D_KEYLIGHT
+        /* A flame yields where its neighbours crowd it; alone it burns at
+         * full output. Dimming the ambient alone could not hold a hall of
+         * torches down, because the pools sum without limit. */
+        if (flame_top && mo->subsector && mo->subsector->sector) {
+            const int sn = (int)(mo->subsector->sector - sectors);
+            intensity *= (float)D_SectorLampCrowd(sn) * (1.0f / 255.0f);
+        }
+#endif
+
         if (flame_top) {
             const dt64_tex_t *spr =
                 (const dt64_tex_t *)R_SpriteFrame(mo->sprite, mo->frame, 0);

@@ -62,18 +62,17 @@ int D_TextureIsMirror(int picnum);
 /* Sector light as the renderer should use it: clamped, and HALVED where a
  * standing light does the lighting instead. See D_BuildLampSectors -- a
  * torch's room was lit twice, once by the level that stood in for the
- * flame and once by the flame. Taken down in stages from play -- 30%, a
- * half, 60% -- each of which left the ambient still doing too much of the
- * work, so the flame read as a tint over a room that was already lit. At
- * a bit over 70% off it is the flame that lights the room: its pool is
- * plainly the brightest thing there and the corners it does not reach go
- * properly dark, which is the whole point of standing a torch in a room.
- * The flame's own output was raised to meet it -- see torch_lum. */
-int D_SectorHasLamp(int secnum);
+ * flame and once by the flame.
+ *
+ * How far back is per sector and depends on how much flame is in it --
+ * see D_BuildLampSectors. A flat cut could not work in both directions at
+ * once: a single lamp could not repay it and its room came out too dark,
+ * while a hall of six overpaid it and came out too bright. */
+int D_SectorLightScale(int secnum);
 static inline int sec_light(const sector_t *sc)
 {
     int l = sc->lightlevel < 0 ? 0 : sc->lightlevel > 255 ? 255 : sc->lightlevel;
-    if (D_SectorHasLamp((int)(sc - sectors))) l = (l * 72) >> 8;    /* x0.28 */
+    l = (l * D_SectorLightScale((int)(sc - sectors))) >> 8;
     return l;
 }
 #else
