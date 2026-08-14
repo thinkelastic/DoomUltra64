@@ -59,6 +59,22 @@ pixel-identical to its plain output:
   flash on death; rocket impacts flare wider and hotter than their flight
   glow; lost souls carry their fire with them, brightening for the charge
   and popping like a small barrel when they die.
+- **Standing lights.** The props Doom draws as light sources and lights
+  nothing with: torches in all three colours, the techno and floor lamps,
+  candelabra and candles. Colours come from the art, the radius scales
+  with the prop, and they flicker on two sines well off each other's
+  period so the sum never settles into a beat. Key cards, skulls and
+  armour glow their own colour too (`KEYLIGHT=0`), which makes a pickup
+  findable across a dark room. Eight slots, ranked by what each is worth
+  from the eye, so a room full of torches still yields to a fireball.
+- **Halos and light shafts** (`HALO=0`). Fireballs, explosions and flames
+  carry a glow in the air around them, not only on the surfaces they
+  reach. Sky openings small enough to be a hole in a roof rather than open
+  daylight throw a visible beam, and the beam is the shape of the opening:
+  its outline extruded to the floor, so a long skylight reads as long and
+  a corner view bends around the corner. The near silhouette tiles edge to
+  edge, which is what keeps a lerp blender from compositing any pixel
+  twice and banding the beam.
 - **Smoke trails** (`SMOKETRAIL=0`). Rockets and the monsters' fireballs
   leave the revenant tracer's own smoke puffs behind them — fogged, lit by
   the projectile's glow, interpolated like every other thing, and invisible
@@ -82,6 +98,11 @@ pixel-identical to its plain output:
 - **Liquid vapor** (`VAPOR=0`). A translucent noise layer drifts and churns
   over every glowing pool — green haze hugging nukage and slime, a darker
   smoke pall over lava.
+- **Moving liquids** (`LIQUIDFLOW=0`, `LIQUIDRIPPLE=0`, `REFLWOBBLE=0`).
+  Vanilla animates a pool by swapping between a few flats on a timer, which
+  reads as a flicker rather than as motion. The surface also drifts its
+  texture continuously and swells on a travelling wave, and the
+  reflections in it wobble on the same clock, so surface and image agree.
 - **Light-scaled diminishing** (`FOGSCALE=0`), and sprites that fog with the
   world. Darkness closes in faster in dark sectors, as vanilla's light
   ramp intended, and things sit in that falloff instead of floating
