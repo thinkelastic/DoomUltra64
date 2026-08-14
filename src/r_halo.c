@@ -107,17 +107,45 @@ void r_halo_init(void)
 /* Sector light below which a well is not lit enough to throw a beam. */
 #define SHAFT_MIN_LIGHT 96
 
+/* How much of the opening's outline the beam keeps. A sky well is a
+ * subsector polygon and those are convex but not always tidy; eight is
+ * more corners than any real skylight has and bounds the per-shaft work.
+ * A well with more is kept as its bounding rectangle, which is what a
+ * merged multi-subsector well degrades to anyway. */
+#define SHAFT_PTS_MAX 8
+
 typedef struct {
     float cx, cy;        /* centre of the opening, in plan */
-    float half_w;        /* half its smaller span: the beam's radius */
+    float half_w;        /* half its smaller span: the merge radius */
     float top, bot;      /* ceiling and floor of the well */
     float lum;           /* sector light, 0..1 */
+    /* The opening's outline in plan, which is what the beam is extruded
+     * from. Wound as the source polygon was; the draw works out which way
+     * that is from the signed area. */
+    float px[SHAFT_PTS_MAX], py[SHAFT_PTS_MAX];
+    int   npts;
 } shaftjob_t;
 
 static shaftjob_t shafts[SHAFT_MAX];
 static int        num_shafts;
 
 void r_halo_begin(void) { num_shafts = 0; }
+
+/* Replace an outline with its own bounding rectangle, wound the same way
+ * whatever came in. Used when a well is too many-cornered to carry and
+ * when two subsectors merge into one well -- in both cases the true
+ * outline is either unavailable or is a union this pass will not compute,
+ * and a box is the honest approximation: still the opening's shape and
+ * still a single non-overlapping silhouette. */
+static void shaft_boxify(shaftjob_t *s, float x0, float y0,
+                         float x1, float y1)
+{
+    s->px[0] = x0; s->py[0] = y0;
+    s->px[1] = x1; s->py[1] = y0;
+    s->px[2] = x1; s->py[2] = y1;
+    s->px[3] = x0; s->py[3] = y1;
+    s->npts = 4;
+}
 
 void r_shaft_add(const r_polypt_t *pts, int npts,
                  float floor_h, float ceil_h, int lightlevel)
@@ -139,16 +167,38 @@ void r_shaft_add(const r_polypt_t *pts, int npts,
     if (span > SHAFT_MAX_SPAN) return;             /* open sky, not a well */
 
     /* One shaft per well, not per subsector: a well split across several
-     * subsectors would otherwise stack beams and wash out. Merge into an
-     * existing shaft whose centre is within its own radius. */
+     * subsectors would otherwise stack beams -- and stacking is exactly
+     * what must not happen, because the blender composites each one over
+     * the last and the overlap reads as a brighter core the opening does
+     * not have. Merge into an existing shaft whose centre is within its
+     * own radius, growing it to the box that covers both. */
     const float cx = (x0 + x1) * 0.5f, cy = (y0 + y1) * 0.5f;
     const float half = (sx < sy ? sx : sy) * 0.5f;
     for (int i = 0; i < num_shafts; i++) {
-        const float ddx = shafts[i].cx - cx, ddy = shafts[i].cy - cy;
-        const float reach = shafts[i].half_w + half;
+        shaftjob_t *m = &shafts[i];
+        const float ddx = m->cx - cx, ddy = m->cy - cy;
+        const float reach = m->half_w + half;
         if (ddx * ddx + ddy * ddy < reach * reach) {
-            if (ceil_h  > shafts[i].top) shafts[i].top = ceil_h;
-            if (floor_h < shafts[i].bot) shafts[i].bot = floor_h;
+            if (ceil_h  > m->top) m->top = ceil_h;
+            if (floor_h < m->bot) m->bot = floor_h;
+            float bx0 = m->px[0], bx1 = m->px[0];
+            float by0 = m->py[0], by1 = m->py[0];
+            for (int k = 1; k < m->npts; k++) {
+                if (m->px[k] < bx0) bx0 = m->px[k];
+                if (m->px[k] > bx1) bx1 = m->px[k];
+                if (m->py[k] < by0) by0 = m->py[k];
+                if (m->py[k] > by1) by1 = m->py[k];
+            }
+            if (x0 < bx0) bx0 = x0;
+            if (x1 > bx1) bx1 = x1;
+            if (y0 < by0) by0 = y0;
+            if (y1 > by1) by1 = y1;
+            shaft_boxify(m, bx0, by0, bx1, by1);
+            m->cx = (bx0 + bx1) * 0.5f;
+            m->cy = (by0 + by1) * 0.5f;
+            const float mw = bx1 - bx0, mh = by1 - by0;
+            m->half_w = (mw < mh ? mw : mh) * 0.5f;
+            if (m->half_w < 24.0f) m->half_w = 24.0f;
             return;
         }
     }
@@ -159,6 +209,13 @@ void r_shaft_add(const r_polypt_t *pts, int npts,
     s->top = ceil_h;
     s->bot = floor_h;
     s->lum = (float)lightlevel * (1.0f / 255.0f);
+    if (npts <= SHAFT_PTS_MAX) {
+        for (int i = 0; i < npts; i++) { s->px[i] = pts[i].x;
+                                         s->py[i] = pts[i].y; }
+        s->npts = npts;
+    } else {
+        shaft_boxify(s, x0, y0, x1, y1);
+    }
 }
 
 /* --- drawing ------------------------------------------------------------- */
@@ -261,6 +318,151 @@ static void halo_mode(void)
  * the test everywhere sky showed and hung over it. Drawn first, the sky
  * covers exactly the part that is behind it and the beam survives only
  * where it belongs -- falling through the room below the opening. */
+/* One beam, as the SHAPE OF ITS OPENING rather than a fixed-width slab.
+ *
+ * The beam is the opening's plan outline extruded from ceiling to floor:
+ * a vertical prism. For a camera that never pitches, that prism's screen
+ * silhouette is easy to say exactly. Take the edges of the outline that
+ * face the camera -- the near chain. Each one is a vertical wall of the
+ * prism, and its projection is a quad whose top and bottom edges come
+ * from projecting the ceiling and the floor at each END's own depth. The
+ * chain of those quads IS the silhouette: its top edge rises and falls
+ * with the opening's perspective instead of sitting flat, which is what
+ * makes a long skylight read as long rather than as a post.
+ *
+ * Why the near chain and nothing else, and why that is the whole answer
+ * to overlap: the outline is convex, so its near chain projects
+ * monotonically across the screen and consecutive quads meet exactly at
+ * a shared projected vertex -- they tile the silhouette, edge to edge,
+ * covering every pixel once. Any pixel covered twice would be composited
+ * twice by the lerp blender and show as a bright seam, which is the one
+ * artifact a beam of light cannot have. Drawing the far chain as well, or
+ * slabs on a fixed screen grid, would both do exactly that.
+ *
+ * The texture spans the whole silhouette rather than repeating per quad,
+ * for the same reason: its soft side edges must appear once, at the two
+ * outer ends, not at every internal seam.
+ */
+static void shaft_prism(const r_camera_t *cam, const shaftjob_t *s, float k)
+{
+    const float cs = r_view_cs, sn = r_view_sn;
+    const float cxs = SCREEN_W * 0.5f, cys = SCREEN_H * 0.5f;
+    const int n = s->npts;
+
+    /* Winding, so "faces the camera" has a sign. */
+    float area = 0.0f;
+    for (int i = 0; i < n; i++) {
+        const int j = i + 1 < n ? i + 1 : 0;
+        area += s->px[i] * s->py[j] - s->px[j] * s->py[i];
+    }
+    const float wind = area >= 0.0f ? 1.0f : -1.0f;
+
+    /* Project every corner once. */
+    float depth[SHAFT_PTS_MAX], sx[SHAFT_PTS_MAX];
+    for (int i = 0; i < n; i++) {
+        const float dx = s->px[i] - cam->x, dy = s->py[i] - cam->y;
+        depth[i] = dx * cs + dy * sn;
+        sx[i]    = dx * sn - dy * cs;          /* lateral, not yet screen */
+    }
+
+    /* Standing IN the well, every edge faces you and the chain wraps the
+     * screen -- there is no silhouette to trace. Nothing sensible to draw
+     * from inside a column of light, so leave it to the flat's own glow. */
+    {
+        int inside = 1;
+        for (int i = 0; i < n && inside; i++) {
+            const int j = i + 1 < n ? i + 1 : 0;
+            const float ex = s->px[j] - s->px[i], ey = s->py[j] - s->py[i];
+            const float rx = cam->x - s->px[i],   ry = cam->y - s->py[i];
+            if ((ex * ry - ey * rx) * wind < 0.0f) inside = 0;
+        }
+        if (inside) return;
+    }
+
+    /* The near chain, and the screen span it covers, in one pass. Edges
+     * are gathered before drawing because the texture must be mapped
+     * across the total span. */
+    const float NEARP = 12.0f;
+    int   ne = 0;
+    float X0 = 1e9f, X1 = -1e9f;
+    float pd[SHAFT_PTS_MAX * 2], px_[SHAFT_PTS_MAX * 2];
+
+    for (int i = 0; i < n; i++) {
+        const int j = i + 1 < n ? i + 1 : 0;
+        const float ex = s->px[j] - s->px[i], ey = s->py[j] - s->py[i];
+        const float rx = cam->x - s->px[i],   ry = cam->y - s->py[i];
+        /* The eye is on the OUTSIDE of an edge that faces it. Taking the
+         * inside half instead picks the far chain, whose top edge projects
+         * lower -- the beam would come out visibly short. */
+        if ((ex * ry - ey * rx) * wind >= 0.0f) continue;
+
+        float da = depth[i], db = depth[j], oa = sx[i], ob = sx[j];
+        if (da < NEARP && db < NEARP) continue;
+        if (da < NEARP) { const float t = (NEARP - da) / (db - da);
+                          oa += (ob - oa) * t; da = NEARP; }
+        else if (db < NEARP) { const float t = (NEARP - db) / (da - db);
+                          ob += (oa - ob) * t; db = NEARP; }
+
+        const float xa = cxs + oa * cam->focal_x / da;
+        const float xb = cxs + ob * cam->focal_x / db;
+        if (xa < X0) X0 = xa;
+        if (xa > X1) X1 = xa;
+        if (xb < X0) X0 = xb;
+        if (xb > X1) X1 = xb;
+
+        pd[ne * 2] = da; pd[ne * 2 + 1] = db;
+        px_[ne * 2] = xa; px_[ne * 2 + 1] = xb;
+        ne++;
+    }
+    if (!ne || X1 - X0 < 1.0f) return;
+    if (X1 < 0.0f || X0 > (float)SCREEN_W) return;
+
+    const float inv_span = (float)HALO_TEX / (X1 - X0);
+
+    for (int e = 0; e < ne; e++) {
+        const float da = pd[e * 2],  db = pd[e * 2 + 1];
+        const float xa = px_[e * 2], xb = px_[e * 2 + 1];
+        const float iwa = 1.0f / da, iwb = 1.0f / db;
+
+        const float yta = cys - (s->top - cam->z) * cam->focal_y * iwa;
+        const float yba = cys - (s->bot - cam->z) * cam->focal_y * iwa;
+        const float ytb = cys - (s->top - cam->z) * cam->focal_y * iwb;
+        const float ybb = cys - (s->bot - cam->z) * cam->focal_y * iwb;
+        if ((yba < 0.0f && ybb < 0.0f) ||
+            (yta > (float)SCREEN_H && ytb > (float)SCREEN_H)) continue;
+
+        /* Depth-proportional bias, as the billboards use: nearer than the
+         * surface the beam lands on, so the floor does not z-fight it. */
+        float za = 1.0f - (R_FLAT_NEAR + 0.6f) * iwa;
+        float zb = 1.0f - (R_FLAT_NEAR + 0.6f) * iwb;
+        if (za < 0.0f) za = 0.0f;
+        if (zb < 0.0f) zb = 0.0f;
+
+        const float sa = (xa - X0) * inv_span;
+        const float sb = (xb - X0) * inv_span;
+
+        const float xs[4] = { xa,  xb,  xb,  xa  };
+        const float ys[4] = { yta, ytb, ybb, yba };
+        const float ss[4] = { sa,  sb,  sb,  sa  };
+        const float ts[4] = { 0.0f, 0.0f, (float)HALO_TEX, (float)HALO_TEX };
+        const float ws[4] = { iwa, iwb, iwb, iwa };
+        const float zs[4] = { za,  zb,  zb,  za  };
+        const float as[4] = { k,   k,   0.0f, 0.0f };
+
+        float v[4][10];
+        for (int i = 0; i < 4; i++) {
+            v[i][0] = xs[i]; v[i][1] = ys[i];
+            v[i][2] = 1.00f; v[i][3] = 0.97f; v[i][4] = 0.86f;
+            v[i][5] = as[i];
+            v[i][6] = ss[i]; v[i][7] = ts[i];
+            v[i][8] = ws[i];
+            v[i][9] = zs[i];
+        }
+        r_tri_quad(&TRIFMT_HALO, v[0], v[1], v[2], v[3]);
+        r_tri_spr += 2;
+    }
+}
+
 void r_shaft_flush(const r_camera_t *cam)
 {
     if (!num_shafts) return;
@@ -275,9 +477,7 @@ void r_shaft_flush(const r_camera_t *cam)
         /* Daylight through a hole: warm white, scaled by how bright the
          * sector under it actually is. The texture carries the fall from
          * the opening to the floor; the vertex alpha sets its scale. */
-        const float k = 0.42f * s->lum;
-        billboard(cam, s->cx, s->cy, s->half_w, s->top, s->bot,
-                  1.00f, 0.97f, 0.86f, k, 0.0f);
+        shaft_prism(cam, s, 0.42f * s->lum);
     }
     num_shafts = 0;
 }
