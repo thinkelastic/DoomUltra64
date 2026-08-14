@@ -48,6 +48,28 @@ static int stat_rects;           /* fixed-function texture rectangles */
 static int stat_tris;
 static int stat_pixels;
 static int stat_oob;      /* samples outside the resident tile */
+
+/* --- floor texture-continuity probe --------------------------------------
+ *
+ * A flat's texture coordinate is an affine function of world position:
+ * s = wx*tscale - sorg. So for every pixel of one floor, whatever the
+ * banding did, (s - wx*tscale) must come out the SAME number -- it is just
+ * the origin. Invert the projection per pixel to recover wx, and any pixel
+ * where that difference jumps is sampling the wrong texel, which on
+ * hardware is a stray coloured pixel on a seam.
+ *
+ * This catches what neither oob nor a coverage count can: geometry that is
+ * present, in bounds, and textured wrongly. */
+static int   fcont_on;
+static float fcont_cx, fcont_cy, fcont_cz, fcont_ang, fcont_fx, fcont_fy;
+static float fcont_h, fcont_tscale;
+static float fcont_smin, fcont_smax, fcont_tmin, fcont_tmax;
+static int   fcont_n;
+/* Per-pixel record, so the outliers can be counted and located rather
+ * than collapsed into a range: a handful of wrong pixels and a wholly
+ * broken mapping produce the same spread. */
+static float fcont_ds[FB_H][FB_W];
+static uint8_t fcont_has[FB_H][FB_W];
 static int stat_overflow; /* vertices beyond the RDP coordinate range */
 static int stat_deep;     /* quads spanning too wide a depth range */
 
@@ -268,6 +290,28 @@ void rdpq_triangle(const rdpq_trifmt_t *fmt,
 
             uint8_t texel[3];
             sample_tmem(s, t, texel);
+
+            if (fcont_on) {
+                /* Well below the horizon only: as depth runs away the
+                 * inversion loses all its precision and says nothing. */
+                const float dy_s = py - (FB_H * 0.5f);
+                if (dy_s > 12.0f) {
+                    const float depth = (fcont_cz - fcont_h) * fcont_fy / dy_s;
+                    const float offs  = (px - FB_W * 0.5f) * depth / fcont_fx;
+                    const float cs_ = cosf(fcont_ang), sn_ = sinf(fcont_ang);
+                    const float wx = fcont_cx + depth * cs_ + offs * sn_;
+                    const float wy = fcont_cy + depth * sn_ - offs * cs_;
+                    const float ds = s - wx * fcont_tscale;
+                    const float dt = t - wy * fcont_tscale;
+                    fcont_ds[y][x] = ds;
+                    fcont_has[y][x] = 1;
+                    if (!fcont_n || ds < fcont_smin) fcont_smin = ds;
+                    if (!fcont_n || ds > fcont_smax) fcont_smax = ds;
+                    if (!fcont_n || dt < fcont_tmin) fcont_tmin = dt;
+                    if (!fcont_n || dt > fcont_tmax) fcont_tmax = dt;
+                    fcont_n++;
+                }
+            }
 
             /* Combiner: RGB = TEX0 * SHADE, with no blender pass. Shade
              * already carries sector light times distance falloff, so this is
@@ -531,6 +575,117 @@ int main(int argc, char **argv)
 
         printf("\nflats: 4 cells, 1 texture -> uploads=%d tris=%d oob=%d\n",
                stat_uploads, stat_tris, stat_oob);
+
+        /* A floor that actually BANDS.
+         *
+         * The four cells above span 128 units and sit at one depth ratio,
+         * so draw_one takes its single-band path and the whole depth-band
+         * machinery -- the split planes, the per-band re-projection, the
+         * seams where two bands abut -- is never exercised at all. Every
+         * artifact that lives on a band seam is therefore invisible to
+         * this harness, which is how a reported seam on hardware could sit
+         * here for a session with the tests passing.
+         *
+         * This strip runs from just in front of the eye to far away, so
+         * the ratio forces the maximum number of bands, and asks the one
+         * question the mock can answer that the console cannot: does any
+         * sampled texel fall outside the rectangle actually resident in
+         * TMEM. On hardware that reads as stray coloured pixels; here it
+         * is a counter. */
+        for (size_t vi = 0; vi < sizeof views / sizeof views[0]; vi++) {
+            const r_polypt_t strip[4] = {
+                { -256.0f,   48.0f }, {  256.0f,   48.0f },
+                {  256.0f, 3072.0f }, { -256.0f, 3072.0f },
+            };
+            stat_uploads = stat_tris = stat_oob = stat_overflow = stat_deep = 0;
+            memset(framebuffer, 0, sizeof framebuffer);
+            fcont_cx = views[vi].cam.x; fcont_cy = views[vi].cam.y;
+            fcont_cz = views[vi].cam.z; fcont_ang = views[vi].cam.angle;
+            fcont_fx = views[vi].cam.focal_x; fcont_fy = views[vi].cam.focal_y;
+            fcont_h = 0.0f; fcont_tscale = 0.5f;
+            fcont_smin = fcont_smax = fcont_tmin = fcont_tmax = 0.0f;
+            fcont_n = 0; fcont_on = 1;
+            memset(fcont_has, 0, sizeof fcont_has);
+            /* draw_one caches transformed vertices against (polygon
+             * pointer, r_flat_stamp), and only the BSP walk advances that
+             * stamp -- r_flat_begin does not. Reusing one polygon for
+             * several cameras without bumping it hands back the FIRST
+             * camera's transform, which is a harness trap, not a renderer
+             * bug: it read as 96% of pixels mistextured and grew with the
+             * rotation between the two views. */
+            { extern uint32_t r_flat_stamp; r_flat_stamp++; }
+            r_set_view(&views[vi].cam);
+            r_flat_begin();
+            { static const float white[3] = {1.0f,1.0f,1.0f};
+              r_flat_add(strip, 4, 0.0f, 255, &flat, 0.0f, white, 0, 0); }
+            r_flat_flush(&views[vi].cam);
+            fcont_on = 0;
+            const int bands = r_flat_bands();
+            const float sspan = fcont_n ? fcont_smax - fcont_smin : 0.0f;
+            const float tspan = fcont_n ? fcont_tmax - fcont_tmin : 0.0f;
+            /* Robust centre by histogram mode, then count and locate what
+             * disagrees with it. */
+            int nout = 0; float med = 0.0f;
+            {
+                static float vals[FB_H * FB_W];
+                int nv = 0;
+                for (int yy = 0; yy < FB_H; yy++)
+                    for (int xx = 0; xx < FB_W; xx++)
+                        if (fcont_has[yy][xx]) vals[nv++] = fcont_ds[yy][xx];
+                if (nv) {
+                    for (int a = 1; a < nv; a++) {   /* insertion sort, host only */
+                        const float v = vals[a]; int b = a - 1;
+                        while (b >= 0 && vals[b] > v) { vals[b+1] = vals[b]; b--; }
+                        vals[b+1] = v;
+                    }
+                    med = vals[nv / 2];
+                }
+                int shown = 0;
+                for (int yy = 0; yy < FB_H; yy++)
+                    for (int xx = 0; xx < FB_W; xx++)
+                        if (fcont_has[yy][xx] &&
+                            fabsf(fcont_ds[yy][xx] - med) > 1.0f) {
+                            nout++;
+                            if (shown < 6) {
+                                printf("        outlier at (%3d,%3d) off by %.2f texels\n",
+                                       xx, yy, fcont_ds[yy][xx] - med);
+                                shown++;
+                            }
+                        }
+            }
+            printf("  deep strip %-6s -> bands=%d tris=%3d oob=%d overflow=%d "
+                   "deep=%d | texel spread s=%.3f t=%.3f over %d px\n",
+                   views[vi].name, bands, stat_tris, stat_oob, stat_overflow,
+                   stat_deep, sspan, tspan, fcont_n);
+            /* The one artifact a float rasteriser cannot show: the RDP's
+             * fixed-point perspective divide warps a primitive spanning a
+             * wide depth range, which on hardware is wrong texels in a
+             * line. Banding exists to bound the ratio; if a band still
+             * exceeds it, that is the artifact's precondition met. */
+            if (stat_deep) {
+                printf("      <-- FAIL: %d band(s) exceed the 2:1 depth ratio "
+                       "the RDP's divide needs\n", stat_deep);
+                failures++;
+            }
+            printf("      outliers: %d of %d px (%.3f%%)\n",
+                   nout, fcont_n, fcont_n ? 100.0 * nout / fcont_n : 0.0);
+            /* One texel of drift is the most a correct affine map can show
+             * from the inversion's own rounding. */
+            if (sspan > 1.0f || tspan > 1.0f) {
+                printf("      <-- FAIL: texture coordinates are discontinuous "
+                       "across the floor (s %.3f, t %.3f)\n", sspan, tspan);
+                failures++;
+            }
+            if (bands < 2) {
+                printf("      <-- FAIL: strip did not band; test proves nothing\n");
+                failures++;
+            }
+            if (stat_oob) {
+                printf("      <-- FAIL: %d samples outside the resident tile\n",
+                       stat_oob);
+                failures++;
+            }
+        }
         if (stat_uploads != 1) {
             printf("      <-- FAIL: expected exactly 1 flat upload\n");
             failures++;

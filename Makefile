@@ -116,6 +116,14 @@ N64_CFLAGS += -DR_FLATDBG=$(FLATDBG)
 FLATZ ?= 43
 N64_CFLAGS += -DR_FLATZ=$(FLATZ)
 
+# SPRZ=<tenths> sets the sprites' z near constant. It must exceed FLATZ or
+# the floor clips the feet off anything standing on it, and every tenth
+# above 40 is also a tenth ahead of the WALLS, where it buys a sprite
+# showing through one it stands close behind. Default is FLATZ+2: enough to
+# clear the floor's sag, as little as possible over the walls.
+SPRZ ?= $(shell expr $(FLATZ) + 2)
+N64_CFLAGS += -DR_SPRZ=$(SPRZ)
+
 # CLEARCOL=r,g,b paints the framebuffer clear that colour instead of black.
 # A gap probe: any pixel no primitive covered keeps it, so two builds with
 # different values differ on exactly the holes and nowhere else.

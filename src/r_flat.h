@@ -37,8 +37,22 @@
 #endif
 #define R_FLAT_Z_NEAR ((float)R_FLATZ * 0.1f)
 
-/* Sprites stand ON flats and must win that contact. */
-#define R_SPR_Z_NEAR  (R_FLAT_Z_NEAR + 0.5f)
+/* Sprites stand ON flats and must win that contact -- but every unit of
+ * margin here is also margin over the WALLS, because the flats already
+ * lead them. That is unavoidable: flats ahead of walls plus sprites ahead
+ * of flats puts sprites ahead of walls, and a sprite beats a wall whenever
+ * it stands within (R_SPR_Z_NEAR/R_FLAT_NEAR - 1) of the wall's depth --
+ * about a fifth of it at +0.5, which showed as a monster visible through a
+ * wall it stood close behind.
+ *
+ * So the margin is the smallest that still holds the floor off. It can be
+ * small: what it has to beat is the floor's z SAG, and a billboard has
+ * none of its own -- all four corners sit at one depth, so the sprite's z
+ * is flat while the floor beneath it bows toward the camera mid-span. */
+#ifndef R_SPRZ
+#define R_SPRZ (R_FLATZ + 2)          /* tenths, relative to the flats */
+#endif
+#define R_SPR_Z_NEAR  ((float)R_SPRZ * 0.1f)
 
 /* A reflection sits just in front of the pool that shows it: the margin
  * the ghost had when flats were 3.5 and it was 4.5. */
