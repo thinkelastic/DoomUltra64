@@ -878,6 +878,7 @@ int main(void)
 
         r_flat_begin();
         r_sprite_begin();
+        r_mirror_begin();
         r_vapor_begin();
         r_halo_begin();
         r_setup_walls();
@@ -948,6 +949,9 @@ int main(void)
                * sprites (nearer actors occlude them via z), before sky
                * and vapor (spill repaint, haze over the mirror). */
               r_reflect_flush(&cam);
+#if R_DOORMIRROR
+              r_mirror_flush(&cam);
+#endif
 #endif
           } }
 

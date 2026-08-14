@@ -116,6 +116,9 @@ typedef struct {
      * plane and glow_rgb as its tint; glow stays 0 for the non-liquids,
      * which nulls the light spill without a second code path. */
     uint8_t reflect;
+    /* A polished metal door: what stands in front of it is mirrored back
+     * across its own vertical plane. */
+    uint8_t mirror;
 #endif
 } r_wall_t;
 

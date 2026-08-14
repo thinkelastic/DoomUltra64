@@ -703,6 +703,16 @@ R_HOT void r_draw_wall_win(const r_camera_t *cam, const r_wall_t *wall,
             void r_reflect_wall_add(const r_wall_t *w);
             r_reflect_wall_add(wall);
         }
+#if R_DOORMIRROR
+        /* A polished door reflects across its own VERTICAL plane.
+         * Published here for the reason the pool walls are: this function
+         * already knows the wall is on screen and worth drawing. Under
+         * the same detail lever, since it is the same kind of luxury. */
+        if (wall->mirror && !detailLevel) {
+            void r_mirror_wall_add(const r_wall_t *w);
+            r_mirror_wall_add(wall);
+        }
+#endif
     }
 #endif
 

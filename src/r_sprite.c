@@ -23,6 +23,9 @@
 #include "r_flat.h"     /* R_FLAT_NEAR: the depth scale walls and flats share */
 #include "r_tri.h"
 
+#ifndef R_DOORMIRROR
+#define R_DOORMIRROR 0
+#endif
 #ifndef R_REFLWOBBLE
 #define R_REFLWOBBLE 0
 #endif
@@ -672,7 +675,7 @@ static int refl_project_region(const r_camera_t *cam, const reflregion_t *rg,
 /* One Sutherland-Hodgman step over 10-float rows. Rows carry s,t already
  * multiplied by iw, so every attribute is screen-linear and the plain lerp
  * at the cut is perspective-exact. */
-static int refl_clip_edge(float in[][10], int n, float out[][10],
+int refl_clip_edge(float in[][10], int n, float out[][10],
                           float ax, float ay, float bx, float by, float sgn)
 {
     int m = 0;
@@ -692,6 +695,9 @@ static int refl_clip_edge(float in[][10], int n, float out[][10],
     }
     return m;
 }
+
+int refl_clip_edge(float in[][10], int n, float out[][10],
+                   float ax, float ay, float bx, float by, float sgn);
 
 /* Clip one ghost quad (rows with s,t premultiplied by iw) to every
  * footprint of its plane; emit the surviving fans. A ghost whose plane
@@ -753,6 +759,19 @@ static void refl_emit_clipped(const r_camera_t *cam, float q[4][10],
  * nearer geometry was drawn -- the pool's banks, walls, things -- the test
  * fails. The image clips itself to the pool's visible pixels with no
  * polygon math at all. */
+/* The blend the door mirror uses: texture alpha times vertex alpha, mixed
+ * with what is there, z-tested and never written. */
+#if R_DOORMIRROR
+static void halo_reflect_mode(void)
+{
+    rdpq_mode_combiner(RDPQ_COMBINER1((TEX0, 0, SHADE, 0), (TEX0, 0, SHADE, 0)));
+    rdpq_mode_blender(RDPQ_BLENDER((IN_RGB, IN_ALPHA, MEMORY_RGB, INV_MUX_ALPHA)));
+    rdpq_mode_alphacompare(0);
+    rdpq_mode_zbuf(true, false);
+    rdpq_mode_filter(FILTER_POINT);
+}
+#endif
+
 void r_reflect_flush(const r_camera_t *cam)
 {
 #if D_DYNLIGHT
@@ -1077,3 +1096,250 @@ static void reflect_walls_emit(const r_camera_t *cam)
     numrwrefl = 0;
 }
 #endif /* R_REFLECT && D_DYNLIGHT */
+
+#if R_DOORMIRROR
+/* --- door mirrors --------------------------------------------------------
+ *
+ * A polished metal door reflects what stands in front of it. The pools
+ * mirror about a HORIZONTAL plane, which for a camera that never pitches
+ * leaves a billboard a billboard; a door mirrors about a VERTICAL one,
+ * which is the same arithmetic applied to x and y instead of z -- and
+ * since the things being reflected are billboards either way, the image
+ * is again just a billboard at the mirrored position.
+ *
+ * What this deliberately does NOT do is reflect the room. A true mirror
+ * would show the corridor behind you, which means walking the BSP again
+ * from a mirrored camera and clipping it to the door -- a second world
+ * render, on a frame that is already CPU-bound. So this shows the things
+ * only, dim enough to read as a suggestion on dark metal rather than as
+ * a claim about geometry.
+ */
+#define MIRROR_WALL_MAX  4
+#define MIRROR_THING_MAX 24
+#define MIRROR_REACH     320.0f    /* how far in front of a door reflects */
+
+typedef struct {
+    float x1, y1, x2, y2;     /* the door, in plan */
+    float zbot, ztop;
+} mirwall_t;
+
+typedef struct {
+    float x, y, z;
+    void *spr;
+    float sr, sg, sb;
+} mirthing_t;
+
+static mirwall_t  mirwalls[MIRROR_WALL_MAX];
+static int        num_mirwalls;
+static mirthing_t mirthings[MIRROR_THING_MAX];
+static int        num_mirthings;
+
+void r_mirror_begin(void)
+{
+    num_mirwalls = 0;
+    num_mirthings = 0;
+}
+
+void r_mirror_wall_add(const r_wall_t *w)
+{
+    if (num_mirwalls >= MIRROR_WALL_MAX || w->ztop <= w->zbot) return;
+    /* One entry per door leaf: the wall arrives once per uncovered column
+     * range, and a doubled entry would draw the image twice. */
+    for (int i = 0; i < num_mirwalls; i++)
+        if (mirwalls[i].x1 == w->x1 && mirwalls[i].y1 == w->y1 &&
+            mirwalls[i].x2 == w->x2 && mirwalls[i].y2 == w->y2) return;
+
+    mirwall_t *m = &mirwalls[num_mirwalls++];
+    m->x1 = w->x1; m->y1 = w->y1;
+    m->x2 = w->x2; m->y2 = w->y2;
+    m->zbot = w->zbot; m->ztop = w->ztop;
+}
+
+void r_mirror_thing(float x, float y, float z, void *spr,
+                    const float sh[3], unsigned ang)
+{
+    (void)ang;
+    if (!spr || num_mirthings >= MIRROR_THING_MAX) return;
+    mirthing_t *t = &mirthings[num_mirthings++];
+    t->x = x; t->y = y; t->z = z; t->spr = spr;
+    t->sr = sh[0]; t->sg = sh[1]; t->sb = sh[2];
+}
+
+void r_mirror_flush(const r_camera_t *cam)
+{
+    if (!num_mirwalls || !num_mirthings) { num_mirwalls = 0; return; }
+
+    const float cs = r_view_cs, sn = r_view_sn;
+    const float cx = SCREEN_W * 0.5f, cy = SCREEN_H * 0.5f;
+
+    halo_reflect_mode();
+
+    for (int wi = 0; wi < num_mirwalls; wi++) {
+        const mirwall_t *m = &mirwalls[wi];
+
+        /* The door's plane: a unit normal and a point on it. */
+        float ex = m->x2 - m->x1, ey = m->y2 - m->y1;
+        const float elen = sqrtf(ex * ex + ey * ey);
+        if (elen < 1.0f) continue;
+        ex /= elen; ey /= elen;
+        const float nx = -ey, ny = ex;          /* unit normal */
+
+        /* Its four corners, projected, as the clip polygon. Near-clipped
+         * along the segment so a door the camera stands beside still
+         * yields a usable quad. */
+        float d1 = (m->x1 - cam->x) * cs + (m->y1 - cam->y) * sn;
+        float d2 = (m->x2 - cam->x) * cs + (m->y2 - cam->y) * sn;
+        float o1 = (m->x1 - cam->x) * sn - (m->y1 - cam->y) * cs;
+        float o2 = (m->x2 - cam->x) * sn - (m->y2 - cam->y) * cs;
+        const float NEARP = 8.0f;
+        if (d1 < NEARP && d2 < NEARP) continue;
+        if (d1 < NEARP) { const float t = (NEARP - d1) / (d2 - d1);
+                          d1 = NEARP; o1 += (o2 - o1) * t; }
+        else if (d2 < NEARP) { const float t = (NEARP - d2) / (d1 - d2);
+                          d2 = NEARP; o2 += (o1 - o2) * t; }
+
+        const float iw1 = 1.0f / d1, iw2 = 1.0f / d2;
+        const float xl = cx + o1 * cam->focal_x * iw1;
+        const float xr = cx + o2 * cam->focal_x * iw2;
+        const float yt1 = cy - (m->ztop - cam->z) * cam->focal_y * iw1;
+        const float yb1 = cy - (m->zbot - cam->z) * cam->focal_y * iw1;
+        const float yt2 = cy - (m->ztop - cam->z) * cam->focal_y * iw2;
+        const float yb2 = cy - (m->zbot - cam->z) * cam->focal_y * iw2;
+
+        float px[4], py[4];
+        px[0] = xl; py[0] = yt1;
+        px[1] = xr; py[1] = yt2;
+        px[2] = xr; py[2] = yb2;
+        px[3] = xl; py[3] = yb1;
+
+        float area = 0.0f;
+        for (int i = 0; i < 4; i++) {
+            const int j = i + 1 < 4 ? i + 1 : 0;
+            area += px[i] * py[j] - px[j] * py[i];
+        }
+        const float sgn = area >= 0.0f ? 1.0f : -1.0f;
+
+        for (int ti = 0; ti < num_mirthings; ti++) {
+            const mirthing_t *t = &mirthings[ti];
+
+            /* Signed distance to the plane. Only what stands IN FRONT is
+             * reflected -- behind the door is another room. */
+            const float sd = (t->x - m->x1) * nx + (t->y - m->y1) * ny;
+            const float cd = (cam->x - m->x1) * nx + (cam->y - m->y1) * ny;
+            if (sd * cd <= 0.0f) continue;          /* opposite sides */
+            const float adist = sd < 0.0f ? -sd : sd;
+            if (adist > MIRROR_REACH) continue;
+
+            /* Mirror across the plane: p' = p - 2*(p-a).n * n */
+            const float mx = t->x - 2.0f * sd * nx;
+            const float my = t->y - 2.0f * sd * ny;
+
+            const float dx = mx - cam->x, dy = my - cam->y;
+            const float depth = dx * cs + dy * sn;
+            if (depth < SPR_NEAR) continue;
+
+            const dt64_tex_t *tex = (const dt64_tex_t *)t->spr;
+            const float offs = dx * sn - dy * cs;
+            const float scale_x = cam->focal_x / depth;
+            const float scale_y = cam->focal_y / depth;
+            const float iw = 1.0f / depth;
+            const float sx = cx + offs * scale_x;
+
+            const float x_left = sx - (float)tex->leftoffset * scale_x;
+            const float y_top  = cy - (t->z + (float)tex->topoffset
+                                       - cam->z) * scale_y;
+
+            /* Dimmer the further the thing stands from the door, as a
+             * real reflection loses to the metal's own colour. */
+            const float k = 0.55f * (1.0f - adist * (1.0f / MIRROR_REACH));
+            if (k <= 0.02f) continue;
+
+            /* Depth of the DOOR, not of the image.
+             *
+             * A reflection stands behind the mirror, so taking the
+             * mirrored thing's own depth put the ghost further away than
+             * the door that shows it -- and the door, being opaque and
+             * already in the z-buffer, won every pixel. Nothing drew.
+             *
+             * What the eye sees is the image ON the surface, so the depth
+             * that matters is where the sight-line crosses the door
+             * plane: the camera sits at signed distance cd, the mirrored
+             * point at -sd on the far side, and the crossing is that
+             * fraction along the ray. Biased slightly nearer so it beats
+             * the door's own pixels and still loses to anything standing
+             * between you and it. */
+            const float tcross = cd / (cd + sd);
+            if (tcross <= 0.0f || tcross >= 1.0f) continue;
+            const float dcross = depth * tcross;
+            if (dcross < 1.0f) continue;
+            float z = 1.0f - (R_FLAT_NEAR + 0.6f) / dcross;
+            if (z < 0.0f) z = 0.0f;
+
+            const int w = tex->width, h = tex->height;
+            const int tw = w < DT64_TILE_W ? w : DT64_TILE_W;
+            const int th = h < DT64_TILE_H ? h : DT64_TILE_H;
+
+            for (int t0 = 0; t0 < h; t0 += th) {
+                const int t1 = t0 + th > h ? h : t0 + th;
+                for (int s0 = 0; s0 < w; s0 += tw) {
+                    const int s1 = s0 + tw > w ? w : s0 + tw;
+                    const float qx0 = x_left + (float)s0 * scale_x;
+                    const float qx1 = x_left + (float)s1 * scale_x;
+                    const float qy0 = y_top  + (float)t0 * scale_y;
+                    const float qy1 = y_top  + (float)t1 * scale_y;
+                    if (qx1 < 0.0f || qx0 > (float)SCREEN_W) continue;
+                    if (qy1 < 0.0f || qy0 > (float)SCREEN_H) continue;
+
+                    dt64_upload_tile(TILE0, (dt64_tex_t *)t->spr, NULL,
+                                     s0, t0, s1, t1);
+                    stat_uploads++;
+
+                    float q[4][10];
+                    const float xs[4] = { qx0, qx1, qx1, qx0 };
+                    const float ys[4] = { qy0, qy0, qy1, qy1 };
+                    const float ss[4] = { (float)s0, (float)s1,
+                                          (float)s1, (float)s0 };
+                    const float ts[4] = { (float)t0, (float)t0,
+                                          (float)t1, (float)t1 };
+                    for (int i = 0; i < 4; i++) {
+                        q[i][0] = xs[i]; q[i][1] = ys[i];
+                        q[i][2] = t->sr; q[i][3] = t->sg; q[i][4] = t->sb;
+                        q[i][5] = k;
+                        q[i][6] = ss[i] * iw; q[i][7] = ts[i] * iw;
+                        q[i][8] = iw;
+                        q[i][9] = z;
+                    }
+
+                    /* Clipped to the door itself. Without this the image
+                     * would spill across the wall beside it, which is the
+                     * single most obvious way a fake mirror gives itself
+                     * away. */
+                    float a[14][10], bb[14][10];
+                    memcpy(a, q, sizeof(float) * 40);
+                    int n = 4, flip = 0;
+                    for (int e = 0; e < 4 && n >= 3; e++) {
+                        const int j = e + 1 < 4 ? e + 1 : 0;
+                        n = refl_clip_edge(flip ? bb : a, n, flip ? a : bb,
+                                           px[e], py[e], px[j], py[j], sgn);
+                        flip ^= 1;
+                    }
+                    if (n < 3) continue;
+
+                    float (*p)[10] = flip ? bb : a;
+                    float v[14][10];
+                    for (int i = 0; i < n; i++) {
+                        memcpy(v[i], p[i], sizeof(float) * 10);
+                        v[i][6] = p[i][6] / p[i][8];
+                        v[i][7] = p[i][7] / p[i][8];
+                    }
+                    for (int i = 1; i + 1 < n; i++) {
+                        rdpq_triangle(&TRIFMT_SPR, v[0], v[i], v[i + 1]);
+                        r_tri_spr++;
+                    }
+                }
+            }
+        }
+    }
+    num_mirwalls = 0;
+}
+#endif /* R_DOORMIRROR */

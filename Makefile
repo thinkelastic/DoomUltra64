@@ -366,6 +366,34 @@ N64_CFLAGS += -DR_HALO=$(HALO)
 REFLECT ?= 1
 N64_CFLAGS += -DR_REFLECT=$(REFLECT)
 
+# REFLWOBBLE=0 makes the reflections perfect mirrors again. On moving
+# water they should not be: the image is displaced sideways by an amount
+# that grows with depth below the surface and varies with time, so it
+# shears in bands like a real reflection on a swell. Amplitude is a
+# fraction of the image's own width, so distance does not change how
+# much of itself wobbles, and it runs off the same clock as the liquid's
+# ripple so surface and reflection agree.
+REFLWOBBLE ?= 1
+N64_CFLAGS += -DR_REFLWOBBLE=$(REFLWOBBLE)
+
+# DOORMIRROR=1 reflects what stands in front of DOOR1, DOOR3, BIGDOOR2/4,
+# SHAWN2 or METAL1 back across the door's own vertical plane, clipped to
+# the door -- including the player, whose sprite the renderer already
+# queues and only ever rejects for sitting at depth zero. It reflects
+# THINGS only: a true mirror would have to show the room behind you,
+# which means walking the BSP again from a mirrored camera, and that is a
+# second world render on a frame that is already CPU-bound.
+#
+# OFF BY DEFAULT: unfinished. Every stage is verified working on hardware
+# and in emulation -- the textures register, the walls publish, the things
+# pass the reach, depth and alpha tests -- but the final clip of the ghost
+# quad against the door's screen polygon returns the empty set at poses
+# where it plainly should not, so nothing reaches the framebuffer. The
+# clip's inside-ness sign is the prime suspect. Do not ship at 1 until a
+# pose-by-pose A/B shows the image.
+DOORMIRROR ?= 0
+N64_CFLAGS += -DR_DOORMIRROR=$(DOORMIRROR)
+
 # CI4FLATS=1 ships every flat whose 4096 indices share one high nibble as
 # full-resolution 64x64 CI4 (59 of the IWAD's 107, losslessly) instead of
 # the 32x32 CI8 downsample: 2048 bytes is exactly the TMEM budget beside

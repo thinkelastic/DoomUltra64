@@ -39,6 +39,18 @@ angle_t     R_PointToAngle2(fixed_t x1, fixed_t y1, fixed_t x2, fixed_t y2);
 
 #include "r_flat.h"
 #include "r_halo.h"
+
+/* Polished metal surfaces mirror what stands in front of them. Set
+ * alongside every texture choice rather than once per seg, because a
+ * single sidedef can carry a shiny door as its middle and plain
+ * concrete above it. */
+#if R_DOORMIRROR
+int D_TextureIsMirror(int picnum);
+#define D_WALL_MIRROR(pic) \
+    (cur_wall.mirror = (uint8_t)D_TextureIsMirror(pic))
+#else
+#define D_WALL_MIRROR(pic) ((void)0)
+#endif
 #include "r_light.h"
 #include "r_pvs.h"
 #include "r_sky.h"
@@ -914,6 +926,16 @@ R_HOT static void render_subsector(int num)
                 sh[1] = lit + add[1]; if (sh[1] > 1.0f) sh[1] = 1.0f;
                 sh[2] = lit + add[2]; if (sh[2] > 1.0f) sh[2] = 1.0f;
             }
+#if R_DOORMIRROR
+            /* Every thing the walk sees is a candidate for a door's
+             * mirror -- including the player, whose own sprite is queued
+             * each frame and only ever rejected for sitting at depth
+             * zero. Reflected across a door two paces away it lands four
+             * paces out and draws like anything else. */
+            { void r_mirror_thing(float x, float y, float z, void *spr,
+                                  const float sh[3], unsigned ang);
+              r_mirror_thing(t.x, t.y, t.z, t.spr, sh, (unsigned)mang); }
+#endif
             r_sprite_add(cur_cam, &t, sh,
                          (mo->frame & FF_FULLBRIGHT) ? -1 : lit_ll,
                          /* Things that are vapour or energy rather than
@@ -1118,6 +1140,7 @@ R_HOT static void render_subsector(int num)
              * whether or not it has art, and skipping the clip would leak
              * whatever lies behind it. */
             cur_wall.tex = p_level_texture(fs->midtexture);
+            D_WALL_MIRROR(fs->midtexture);
             if (cur_wall.tex) {
                 const float texh = (float)cur_wall.tex->height;
                 cur_wall.zbot = ffloor; cur_wall.ztop = fceil;
@@ -1149,6 +1172,7 @@ R_HOT static void render_subsector(int num)
              * fence invisible. */
             if (fceil > bceil) {
                 cur_wall.tex = p_level_texture(fs->toptexture);
+            D_WALL_MIRROR(fs->toptexture);
                 if (cur_wall.tex) {
                     const float texh = (float)cur_wall.tex->height;
                     cur_wall.zbot = bceil; cur_wall.ztop = fceil;
@@ -1160,6 +1184,7 @@ R_HOT static void render_subsector(int num)
             }
             if (bfloor > ffloor) {
                 cur_wall.tex = p_level_texture(fs->bottomtexture);
+            D_WALL_MIRROR(fs->bottomtexture);
                 if (cur_wall.tex) {
                     cur_wall.zbot = ffloor; cur_wall.ztop = bfloor;
                     cur_wall.ztex = ((ld->flags & ML_DONTPEGBOTTOM)
@@ -1196,6 +1221,7 @@ R_HOT static void render_subsector(int num)
 
         if (fceil > bceil && !sky_upper) {       /* upper */
             cur_wall.tex = p_level_texture(fs->toptexture);
+            D_WALL_MIRROR(fs->toptexture);
             if (cur_wall.tex) {
                 const float texh = (float)cur_wall.tex->height;
                 cur_wall.zbot = bceil; cur_wall.ztop = fceil;
@@ -1209,6 +1235,7 @@ R_HOT static void render_subsector(int num)
         }
         if (bfloor > ffloor) {                   /* lower */
             cur_wall.tex = p_level_texture(fs->bottomtexture);
+            D_WALL_MIRROR(fs->bottomtexture);
             if (cur_wall.tex) {
                 cur_wall.zbot = ffloor; cur_wall.ztop = bfloor;
                 /* Lower textures start at the far floor, unless lower-unpegged,
@@ -1227,6 +1254,7 @@ R_HOT static void render_subsector(int num)
          * occludes nor closes columns; the alpha cut happens per pixel. */
         if (fs->midtexture) {
             cur_wall.tex = p_level_texture(fs->midtexture);
+            D_WALL_MIRROR(fs->midtexture);
             if (cur_wall.tex) {
                 const float texh  = (float)cur_wall.tex->height;
                 const float o_top = fminf(fceil, bceil);

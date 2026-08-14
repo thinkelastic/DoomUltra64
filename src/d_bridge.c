@@ -63,9 +63,59 @@ void *p_level_thing_sprite(int type);
  * texture actually referenced by the level, loaded from the cartridge -- so
  * these map Doom's names onto our indices and the rest of the loader is
  * unchanged. */
+#if R_DOORMIRROR
+/* Polished metal walls -- the grey doors and panels. Recorded by
+ * resolved index, as the emissive flats are, because the name is gone by
+ * the time anything draws: the loader resolves once and the renderer only
+ * ever sees the index. A level uses a handful, so the lookup is a scan of
+ * a table that is nearly always length 0 to 3. */
+#define MIRROR_MAX 12
+static int16_t mirror_pic[MIRROR_MAX];
+static int     num_mirror;
+
+int D_TextureIsMirror(int picnum)
+{
+    for (int i = 0; i < num_mirror; i++)
+        if (mirror_pic[i] == (int16_t)picnum) return 1;
+    return 0;
+}
+
+void D_MirrorReset(void) { num_mirror = 0; }
+
+static int mirror_for_name(const char *n)
+{
+    /* Exact names, not prefixes: DOORTRAK and DOORSTOP are the dirty
+     * track and jamb around a door, not the polished leaf, and BIGDOOR3
+     * is rusted brown. */
+    static const char *const shiny[] = {
+        "DOOR1", "DOOR3", "BIGDOOR2", "BIGDOOR4", "SHAWN2", "METAL1"
+    };
+    /* Compared over eight bytes, not as C strings: Doom's sidedef name
+     * fields are char[8] and carry NO terminator when the name fills
+     * them -- BIGDOOR2 is exactly eight. strcasecmp ran off the end of
+     * the field and never matched the very textures most worth
+     * mirroring. */
+    char nm[9];
+    for (int i = 0; i < 8; i++) nm[i] = n[i] ? n[i] : '\0';
+    nm[8] = '\0';
+    for (unsigned i = 0; i < sizeof shiny / sizeof shiny[0]; i++)
+        if (!strncasecmp(nm, shiny[i], 8) &&
+            strlen(shiny[i]) == strlen(nm)) return 1;
+    return 0;
+}
+#endif
+
 int R_TextureNumForName(const char *name)
 {
-    return p_level_resolve(name, "");
+    const int idx = p_level_resolve(name, "");
+#if R_DOORMIRROR
+    if (idx >= 0 && num_mirror < MIRROR_MAX && mirror_for_name(name)) {
+        for (int i = 0; i < num_mirror; i++)
+            if (mirror_pic[i] == (int16_t)idx) return idx;
+        mirror_pic[num_mirror++] = (int16_t)idx;
+    }
+#endif
+    return idx;
 }
 
 /* The index F_SKY1 resolves to. Doom's r_data.c sets this in R_InitFlats and

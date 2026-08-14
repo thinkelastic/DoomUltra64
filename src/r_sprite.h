@@ -41,6 +41,25 @@ void r_reflect_region(const r_polypt_t *pts, int npts, float h);
 void r_reflect_flush(const r_camera_t *cam);
 #endif
 
+/* Door mirrors: polished metal walls reflect the things standing in
+ * front of them, across the wall's own vertical plane. */
+#ifndef R_DOORMIRROR
+#define R_DOORMIRROR 0
+#endif
+#if R_DOORMIRROR
+void r_mirror_begin(void);
+void r_mirror_wall_add(const r_wall_t *w);
+void r_mirror_thing(float x, float y, float z, void *spr,
+                    const float sh[3], unsigned ang);
+void r_mirror_flush(const r_camera_t *cam);
+#else
+static inline void r_mirror_begin(void) {}
+static inline void r_mirror_thing(float x, float y, float z, void *spr,
+                                  const float sh[3], unsigned ang)
+{ (void)x; (void)y; (void)z; (void)spr; (void)sh; (void)ang; }
+static inline void r_mirror_flush(const r_camera_t *cam) { (void)cam; }
+#endif
+
 int  r_sprite_count(void);
 int  r_sprite_uploads(void);
 int  r_sprite_dropped(void);
