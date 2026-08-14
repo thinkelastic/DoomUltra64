@@ -735,6 +735,91 @@ static void build_flat_regions(void)
         }
     }
 
+    /* --- weld the T-junctions ------------------------------------------
+     *
+     * Neighbouring cells tile the plane exactly, but a corner of one can
+     * land partway along another's EDGE. The two primitives then disagree
+     * about that boundary by a fraction of a pixel and the rasteriser
+     * leaves a hairline between them. store_poly's answer was to inflate
+     * every polygon so neighbours overlap and the crack is buried -- which
+     * works, and costs a band of one surface painted over its neighbour.
+     * Where the two are coplanar with different art that band is the stray
+     * coloured line along a floor seam: measured at ~30000 px a frame, in
+     * two-pixel-tall runs.
+     *
+     * The textbook answer instead: give the edge the vertex it is missing.
+     * A polygon that carries its neighbour's corner as a vertex of its own
+     * has no T-junction there, both sides interpolate the same boundary,
+     * and no overlap is needed to hide anything. It costs a few fan
+     * triangles at load and nothing per frame.
+     *
+     * Bounded by MAX_POLY_PTS, which is also r_flat.c's FLAT_MAX_PTS: a
+     * region pushed past it would be REJECTED outright by r_flat_add and
+     * its floor would vanish, which is a far worse artifact than the one
+     * being fixed. A region that cannot take another vertex simply keeps
+     * its T-junction.
+     *
+     * OFF BY DEFAULT, because it does not fix what it was written for. It
+     * welds 385 vertices on E1M1 -- verified on the console log, so the
+     * pass genuinely fires -- and with FLATNUDGE=0 removing the overlap as
+     * well, the reported seam is UNCHANGED. That eliminates the overlap
+     * and the T-junction as its cause rather than leaving them untested.
+     * Kept because removing a real T-junction is right on its own terms
+     * and the machinery may be wanted later; not on, because it changes
+     * every floor's geometry for no observed benefit. */
+#if R_FLATWELD
+    {
+        const float EPS_PERP = 0.05f;   /* how near the edge counts as "on" */
+        const float EPS_END  = 0.25f;   /* ignore what is already a corner  */
+        int welded = 0;
+
+        for (int a = 0; a < numsubsectors; a++) {
+            if (!work[a].live) continue;
+            for (int b = 0; b < numsubsectors; b++) {
+                if (b == a || !work[b].live) continue;
+                if (work[a].xl > work[b].xh + 2.0f ||
+                    work[b].xl > work[a].xh + 2.0f ||
+                    work[a].yl > work[b].yh + 2.0f ||
+                    work[b].yl > work[a].yh + 2.0f) continue;
+
+                for (int vb = 0; vb < work[b].n; vb++) {
+                    if (work[a].n >= MAX_POLY_PTS) break;
+                    const r_polypt_t v = work[b].pts[vb];
+
+                    for (int e = 0; e < work[a].n; e++) {
+                        const int f = e + 1 < work[a].n ? e + 1 : 0;
+                        const r_polypt_t p = work[a].pts[e];
+                        const r_polypt_t q = work[a].pts[f];
+                        const float ex = q.x - p.x, ey = q.y - p.y;
+                        const float len2 = ex * ex + ey * ey;
+                        if (len2 < 1e-4f) continue;
+
+                        /* Where along pq the point projects, and how far
+                         * off the line it sits. */
+                        const float t = ((v.x - p.x) * ex +
+                                         (v.y - p.y) * ey) / len2;
+                        const float len = sqrtf(len2);
+                        if (t * len <= EPS_END) continue;
+                        if ((1.0f - t) * len <= EPS_END) continue;
+                        const float perp =
+                            ((v.x - p.x) * ey - (v.y - p.y) * ex) / len;
+                        if (perp > EPS_PERP || perp < -EPS_PERP) continue;
+
+                        /* Insert between p and q, keeping the winding. */
+                        for (int k = work[a].n; k > f; k--)
+                            work[a].pts[k] = work[a].pts[k - 1];
+                        work[a].pts[f] = v;
+                        work[a].n++;
+                        welded++;
+                        break;              /* this vertex is placed */
+                    }
+                }
+            }
+        }
+        debugf("ssdata: welded %d T-junction vertices\n", welded);
+    }
+#endif /* R_FLATWELD */
+
     /* Pack the survivors. */
     int nregions = 0, npts = 0;
     int *regidx = malloc(sizeof(int) * numsubsectors);

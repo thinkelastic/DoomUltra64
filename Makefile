@@ -109,6 +109,16 @@ N64_CFLAGS += -DR_FLATDBG=$(FLATDBG)
 FLATNUDGE ?= 75
 N64_CFLAGS += -DR_FLATNUDGE=$(FLATNUDGE)
 
+# FLATWELD=1 welds T-junctions at load: where one cell's corner lands
+# partway along a neighbour's edge, the neighbour gains that corner as a
+# vertex, so both sides interpolate the same boundary and no overlap is
+# needed to hide a hairline. Written to let FLATNUDGE go to 0. It does
+# fire -- 385 vertices on E1M1 -- and it does NOT fix the reported seam,
+# which is why it is off: it changes every floor's geometry for no
+# observed benefit. Kept because the mechanism is sound on its own terms.
+FLATWELD ?= 0
+N64_CFLAGS += -DR_FLATWELD=$(FLATWELD)
+
 # VIFILTER=0 disables the VI's coverage-based resample filter at 320. That
 # filter is what smooths the 320-wide framebuffer up to the VI's 640-wide
 # output, and it blends on polygon edges using the coverage the RDP wrote
