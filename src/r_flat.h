@@ -12,6 +12,38 @@
 /* Must match NEAR_PLANE in r_wall.c so walls and flats share a depth scale. */
 #define R_FLAT_NEAR 4.0f
 
+/* --- the depth-bias stack ------------------------------------------------
+ *
+ * Three kinds of surface meet at shared edges, and the z-buffer has to be
+ * told which wins, because the RDP interpolates z LINEARLY in screen space
+ * while the true curve is convex -- so two primitives approaching the same
+ * edge from different vertex sets sag apart by a fraction of a pixel and
+ * whichever sags lower steals the junction. Each gets a near constant, and
+ * a LARGER constant means a SMALLER z, which means nearer and wins:
+ *
+ *   walls    R_FLAT_NEAR      the reference
+ *   flats    R_FLAT_Z_NEAR    ahead of walls -- see FLATZ in the Makefile
+ *   sprites  R_SPR_Z_NEAR     ahead of flats
+ *
+ * The order is forced by what each contact looks like when it goes wrong.
+ * Flats must beat walls or a wall bites a notch out of a ceiling corner.
+ * Sprites must beat flats or the floor clips the feet off anything standing
+ * on it. Every one is expressed RELATIVE to the flats' constant, so moving
+ * the FLATZ lever slides the whole stack and cannot invert it -- which is
+ * exactly how the feet got clipped: flats were raised past the sprites'
+ * fixed 4.0 and silently changed who won. */
+#ifndef R_FLATZ
+#define R_FLATZ 43
+#endif
+#define R_FLAT_Z_NEAR ((float)R_FLATZ * 0.1f)
+
+/* Sprites stand ON flats and must win that contact. */
+#define R_SPR_Z_NEAR  (R_FLAT_Z_NEAR + 0.5f)
+
+/* A reflection sits just in front of the pool that shows it: the margin
+ * the ghost had when flats were 3.5 and it was 4.5. */
+#define R_REFL_Z_NEAR (R_FLAT_Z_NEAR + 1.0f)
+
 /* Flats are batched exactly like walls, and for the same reason: a texture
  * upload costs far more than a triangle. Drawing them as the BSP walk finds
  * them means one upload per surface -- about 120 a frame against 29 for every

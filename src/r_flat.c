@@ -118,10 +118,9 @@ static const float flatdbg_col[6][3] = {
  * outcome: a vertical surface at the same depth as a floor edge is in
  * front of it. Sprites keep the shared constant and thus beat the floor
  * they stand on. */
-#ifndef R_FLATZ
-#define R_FLATZ 35            /* tenths: 35 = 3.5, the shipped bias */
-#endif
-#define FLAT_Z_NEAR ((float)R_FLATZ * 0.1f)
+/* The whole bias stack lives in r_flat.h, so walls, flats and sprites
+ * cannot be moved out of order independently. */
+#define FLAT_Z_NEAR R_FLAT_Z_NEAR
 /* Eight, not four. Bands step geometrically by FLAT_MAX_DEPTH_RATIO, so
  * the count sets how much depth the invariant actually covers: at the old
  * 4.0 ratio four bands reached 256:1 and spanned any real floor, but

@@ -273,7 +273,11 @@ static void draw_tile(const sprjob_t *j, int s0, int t0, int s1, int t1,
      * world (4): a sprite up to twice a wall's distance still compared in
      * front of it and drew straight through -- monsters visible in the void
      * behind walls. One constant, one curve. */
-    const float z  = 1.0f - R_FLAT_NEAR * iw;
+    /* Ahead of the floor it stands on -- see the bias stack in r_flat.h.
+     * This used the shared wall constant, which worked only while the
+     * flats sat behind it; once they moved ahead, the floor won the
+     * contact and clipped the feet off every standing thing. */
+    const float z  = 1.0f - R_SPR_Z_NEAR * iw;
 
     float v[4][10];
     const float xs[4] = { x0, x1, x1, x0 };
@@ -856,8 +860,8 @@ void r_reflect_flush(const r_camera_t *cam)
              * at every distance, and any occluder nearer than 8/9 of the
              * pool's depth beats the ghost -- so only things practically
              * standing IN the pool lose, which is what a mirror wants. */
-            float z_hi = 1.0f - (R_FLAT_NEAR + 0.5f) / dc_hi;
-            float z_lo = 1.0f - (R_FLAT_NEAR + 0.5f) / dc_lo;
+            float z_hi = 1.0f - R_REFL_Z_NEAR / dc_hi;
+            float z_lo = 1.0f - R_REFL_Z_NEAR / dc_lo;
             if (z_hi > 1.0f) z_hi = 1.0f;
             if (z_lo > 1.0f) z_lo = 1.0f;
             if (z_hi < 0.0f) z_hi = 0.0f;
@@ -1099,7 +1103,7 @@ static void reflect_walls_emit(const r_camera_t *cam)
             {
                 /* Depth-proportional bias: see the thing emitter. */
                 const float dc = d * eh / (cam->z - zi);
-                float z = 1.0f - (R_FLAT_NEAR + 0.5f) / dc;
+                float z = 1.0f - R_REFL_Z_NEAR / dc;
                 if (z > 1.0f) z = 1.0f;
                 if (z < 0.0f) z = 0.0f;
                 v[c][9] = z;
