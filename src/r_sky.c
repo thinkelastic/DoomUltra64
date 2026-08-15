@@ -55,12 +55,22 @@ static dt64_tex_t *sky_tex;
  * note above. Empty span: the pass is skipped outright. */
 static int sky_x0, sky_x1;
 
-void r_sky_span_reset(void) { sky_x0 = SCREEN_W; sky_x1 = -1; }
+/* Cleared by any opening whose sky sits at or below eye level; see the note
+ * on the vertical clamp in r_sky_draw. Starts true and only ever falls, so a
+ * single low opening anywhere in the frame disables the clamp for all of it. */
+static bool sky_all_above_eye;
 
-void r_sky_span_add(int x0, int x1)
+void r_sky_span_reset(void)
+{
+    sky_x0 = SCREEN_W; sky_x1 = -1;
+    sky_all_above_eye = true;
+}
+
+void r_sky_span_add(int x0, int x1, bool above_eye)
 {
     if (x0 < sky_x0) sky_x0 = x0;
     if (x1 > sky_x1) sky_x1 = x1;
+    if (!above_eye) sky_all_above_eye = false;
 }
 
 bool r_sky_would_draw(void) { return sky_tex != NULL && sky_x1 >= sky_x0; }
@@ -122,6 +132,43 @@ void r_sky_draw(const r_camera_t *cam)
      * geometry, exactly as on the PC. */
     const float px_per_row = (float)SCREEN_H / 200.0f;
 
+    /* THE VERTICAL CLAMP. Where the backdrop can actually reach.
+     *
+     * Doom's sky wraps: the texture is 128 rows on a 200-row screen and the
+     * pass repeats it downward, because those repeats "sit below the horizon
+     * and are almost always behind world geometry". Almost always is the
+     * problem -- this pass runs LAST, depth-tested, so every one of those
+     * pixels still costs a pipe cycle and a 16-bit z read to be rejected. At
+     * 480 rows the repeat is a second full band, ~55,000 pixels a frame plus
+     * its own TMEM uploads, drawn to lose every z compare.
+     *
+     * It cannot show, and the reason is geometric rather than statistical. A
+     * sky ceiling at height ch projects to
+     *
+     *     y = cy - (ch - camz) * focal_y / d
+     *
+     * and there is no pitch in this renderer -- cy is SCREEN_H/2 everywhere.
+     * With ch above the eye the second term is positive at every depth, so y
+     * is strictly above cy and approaches it only as d runs to infinity. The
+     * horizon is therefore a hard floor for the backdrop, not a typical case.
+     *
+     * The converse is real and is why this is a flag rather than an assertion:
+     * stand on a high ledge over an outdoor courtyard and its sky ceiling is
+     * BELOW your eye, (ch - camz) goes negative, and the sky legitimately
+     * appears under the horizon. r_sky_span_add clears the flag for any such
+     * opening and the clamp is abandoned for the whole frame.
+     *
+     * Two rows of slack over the exact bound: y reaches cy only in the limit,
+     * but the endpoints are floats and a black seam at the horizon would be
+     * far more expensive than 640 pixels. */
+    float y_limit = (float)SCREEN_H;
+#if R_SKYCLAMP
+    if (sky_all_above_eye) {
+        y_limit = (float)SCREEN_H * 0.5f + 2.0f;
+        if (y_limit > (float)SCREEN_H) y_limit = (float)SCREEN_H;
+    }
+#endif
+
     const float x_lo = (float)(sky_x0 > 0 ? sky_x0 - 1 : 0);
     const float x_hi = (float)(sky_x1 + 2 < SCREEN_W ? sky_x1 + 2 : SCREEN_W);
     const float s_lo = s_left + x_lo * s_per_px;
@@ -156,10 +203,25 @@ void r_sky_draw(const r_camera_t *cam)
             const int t1 = t0 + tile_h > texh ? texh : t0 + tile_h;
             bool resident = false;
 
-            for (float ybase = 0.0f; ybase < (float)SCREEN_H; ybase += band_px) {
+            for (float ybase = 0.0f; ybase < y_limit; ybase += band_px) {
                 const float y0 = ybase + (float)t0 * px_per_row;
-                const float y1 = ybase + (float)t1 * px_per_row;
-                if (y0 >= (float)SCREEN_H) continue;
+                float y1 = ybase + (float)t1 * px_per_row;
+                float tb = (float)t1;
+                if (y0 >= y_limit) continue;
+
+                /* Trim the band that STRADDLES the limit rather than letting
+                 * it run to its full height. The loop bound alone already
+                 * skips whole wrapped bands and their uploads -- the larger
+                 * win -- but a 128-row band is 307 px tall at 480, so the one
+                 * band that crosses the horizon would still overdraw most of
+                 * the way to the bottom. The quad's mapping is affine (every
+                 * vertex shares 1/w), so cutting y and t by the same fraction
+                 * is exact, not an approximation. */
+                if (y1 > y_limit) {
+                    tb = (float)t0 + ((float)t1 - (float)t0) *
+                                     ((y_limit - y0) / (y1 - y0));
+                    y1 = y_limit;
+                }
 
                 if (!resident) {
                     dt64_upload_tile(TILE0, tex, NULL,
@@ -176,8 +238,7 @@ void r_sky_draw(const r_camera_t *cam)
                 const float xs[4] = { x0, x1, x1, x0 };
                 const float ys[4] = { y0, y0, y1, y1 };
                 const float ss[4] = { sa, sb, sb, sa };
-                const float ts[4] = { (float)t0, (float)t0,
-                                      (float)t1, (float)t1 };
+                const float ts[4] = { (float)t0, (float)t0, tb, tb };
                 for (int i = 0; i < 4; i++) {
                     v[i][0] = xs[i];
                     v[i][1] = ys[i];

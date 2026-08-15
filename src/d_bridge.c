@@ -1068,6 +1068,22 @@ static boolean d_level_resident;
 boolean d_level_resident_set(boolean v) { return d_level_resident = v; }
 int D_InLevel(void) { return gamestate == GS_LEVEL && d_level_resident; }
 
+/* Will this frame's UI paint the opaque status-bar band at the bottom?
+ *
+ * Exactly d_ui.c's own condition for drawing the bar: GS_LEVEL, and not the
+ * pre-first-tic frame that D_Display guards against. Both bar paths -- the
+ * composited strip and the ST_Drawer fallback -- cover the same rows, so
+ * which one runs does not matter here.
+ *
+ * The world scissor in main.c keys off this rather than off D_InLevel alone,
+ * because on the gametic==0 frame the world IS drawn and the bar is NOT: a
+ * scissor there would leave the clear colour in a band across the bottom for
+ * one frame at every level start. */
+int D_BarBandDrawn(void)
+{
+    return gamestate == GS_LEVEL && d_level_resident && gametic != 0;
+}
+
 int D_FlowState(int *ga) { *ga = (int)gameaction; return (int)gamestate; }
 
 

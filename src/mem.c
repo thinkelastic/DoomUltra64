@@ -71,11 +71,16 @@ void *mem_alloc(mem_arena_id_t id, size_t size)
          * The Aug 12 hardware session measured the texture peak at 1,914
          * of 2,048 KB on the demo maps alone -- larger maps may hit the
          * wall, and a demand-load returning NULL mid-fight is a far worse
-         * way to find out than this line in the log. Threshold at 15/16
+         * way to find out than this line in the log. Threshold at 7/8
          * capacity; fires only on a new high-water mark, so it cannot
-         * spam. */
-        if (a->peak > a->capacity - a->capacity / 16u &&
-            a->peak - aligned <= a->capacity - a->capacity / 16u)
+         * spam.
+         *
+         * 7/8, not 15/16, because 15/16 did not fire when it mattered: at
+         * the old 2048 KB ceiling it triggers above 1920.0 KB, and the
+         * measured 1914 KB peak missed it by 6144 bytes. A warning that
+         * stays silent six kilobytes from the wall is not a warning. */
+        if (a->peak > a->capacity - a->capacity / 8u &&
+            a->peak - aligned <= a->capacity - a->capacity / 8u)
             debugf("mem: %s arena at %u of %u KB -- near the ceiling\n",
                    a->name, (unsigned)(a->peak / 1024),
                    (unsigned)(a->capacity / 1024));

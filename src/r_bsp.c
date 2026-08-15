@@ -843,7 +843,11 @@ static void render_flats_inner(const subsector_t *ss)
             debugf("sk: flat sec=%d lo=%d hi=%d\n",
                    (int)(sec - sectors), lo, hi);
 #endif
-        r_sky_span_add(lo, hi);
+        /* Above the eye? Then this opening's sky stays above the horizon at
+         * every depth and r_sky_draw may drop the backdrop's wrapped repeats.
+         * A sky ceiling BELOW the camera -- a courtyard seen from a ledge --
+         * projects under the horizon and must not be clamped. */
+        r_sky_span_add(lo, hi, fx(sec->ceilingheight) > cur_cam->z);
     }
     const r_polypt_t *pts = &r_regionpts[rg->firstpt];
 
@@ -1306,7 +1310,12 @@ R_HOT static void render_subsector(int num)
                 debugf("sk: seg fsec=%d bsec=%d x=%d..%d\n",
                        (int)(front - sectors), (int)(back - sectors), x1, x2);
 #endif
-            r_sky_span_add(x1, x2);
+            /* BOTH ceilings, since the opening runs between them: the sky
+             * shows down to the lower of the two, so it is the lower one that
+             * has to clear the eye for the horizon clamp to hold. */
+            r_sky_span_add(x1, x2,
+                           fx(front->ceilingheight) > cur_cam->z &&
+                           fx(back->ceilingheight)  > cur_cam->z);
         }
 
         if (fceil > bceil && !sky_upper) {       /* upper */

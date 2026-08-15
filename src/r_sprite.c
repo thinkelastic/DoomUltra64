@@ -924,15 +924,15 @@ void r_reflect_flush(const r_camera_t *cam)
             const float y_bot = cy - (zi_lo - cam->z) * j->scale_y;
             if (y_bot < 0.0f || y_top > (float)SCREEN_H) continue;
 
-            /* Ray-plane crossing depth per edge; one tile spans little
-             * enough screen that the hyperbola-vs-linear error stays
-             * inside the margins. The bias is +2^-6: reflective flats
-             * draw pushed 2^-5 deeper (r_flat.c REFL_PLANE_PUSH), so a
-             * ghost lands between the true plane and the pushed surface
-             * -- it wins exactly the pixels the mirroring flat wrote and
-             * loses same-height non-reflective neighbours, which the
-             * crossing depth alone cannot tell apart. Both margins are
-             * double the flat pass's worst banding sag (~2^-7). */
+            /* Ray-plane crossing depth per edge -- the depth at which the
+             * eye ray to the mirrored point meets the pool, which is where
+             * the image belongs. One tile spans little enough screen that
+             * the hyperbola-vs-linear error stays inside the margins.
+             *
+             * (The 2^-5/2^-6 constant-bias scheme this comment used to
+             * describe, and r_flat.c's REFL_PLANE_PUSH with it, are gone --
+             * see the depth-proportional form below. No such symbol exists
+             * in the tree.) */
             const float dc_hi = j->depth * eh / (cam->z - zi_hi);
             const float dc_lo = j->depth * eh / (cam->z - zi_lo);
             /* The ghost must sit NEARER than the pool's own z but by an
@@ -940,12 +940,28 @@ void r_reflect_flush(const r_camera_t *cam)
              * z-space. A constant 2^-6 bias swallowed hundreds of world
              * units at distance -- monsters plainly in front of a far
              * pool lost the z-fight and the mirror drew through them.
-             * The margins in depth-proportional form: the pool draws at
-             * 1 - 3.5/d (FLAT_Z_NEAR) sagging at most ~0.67/d under its
-             * banding; the ghost at 1 - 4.5/dc undercuts sag with margin
-             * at every distance, and any occluder nearer than 8/9 of the
-             * pool's depth beats the ghost -- so only things practically
-             * standing IN the pool lose, which is what a mirror wants. */
+             *
+             * Depth-proportional instead: the pool draws at 1 - FLAT_Z_NEAR/d
+             * sagging at most ~0.67/d under its banding, and the ghost at
+             * 1 - REFL_Z_NEAR/dc with REFL_Z_NEAR one whole unit ahead --
+             * so it undercuts the sag with margin at every distance. That
+             * part is right by construction and tracks FLATZ automatically.
+             *
+             * WHAT DOES NOT TRACK is the margin over everything ELSE, and
+             * these numbers were written when FLATZ was 3.5 and the ghost
+             * 4.5. At 4.3 and 5.3 the ghost's lead over the WALLS' 4.0 grew
+             * from 1.125x to 1.325x, so an occluder must now be nearer than
+             * 4.0/5.3 = 75% of the pool's crossing depth to win, where it
+             * used to be 8/9 = 89%. The zone in which the mirror wrongly
+             * draws over something standing in front of it went from 11% of
+             * the pool's depth to 25% -- the very artifact the paragraph
+             * above says was fixed.
+             *
+             * It cannot be tuned out here: the +1.0 is load-bearing against
+             * the banding sag, so the ghost is pinned to FLAT_Z_NEAR + 1 and
+             * its lead over the walls is whatever FLATZ makes it. Lowering
+             * FLATZ is the lever, and it pays three ways at once -- flats,
+             * sprites (see the bias stack in r_flat.h) and this. */
             float z_hi = 1.0f - R_REFL_Z_NEAR / dc_hi;
             float z_lo = 1.0f - R_REFL_Z_NEAR / dc_lo;
             if (z_hi > 1.0f) z_hi = 1.0f;

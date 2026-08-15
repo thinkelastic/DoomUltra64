@@ -1101,6 +1101,29 @@ int main(void)
 #endif
         rdpq_clear_z(0xFFFC);
 
+#if R_BARSCISSOR
+        /* Do not rasterise the world under the status bar.
+         *
+         * The bar is opaque and reaches the bottom edge exactly, so every
+         * world pixel at or below V_BarBandTop() is overpainted before the
+         * frame is shown -- and those are the NEAREST rows on screen, where
+         * the floor fans are largest and the z buffer is busiest. At 480 rows
+         * the band is 320x64 = 20,480 pixels of colour write, z read and z
+         * write, per level frame, thrown away after the fact.
+         *
+         * The CLEARS stay full-screen deliberately. They are cheap in FILL
+         * mode, they cost nothing extra for the band, and they guarantee no
+         * uninitialised texel survives anywhere -- including the frames where
+         * the predicate below is false and the world reaches the bottom.
+         *
+         * Restored before D_AutomapDraw: the automap and the UI bracket both
+         * draw into the band and must not be clipped. */
+        int D_BarBandDrawn(void);
+        int V_BarBandTop(void);
+        const bool world_scissored = D_BarBandDrawn() != 0;
+        if (world_scissored)
+            rdpq_set_scissor(0, 0, SCREEN_W, V_BarBandTop());
+#endif
 
         r_flat_begin();
         r_sprite_begin();
@@ -1199,6 +1222,12 @@ int main(void)
               r_halo_flush(&cam);
           if (level_loaded && D_InLevel() && !D_AutomapActive())
               r_vapor_flush(&cam); }
+
+#if R_BARSCISSOR
+        /* Full screen again for everything that draws INTO the band: the
+         * automap, the status bar itself, messages, the menu and the melt. */
+        if (world_scissored) rdpq_set_scissor(0, 0, SCREEN_W, SCREEN_H);
+#endif
 
         /* The automap replaces the view: filled-triangle line quads in their
          * own mode block, before the COPY-mode UI bracket below. */

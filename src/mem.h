@@ -34,8 +34,20 @@
  * console has: the intermission loads its art while the finished
  * level's is still resident, and how much room is left decides
  * whether it draws at all. */
+/* 2304, not 2048, and the extra 256 KB is exactly what MEM_LEVEL_ARENA below
+ * stopped reserving -- so this costs the machine nothing.
+ *
+ * 2048 was measured too close to the wall to survive Doom II. The Aug 12
+ * hardware session peaked at 1914 KB on the DOOM demo maps; adding the
+ * map-independent sprite and UI residue to a Doom II map's larger static
+ * texture set projects past 2048. The failure mode is the reason this is
+ * worth pre-empting rather than waiting to observe: read_whole_file returns
+ * NULL without setting dt64_last_absent, so tex_resolve_pfx takes the
+ * RETRYABLE branch and re-storms dfs_open and debugf every frame the missing
+ * texture is referenced -- a frame-rate collapse that reads like a renderer
+ * bug rather than an allocation failure. */
 #ifndef MEM_TEXTURE_ARENA
-#define MEM_TEXTURE_ARENA   (2 * 1024 * 1024)
+#define MEM_TEXTURE_ARENA   (2304 * 1024)
 #endif
 
 /* Reserved for sprite frames, and never used: dt64_load puts every texture,

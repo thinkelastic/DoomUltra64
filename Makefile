@@ -246,6 +246,88 @@ N64_CFLAGS += -DR_SPRFADE=$(SPRFADE)
 SPROCCL ?= 1
 N64_CFLAGS += -DR_SPROCCL=$(SPROCCL)
 
+# BARSCISSOR=1 stops the world passes rasterising under the status bar.
+#
+# The bar is opaque and reaches the bottom edge exactly -- 208+32 at 240 rows,
+# 416+64 at 480 -- so every world pixel beneath it is overpainted before the
+# frame is shown. Those are also the NEAREST rows on screen, where the floor
+# fans are largest and the z buffer busiest: at 480 the band is 320x64 =
+# 20,480 pixels of colour write plus a z read and a z write, discarded after
+# the fact, every level frame. Roughly 0.33 ms of pure fill and ~123 KB of
+# RDRAM traffic.
+#
+# This is the best value-per-risk item the 480i audit found, and it matters
+# more at 480i than at 240p for the ordinary reason: the RDP's spare capacity
+# was measured at 40% when the frame was half as tall.
+#
+# The clears stay FULL SCREEN on purpose -- they are cheap in FILL mode and
+# they guarantee no uninitialised texel anywhere -- and the scissor is lifted
+# before the automap, the bar and the menu, all of which draw into the band.
+# It applies only on frames where the bar is actually drawn (D_BarBandDrawn:
+# GS_LEVEL and gametic != 0), so the pre-first-tic frame is untouched.
+BARSCISSOR ?= 1
+N64_CFLAGS += -DR_BARSCISSOR=$(BARSCISSOR)
+
+# BARCOPY=1 re-blits the composited status bar in COPY mode at any resolution.
+#
+# V_BeginUI refuses COPY unless the screen is exactly 320x240, because COPY
+# cannot MAGNIFY: it moves four texels a clock and DSDX steps S once per
+# four-pixel group. That reasoning is HORIZONTAL and it does not reach this
+# blit, which magnifies on neither axis -- V_BarComposite has already resolved
+# the 320x240 art into a real-pixel strip, and every rectangle is emitted at
+# exactly the size of the sub-surface it samples. r_wipe.c has been doing the
+# same 1:1 RGBA16 tile blit at 480 rows since the melt moved onto the RDP.
+#
+# 20,480 px at four texels a clock instead of one: ~0.33 ms to ~0.08, every
+# in-level frame. 0 falls back to the shared bracket's mode.
+#
+# Only the 1:1 strip is claimed here. The SCALED half of the UI -- psprites
+# and the composite itself -- stays on the standard path: whether the RDP's
+# four-texel COPY group honours a fractional DtDy on silicon is unproven, and
+# the failure would be a one-row phase shift in the glyphs. That one wants a
+# photograph of a real screen, not an argument.
+BARCOPY ?= 1
+N64_CFLAGS += -DR_BARCOPY=$(BARCOPY)
+
+# SKYCLAMP=1 stops the sky backdrop drawing below the horizon.
+#
+# Doom's sky wraps: 128 texture rows on a 200-row screen, repeated downward,
+# because the repeats "sit below the horizon and are almost always behind
+# world geometry". The sky pass runs LAST and depth-tested, so almost always
+# is not good enough -- every one of those pixels costs a pipe cycle and a
+# 16-bit z read to lose its compare. At 480 rows the repeat is a whole second
+# band: ~55,000 px a frame plus its own TMEM uploads, drawn to be rejected.
+#
+# It cannot show, for a geometric reason rather than a statistical one. A sky
+# ceiling at height ch projects to y = cy - (ch - camz)*focal_y/d, and this
+# renderer has no pitch, so cy is SCREEN_H/2 always. With ch above the eye
+# that second term is positive at every depth: y stays strictly above the
+# horizon and only approaches it as d runs to infinity.
+#
+# The converse is real, which is why the walk accumulates a flag instead of
+# this being unconditional: stand on a high ledge over an outdoor courtyard
+# and its sky ceiling is BELOW your eye, so the sky legitimately appears under
+# the horizon. Any such opening clears the flag and the clamp is abandoned for
+# the whole frame. Two rows of slack are added over the exact bound, because
+# the endpoints are floats and a black seam along the horizon would cost far
+# more than 640 pixels.
+#
+# KNOW THE FAILURE MODE BEFORE TRUSTING THIS. It is the bad one: where the
+# unclamped pass used to paint a wrapped (and arguably wrong-looking) sky over
+# a pixel the world left uncovered, the clamped pass paints nothing and the
+# black clear shows through. It does not CREATE coverage gaps -- a gap below
+# the horizon means world geometry was already missing there, e.g. a flat
+# region dropped at the polygon-pool ceiling -- but it does convert a subtle
+# artifact into an obvious one. That is why the frame's colour clear is
+# unconditional in the first place.
+#
+# So it is on, but it is not yet PROVEN: a POSEHASH abdiff over a sky-heavy
+# route should be hash-identical, and a D_CLEARCOL probe build should leave no
+# magenta pixel where sky belongs. SKYCLAMP=0 is the instant fallback if a
+# black band appears along or below the horizon.
+SKYCLAMP ?= 1
+N64_CFLAGS += -DR_SKYCLAMP=$(SKYCLAMP)
+
 # CLEARCOL=r,g,b paints the framebuffer clear that colour instead of black.
 # A gap probe: any pixel no primitive covered keeps it, so two builds with
 # different values differ on exactly the holes and nowhere else.

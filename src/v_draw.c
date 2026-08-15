@@ -296,6 +296,23 @@ int V_BarCaptureEnd(void)
 
 int V_BarValid(void) { return bar_surf_valid && !bar_legacy; }
 
+/* The first screen row the status bar owns.
+ *
+ * The bar is opaque and reaches the bottom edge exactly -- V_STBAR_DEST_PX +
+ * V_BAR_H_PX is 208+32 at 240 rows and 416+64 at 480 -- so every world pixel
+ * drawn at or below this row is painted over before the frame is shown. The
+ * world passes scissor to it (see main.c): at 480 that is 320x64 = 20,480
+ * pixels of the NEAREST, densest, z-buffered fill removed from every level
+ * frame, which the RDP feels twice over in fill and in z traffic.
+ *
+ * Exported as a function because the two quantities are file-local macros
+ * built on UI_YSCALE, and the caller must not re-derive them: the whole
+ * artifact class this replaced came from the pixel and 320x240 frames being
+ * mixed up. Both paths cover the band -- the composited strip and the
+ * ST_Drawer fallback draw the same rows -- so this does not depend on which
+ * one runs. */
+int V_BarBandTop(void) { return V_STBAR_DEST_PX; }
+
 /* Replay the committed list once into the persistent offscreen strip.
  * Runs at the frame loop's no-attach point (the same slot r_wipe_start's
  * blit proved out); rdpq_detach enqueues the SYNC_FULL that orders these
@@ -343,6 +360,24 @@ void V_BarBlit(void)
     /* RGBA16 must not sample through the TLUT, and the 4 KB tiles clobber
      * the TLUT half of TMEM -- rebind for the CI8 text that follows. */
     rdpq_mode_tlut(TLUT_NONE);
+
+#if R_BARCOPY
+    /* COPY mode, even at 480 rows, and the gate in V_BeginUI does not apply.
+     *
+     * That gate refuses COPY whenever the screen is not 320x240, because COPY
+     * cannot MAGNIFY -- it moves four texels a clock and DSDX steps S once per
+     * four-pixel group. But the hazard it describes is HORIZONTAL, and this
+     * blit does not magnify on either axis: every rectangle below is emitted
+     * at exactly the size of the sub-surface it samples, in real pixels, with
+     * the 320x240 frame already resolved into the strip by V_BarComposite.
+     * The identical operation runs at 480 rows a few files away -- the melt's
+     * capture and replay in r_wipe.c are the same 1:1 RGBA16 tile blits.
+     *
+     * Four texels a clock instead of one: 20,480 px from ~0.33 ms to ~0.08.
+     * `false` because the strip is composited over an opaque clear and nothing
+     * here depends on per-texel alpha. */
+    rdpq_set_mode_copy(false);
+#endif
     /* 64x32 tiles, and the 32 is not decoration: RGBA16 at that size is
      * 4096 bytes, which is exactly the TMEM available beside the TLUT. The
      * strip was one tile tall while it was 32 rows, so the y loop did not
@@ -360,6 +395,14 @@ void V_BarBlit(void)
             r_tri_spr++;
         }
     }
+#if R_BARCOPY
+    /* set_mode_copy replaced the whole render mode, not just the cycle type,
+     * so the bracket has to be re-established before the messages and menu
+     * that follow -- V_BeginUI is what owns that decision (including whether
+     * THEY may use COPY at this resolution), so ask it rather than restating
+     * it here. It also re-binds the TLUT state below. */
+    V_BeginUI();
+#endif
     dt64_bind_tlut();
     rdpq_mode_tlut(TLUT_RGBA16);
 }
