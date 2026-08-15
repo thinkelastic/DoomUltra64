@@ -80,9 +80,14 @@ void V_RestoreBuffer(void)
 void V_BeginUI(void)
 {
     ui_active = true;
-#if UI_XSCALE == 1
+/* A RUNTIME test now, not a #if. The question is the same -- is the UI
+ * drawn 1:1, in which case COPY mode's four texels a clock apply -- but
+ * the answer changes when the detail menu does, so it cannot be decided
+ * at compile time. COPY mode cannot magnify (see below), so any scaled
+ * mode has to take the standard path. */
+    if (SCREEN_W == SCREEN_BASE_W && SCREEN_H == SCREEN_BASE_H) {
     rdpq_set_mode_copy(true);
-#else
+    } else {
     /* COPY mode cannot magnify.
      *
      * It moves four texels per clock, and DSDX steps S once per four-pixel
@@ -102,7 +107,7 @@ void V_BeginUI(void)
     rdpq_mode_alphacompare(1);        /* same transparent-index cutout */
     rdpq_mode_filter(FILTER_POINT);   /* palette art: never interpolate */
     rdpq_mode_zbuf(false, false);     /* overlay; modes persist, so be explicit */
-#endif
+    }
     rdpq_mode_tlut(TLUT_RGBA16);
 }
 
@@ -141,7 +146,19 @@ void V_SetXShift(int shift) { v_xshift = shift; }
 typedef struct { const dt64_tex_t *tex; int16_t x, y; } v_barcmd_t;
 _Static_assert(sizeof(v_barcmd_t) == 8, "capture entry packs to 8 bytes");
 #define V_BARCMD_MAX 64          /* worst real case ~47 (netgame+deathmatch) */
-#define V_BAR_H      32          /* == ST_HEIGHT */
+#define V_BAR_H      32          /* == ST_HEIGHT, in the 320x240 frame */
+
+/* The same two quantities in REAL PIXELS.
+ *
+ * The offscreen strip is a piece of framebuffer, so it is sized and placed
+ * in pixels -- while everything composited INTO it arrives in the 320x240
+ * frame and is magnified by v_blit_at on the way. Keeping the two spaces
+ * apart matters the moment they differ: at 480 rows the strip stayed 32 px
+ * tall while the art inside doubled to 64 and was clipped to its top half,
+ * and the blit put it at row 208 of a 480-line screen -- a half-height
+ * status bar across the middle of the picture. */
+#define V_BAR_H_PX      ((int)(V_BAR_H * UI_YSCALE))
+#define V_STBAR_DEST_PX ((int)(V_STBAR_DEST * UI_YSCALE))
 static v_barcmd_t bar_cur[V_BARCMD_MAX], bar_prev[V_BARCMD_MAX];
 static int  bar_cur_n, bar_prev_n = -1;   /* -1 forces the first composite */
 static int  bar_prev_bank = -1;
@@ -189,7 +206,8 @@ static void v_blit_at(const dt64_tex_t *tex, float ox, float oy)
 
             const float x0 = (ox + (float)s0) * UI_XSCALE;
             const float x1 = (ox + (float)s1) * UI_XSCALE;
-            const float y0 = oy + (float)t0, y1 = oy + (float)t1;
+            const float y0 = (oy + (float)t0) * UI_YSCALE;
+            const float y1 = (oy + (float)t1) * UI_YSCALE;
             if (x1 < 0.0f || x0 > (float)SCREEN_W) continue;
             if (y1 < 0.0f || y0 > (float)SCREEN_H) continue;
 
@@ -234,6 +252,24 @@ void V_DrawResetCache(void)
     bar_legacy = false;
 }
 
+/* Drop the composited strip's SURFACE, not just its contents.
+ *
+ * V_DrawResetCache invalidates what the strip holds and keeps the
+ * allocation, which is right across a level swap because the screen has
+ * not changed shape. A resolution change is the case where the allocation
+ * itself is wrong: the strip is SCREEN_W wide and V_BAR_H_PX tall, and
+ * both of those just moved. Freed here and lazily reallocated at the new
+ * size by the next V_BarComposite. */
+void V_BarFreeSurface(void)
+{
+    if (bar_surf.buffer) surface_free(&bar_surf);
+    bar_surf = (surface_t){0};
+    bar_prev_n = -1;
+    bar_prev_bank = -1;
+    bar_surf_valid = false;
+    bar_legacy = false;
+}
+
 /* Begin recording the bar's draws instead of emitting them. */
 void V_BarCaptureBegin(void)
 {
@@ -268,13 +304,23 @@ void V_BarComposite(void)
 {
     if (bar_legacy) return;
 
+    /* Same self-check as the melt's capture: a strip allocated for another
+     * screen size is the wrong shape for this one, and reusing it puts the
+     * bar somewhere other than the bottom of the picture. */
+    if (bar_surf.buffer &&
+        (bar_surf.width != SCREEN_W || bar_surf.height != V_BAR_H_PX)) {
+        surface_free(&bar_surf);
+        bar_surf = (surface_t){0};
+        bar_surf_valid = false;
+    }
+
     if (!bar_surf.buffer) {
-        bar_surf = surface_alloc(FMT_RGBA16, SCREEN_W, V_BAR_H);
+        bar_surf = surface_alloc(FMT_RGBA16, SCREEN_W, V_BAR_H_PX);
         if (!bar_surf.buffer) { bar_legacy = true; return; }
         /* Stale dirty lines from allocation would write back over RDP
          * pixels; once, here -- the CPU never touches the buffer again. */
         data_cache_hit_writeback_invalidate(bar_surf.buffer,
-                                            (size_t)bar_surf.stride * V_BAR_H);
+                                            (size_t)bar_surf.stride * V_BAR_H_PX);
     }
 
     rdpq_attach(&bar_surf, NULL);
@@ -297,12 +343,22 @@ void V_BarBlit(void)
     /* RGBA16 must not sample through the TLUT, and the 4 KB tiles clobber
      * the TLUT half of TMEM -- rebind for the CI8 text that follows. */
     rdpq_mode_tlut(TLUT_NONE);
-    for (int tx = 0; tx < SCREEN_W; tx += 64) {
-        surface_t t = surface_make_sub(&bar_surf, tx, 0, 64, V_BAR_H);
-        rdpq_tex_upload(TILE0, &t, NULL);
-        rdpq_texture_rectangle(TILE0, tx, V_STBAR_DEST,
-                               tx + 64, V_STBAR_DEST + V_BAR_H, 0, 0);
-        r_tri_spr++;
+    /* 64x32 tiles, and the 32 is not decoration: RGBA16 at that size is
+     * 4096 bytes, which is exactly the TMEM available beside the TLUT. The
+     * strip was one tile tall while it was 32 rows, so the y loop did not
+     * exist; at 480 the strip is 64 rows and a single 64x64 upload asks for
+     * 8 KB, which the RDP refuses outright. Tiled on both axes it stays at
+     * the same 4 KB per upload whatever the strip's height. */
+    for (int ty = 0; ty < V_BAR_H_PX; ty += 32) {
+        const int th = ty + 32 > V_BAR_H_PX ? V_BAR_H_PX - ty : 32;
+        for (int tx = 0; tx < SCREEN_W; tx += 64) {
+            const int tw = tx + 64 > SCREEN_W ? SCREEN_W - tx : 64;
+            surface_t t = surface_make_sub(&bar_surf, tx, ty, tw, th);
+            rdpq_tex_upload(TILE0, &t, NULL);
+            rdpq_texture_rectangle(TILE0, tx, V_STBAR_DEST_PX + ty,
+                                   tx + tw, V_STBAR_DEST_PX + ty + th, 0, 0);
+            r_tri_spr++;
+        }
     }
     dt64_bind_tlut();
     rdpq_mode_tlut(TLUT_RGBA16);

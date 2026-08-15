@@ -103,21 +103,51 @@ N64_CFLAGS += -DR_FLATDBG=$(FLATDBG)
 # T-junction hairlines that neighbouring BSP cells would otherwise leave.
 # It buys that by making neighbours OVERLAP -- which is fine at different
 # heights, where depth settles it, and is exactly the stray-coloured-line
-# seam artifact where two COPLANAR floors of different art meet. 0 removes
-# the overlap and should re-open the cracks it was hiding; negative shrinks
-# the polygons and opens them unmistakably, which is the falsification.
-FLATNUDGE ?= 75
+# seam artifact where two COPLANAR floors of different art meet.
+#
+# DEFAULT 0 NOW, deliberately. With AA off the RDP writes a pixel only if
+# its corner sample is inside the span (see 29ebf85), so the cure for
+# seams is not overlap but IDENTICAL boundary chains on both sides --
+# which the nudge destroys (it rotates each side's copy of the boundary
+# by pushing shared vertices toward different centroids). The weld below,
+# the shared band ladder and the canonical clip interpolation are what
+# make the chains identical; the nudge would undo all three.
+FLATNUDGE ?= 0
 N64_CFLAGS += -DR_FLATNUDGE=$(FLATNUDGE)
 
 # FLATWELD=1 welds T-junctions at load: where one cell's corner lands
 # partway along a neighbour's edge, the neighbour gains that corner as a
-# vertex, so both sides interpolate the same boundary and no overlap is
-# needed to hide a hairline. Written to let FLATNUDGE go to 0. It does
-# fire -- 385 vertices on E1M1 -- and it does NOT fix the reported seam,
-# which is why it is off: it changes every floor's geometry for no
-# observed benefit. Kept because the mechanism is sound on its own terms.
-FLATWELD ?= 0
+# vertex -- copied verbatim, so both sides carry the same floats and
+# interpolate the same boundary. Written to let FLATNUDGE go to 0; ON by
+# default now that the corner-sample write rule is understood, because
+# identical chains are the fix and a T-junction is one of the three ways
+# the chains diverged (the others: the per-polygon band series and the
+# traversal-direction interpolation, both fixed in r_flat.c).
+FLATWELD ?= 1
 N64_CFLAGS += -DR_FLATWELD=$(FLATWELD)
+
+# SEGLINE=1 trims each BSP cell by its seg's LINEDEF, rather than by the
+# line through the seg's own two vertices.
+#
+# They should be the same line. They are not, and the gap is not small: the
+# node builder writes split vertices back to the VERTEXES lump as 16-bit
+# INTEGERS, so a vertex it created lands up to ~0.7 units off the linedef it
+# was cut from. On a long seg that is a slight tilt; on a short one it is an
+# ANGLE, and the clip extends that line across the whole cell. Over
+# DOOM.WAD, 289 segs on two-sided lines move their cell boundary more than
+# half a unit at 128 units out and 181 move it more than a unit -- worst
+# case 11 degrees, from a 3.6-unit seg (tools/segline.py measures this).
+#
+# Both subsectors either side of a two-sided line then derive their shared
+# boundary from their OWN rounded seg, so the two land on different lines
+# and leave a sliver -- the residual stair-area diagonals left after the
+# chain-identity fix, and the reason FLATNUDGE used to be needed to paper
+# over them. A linedef's endpoints are original map vertices and are shared
+# by both sides, so clipping by it puts both boundaries on one identical
+# line. The weld above then closes what is left, which is only along-line
+# T-junctions. 0 restores the seg-endpoint clip.
+SEGLINE ?= 1
+N64_CFLAGS += -DR_SEGLINE=$(SEGLINE)
 
 # VERTEXROUND=<tenths of a quarter-pixel> biases triangle vertices before
 # they are floored to the RDP's s13.2 grid: +5 is half a step up, -5 half
@@ -253,6 +283,25 @@ N64_CFLAGS += -DD_INTERP=$(INTERP)
 # are not what the number is showing you.
 WIDE ?= 0
 N64_CFLAGS += -DR_WIDE=$(WIDE)
+
+# HIRES=1 selects 512x480 INTERLACED (480i) instead of the 240p modes,
+# stretched to 4:3 with no borders.
+#
+# 512 rather than 640 on purpose. The costs above are indexed per screen
+# COLUMN -- that is what took the demo route from 16.9 to 21.3 ms median at
+# 640x240 -- so 512 pays four fifths of that CPU price, and 3.2x the fill
+# rather than 4x. It also leaves the melt's saved frame enough heap to
+# exist, which 640x480 does not. The rows are what the RDP feels: twice
+# the fill, twice the z traffic. Expect the constraint to move from the
+# CPU to the RDP.
+#
+# The buffer set still drops from three to two, because three 480 KB
+# buffers plus the z buffer do not fit in what the arenas leave (main.c).
+#
+# 480i on a CRT interlace-flickers high-contrast horizontal detail -- the
+# status bar is the worst case. That is the format, not the port.
+HIRES ?= 0
+N64_CFLAGS += -DR_HIRES=$(HIRES)
 
 # HWSTAT=1 draws the frame-time/pose line at the top of the screen and emits
 # the USB telemetry. Off for normal play; the debugging workflow described in

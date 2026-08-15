@@ -59,6 +59,13 @@ static inline void rdpq_set_fog_color(color_t c) { (void)c; }
 static inline void rdpq_mode_fog(int f) { (void)f; }
 static inline void rdpq_mode_filter(rdpq_filter_t f) { (void)f; }
 
+/* Antialiasing. The mock rasterises with a single sample per pixel, which
+ * IS the AA_NONE behaviour r_wall_modes asserts, so the stub models the
+ * only setting the port ever asks for. Missing entirely until now, which
+ * silently broke the host harness the moment that assertion landed. */
+typedef enum { AA_NONE = 0, AA_STANDARD = 1, AA_REDUCED = 2 } rdpq_antialias_t;
+static inline void rdpq_mode_antialias(rdpq_antialias_t a) { (void)a; }
+
 /* Mode bits the mock does not model. Worth naming explicitly rather than
  * omitting: SOM_TEXTURE_PERSP being off by default is exactly the kind of
  * state difference a software model silently hides, and it cost several

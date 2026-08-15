@@ -249,8 +249,10 @@ static bool span_of_bbox(float xl, float yl, float xh, float yh,
 typedef struct { int first, last; } cliprange_t;
 
 /* A range needs at least two columns to be worth recording, so the list can
- * never exceed half the screen width, plus the two sentinels. */
-#define MAXSEGS (SCREEN_W / 2 + 2)
+ * never exceed half the screen width, plus the two sentinels. Sized from
+ * the WIDEST screen, since the width is now a runtime choice and a
+ * file-scope array cannot follow it. */
+#define MAXSEGS (SCREEN_MAX_W / 2 + 2)
 
 static cliprange_t  solidsegs[MAXSEGS];
 static cliprange_t *newend;
@@ -274,8 +276,27 @@ static cliprange_t *newend;
  * behind a doorway's lintel or sill. Unlike the solid-segment list alone,
  * a column only ever counts as covered when drawn geometry actually closed
  * it -- which is what keeps sky from leaking through corridor ceilings. */
-static uint8_t clip_top[SCREEN_W];
-static uint8_t clip_bot[SCREEN_W];
+/* A column value spans 0..SCREEN_H INCLUSIVE, so the type has to hold
+ * SCREEN_H itself. At 240 that is a byte and these arrays stay small and
+ * cache-resident, which matters because clip_window is the hottest read in
+ * the traversal. At 480 it is not a byte, and the failure would have been
+ * silent rather than loud: memset(clip_bot, 480, ...) writes 224 to every
+ * column, which reads as a window narrower than the screen and culls real
+ * geometry. Widened only where it must be. */
+/* Sixteen bits unconditionally now. It was a byte whenever SCREEN_H fitted
+ * in one, which was every mode while the height was fixed at compile time
+ * -- but the height is chosen at RUNTIME by the detail menu, so the type
+ * has to hold the largest it can become. The cost is a wider load in
+ * clip_window, the hottest read in the traversal; the alternative is an
+ * array whose element type disagrees with the values being stored in it. */
+typedef uint16_t clipv_t;
+/* The "no top seen yet" sentinel for a min-reduction: any value at or above
+ * SCREEN_H, held at the type's max so it can never be mistaken for a real
+ * closure. */
+#define CLIP_T_MAX ((clipv_t)~(clipv_t)0)
+
+static clipv_t clip_top[SCREEN_MAX_W];
+static clipv_t clip_bot[SCREEN_MAX_W];
 
 /* Loosest-window summaries per 16-column block. clip_window is the hottest
  * read in the traversal -- every node child, flat region and emit range asks
@@ -286,16 +307,20 @@ static uint8_t clip_bot[SCREEN_W];
  * a min/max over a block is by construction the block's loosest values, so
  * the block path returns byte-identical results to the column scan. */
 #define CLIP_BLK_SHIFT 4
-#define CLIP_NBLK ((SCREEN_W + 15) >> CLIP_BLK_SHIFT)
-static uint8_t clip_blk_top[CLIP_NBLK];
-static uint8_t clip_blk_bot[CLIP_NBLK];
+/* Blocks actually in use at the current width, and the compile-time count
+ * the arrays are sized for. Only the first CLIP_NBLK entries are ever
+ * touched; the rest sit idle at the narrower modes. */
+#define CLIP_NBLK     ((SCREEN_W + 15) >> CLIP_BLK_SHIFT)
+#define CLIP_NBLK_MAX ((SCREEN_MAX_W + 15) >> CLIP_BLK_SHIFT)
+static clipv_t clip_blk_top[CLIP_NBLK_MAX];
+static clipv_t clip_blk_bot[CLIP_NBLK_MAX];
 
 static void clip_blk_refresh_one(int b)
 {
     const int lo = b << CLIP_BLK_SHIFT;
     int hi = lo + (1 << CLIP_BLK_SHIFT);
     if (hi > SCREEN_W) hi = SCREEN_W;
-    uint8_t t = 255, bo = 0;
+    clipv_t t = CLIP_T_MAX, bo = 0;
     for (int x = lo; x < hi; x++) {
         if (clip_top[x] < t) t = clip_top[x];
         if (clip_bot[x] > bo) bo = clip_bot[x];
@@ -410,8 +435,8 @@ static void clip_narrow(int x1, int x2,
         if (b < 0) b = 0;
         if (b > SCREEN_H) b = SCREEN_H;
 
-        if (t > clip_top[x]) { clip_top[x] = (uint8_t)t; if (x < mn) mn = x; mx = x; }
-        if (b < clip_bot[x]) { clip_bot[x] = (uint8_t)b; if (x < mn) mn = x; mx = x; }
+        if (t > clip_top[x]) { clip_top[x] = (clipv_t)t; if (x < mn) mn = x; mx = x; }
+        if (b < clip_bot[x]) { clip_bot[x] = (clipv_t)b; if (x < mn) mn = x; mx = x; }
         x++;
     }
     if (mx >= 0) clip_blk_refresh(mn, mx);
@@ -423,7 +448,7 @@ R_HOT static void clip_window(int x1, int x2, float *top, float *bot)
 {
     if (x1 < 0) x1 = 0;
     if (x2 > SCREEN_W - 1) x2 = SCREEN_W - 1;
-    uint8_t t = 255, b = 0;
+    clipv_t t = CLIP_T_MAX, b = 0;
 
     int x = x1;
     while (x <= x2) {
@@ -453,10 +478,14 @@ static void clip_reset(void)
     solidsegs[1].first = SCREEN_W;    solidsegs[1].last =  0x7fffffff;
     newend = solidsegs + 2;
 
+    /* Zero fills byte-wise whatever the element width, so the closed edge
+     * still memsets over the whole array. The open edge is a value no
+     * memset can spread across a 16-bit element, and only the columns in
+     * use need it. */
     memset(clip_top, 0, sizeof clip_top);
-    memset(clip_bot, SCREEN_H, sizeof clip_bot);
     memset(clip_blk_top, 0, sizeof clip_blk_top);
-    memset(clip_blk_bot, SCREEN_H, sizeof clip_blk_bot);
+    for (int x = 0; x < SCREEN_W; x++)  clip_bot[x] = (clipv_t)SCREEN_H;
+    for (int b = 0; b < CLIP_NBLK; b++) clip_blk_bot[b] = (clipv_t)SCREEN_H;
 }
 
 /* Half a pixel of overlap on each side of a clipped span.

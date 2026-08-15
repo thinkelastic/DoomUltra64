@@ -73,7 +73,17 @@ int			showMessages = 1;
 	
 
 // Blocky mode, has default, 0 = high, 1 = normal
-int			detailLevel = 0;
+/* DoomN64: this port spends GRAPHIC DETAIL on RESOLUTION rather than on
+ * vanilla's pixel doubling -- HIGH is 512x480 interlaced, LOW is 320x240
+ * (see R_SetViewSize in d_bridge.c). Nothing persists it: m_config.c is not
+ * compiled here, so M_LoadDefaults never runs and this initialiser IS the
+ * stored setting. LOW by default, because it is the mode that holds frame
+ * rate; HIGH is the one you opt into.
+ *
+ * Derived from the build's boot mode so the two cannot disagree: a HIRES=1
+ * ROM comes up at 480i and would otherwise be dropped to LOW the moment
+ * Doom called R_SetViewSize during startup. */
+int			detailLevel = R_HIRES ? 0 : 1;
 int			screenblocks = 9;
 
 // temp for screenblocks (0-9)
@@ -332,23 +342,25 @@ enum
     endgame,
     messages,
     detail,
-    scrnsize,
-    option_empty1,
-    mousesens,
-    option_empty2,
     soundvol,
     opt_end
 } options_e;
 
+/* DoomN64: SCREEN SIZE and MOUSE SENSITIVITY are both gone, items and
+ * sliders. Screen size sized vanilla's view window down into the status
+ * bar, and this port always draws the full screen (R_SetViewSize in
+ * d_bridge.c ignores `blocks`). Mouse sensitivity has no mouse to scale:
+ * input is a joypad. Both moved and neither did anything.
+ *
+ * The enum above is what positions the sliders -- M_DrawOptions places
+ * each thermo at LINEHEIGHT * (index + 1) -- so an item can only be
+ * removed from the enum and this table together, or the remaining
+ * sliders draw against the wrong rows. */
 menuitem_t OptionsMenu[]=
 {
     {1,"M_ENDGAM",	M_EndGame,'e'},
     {1,"M_MESSG",	M_ChangeMessages,'m'},
     {1,"M_DETAIL",	M_ChangeDetail,'g'},
-    {2,"M_SCRNSZ",	M_SizeDisplay,'s'},
-    {-1,"",0,'\0'},
-    {2,"M_MSENS",	M_ChangeSensitivity,'m'},
-    {-1,"",0,'\0'},
     {1,"M_SVOL",	M_Sound,'s'}
 };
 
@@ -1011,11 +1023,6 @@ void M_DrawOptions(void)
                       W_CacheLumpName(DEH_String(msgNames[showMessages]),
                                       PU_CACHE));
 
-    M_DrawThermo(OptionsDef.x, OptionsDef.y + LINEHEIGHT * (mousesens + 1),
-		 10, mouseSensitivity);
-
-    M_DrawThermo(OptionsDef.x,OptionsDef.y+LINEHEIGHT*(scrnsize+1),
-		 9,screenSize);
 }
 
 void M_Options(int choice)
@@ -1178,6 +1185,12 @@ void M_QuitDOOM(int choice)
 
 
 
+/* DoomN64: the MOUSE SENSITIVITY menu item is gone (see OptionsMenu), and
+ * with no item to reach it this handler has no caller. Kept rather than
+ * deleted -- mouseSensitivity is still read by the input code this port
+ * inherits, and leaving the setter beside it keeps that pairing intact if
+ * a control-options screen ever wants it back. */
+void M_ChangeSensitivity(int choice) __attribute__((unused));
 void M_ChangeSensitivity(int choice)
 {
     switch(choice)

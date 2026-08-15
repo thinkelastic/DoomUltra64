@@ -18,6 +18,7 @@
  * in screen space rather than derived from the viewport: UI art, psprites,
  * and the vertical projection scale. */
 #define SCREEN_BASE_W 320
+#define SCREEN_BASE_H 240
 
 /* R_WIDE=1 selects the N64's 640x240 mode: twice the horizontal sampling
  * rate, the same 240 scanlines, no interlace. See the note on focal_x/focal_y
@@ -26,20 +27,81 @@
 #define R_WIDE 0
 #endif
 
-#if R_WIDE
-#define SCREEN_W 640
-#else
-#define SCREEN_W SCREEN_BASE_W
-#endif
-#define SCREEN_H 240
-
-/* Horizontal magnification for art authored in Doom's 320-wide frame: the UI,
- * the weapon, and the automap.
+/* R_HIRES=1 selects 320x480 INTERLACED (480i): the 240p frame with twice
+ * the scanlines and the SAME 320 columns.
  *
- * Vertical is 1:1 in every mode because SCREEN_H never changes, so this is a
- * pure horizontal double -- which is exactly what makes the wide UI identical
- * in apparent size and shape to the 320 one, since a 640x240 pixel is half as
- * wide as it is tall.
+ * Keeping the columns is the whole point. Everything expensive on the CPU
+ * side of this renderer is indexed per screen COLUMN -- the occlusion
+ * arrays and the loops over them -- which is what took the demo route from
+ * 16.9 to 21.3 ms median at 640x240 while the fill barely registered. At
+ * 320x480 that cost does not move at all; only the RDP's fill doubles.
+ * Against a 512-wide 480i it is 2x the pixels rather than 3.2x, and it
+ * fits THREE buffers in less memory than 512x480 fits two, so the frame
+ * pipelining survives as well.
+ *
+ * The pixels are not square, and that is expected: 320 across a 4:3 frame
+ * makes each one twice as wide as it is tall -- the exact mirror of the
+ * 640x240 mode. Art authored in Doom's 320x200 frame still fills the
+ * screen in its true shape once the magnifications below are applied,
+ * which here means 1x across and 2x down. See the focal note.
+ *
+ * Three consequences follow from the size, each handled where it lands
+ * rather than here:
+ *   - the framebuffer set no longer fits three deep, so main.c takes two
+ *     and gives up a frame of pipelining;
+ *   - the melt's saved frame does still fit at this width, where it would
+ *     not at 640 -- r_wipe.c treats that allocation as optional either way;
+ *   - the per-column occlusion values stop fitting in a byte (r_bsp.c),
+ *     which is a correctness matter, not a tuning one. */
+#ifndef R_HIRES
+#define R_HIRES 0
+#endif
+
+/* The mode the game BOOTS in. It is no longer the mode it stays in: the
+ * options menu's GRAPHIC DETAIL switches between HIGH (512x480) and LOW
+ * (320x240) while the game runs, so the dimensions below are variables and
+ * these are only their initial values. */
+#if R_HIRES
+#define SCREEN_BOOT_W 320
+#define SCREEN_BOOT_H 480
+#elif R_WIDE
+#define SCREEN_BOOT_W 640
+#define SCREEN_BOOT_H SCREEN_BASE_H
+#else
+#define SCREEN_BOOT_W SCREEN_BASE_W
+#define SCREEN_BOOT_H SCREEN_BASE_H
+#endif
+
+/* The largest either dimension can ever reach, and therefore the size of
+ * every array indexed by a screen column or row. These must stay compile
+ * time constants: a screen-indexed array that followed the runtime value
+ * would be a variable-length array whose bound changed under the code
+ * still writing to it, and the failure would be corruption rather than a
+ * wrong pixel. Sized for 640 because WIDE still selects it at boot. */
+#define SCREEN_MAX_W 640
+#define SCREEN_MAX_H 480
+
+/* THE LIVE DIMENSIONS. Macro names kept so the thirty-odd sites that read
+ * them are unchanged; what moved is that they are now loads rather than
+ * constants, which costs the compiler its folding of things like
+ * SCREEN_W * 0.5f. Every one of those is loop-invariant and hoists.
+ *
+ * Only ever written by the display switch in main.c, and only between
+ * frames -- a change halfway through a frame would leave the geometry
+ * already queued at the old size. */
+extern int   r_scr_w, r_scr_h;
+extern float r_scr_uix, r_scr_uiy;
+#define SCREEN_W  r_scr_w
+#define SCREEN_H  r_scr_h
+
+/* Magnification for art authored in Doom's 320x200 frame: the UI, the
+ * weapon, and the automap.
+ *
+ * In WIDE mode the vertical stays 1:1 and this is a pure horizontal double
+ * -- which is exactly what makes the wide UI identical in apparent size and
+ * shape to the 320 one, since a 640x240 pixel is half as wide as it is
+ * tall. HIRES doubles both, because a 640x480 pixel is square again and
+ * art scaled on one axis alone would come out half height.
  *
  * COPY mode survives this. It cannot filter, but it does step S by DSDX per
  * output pixel (libdragon's RSP fixup pre-multiplies by 4 for the copy
@@ -47,7 +109,18 @@
  * point-doubles each texel and still moves four texels per clock. Scaled
  * rectangles are explicitly supported in copy mode; only the FLIP variant is
  * not. */
-#define UI_XSCALE (SCREEN_W / SCREEN_BASE_W)
+/* FLOAT ratios, not integer ones. They were whole numbers while every mode
+ * was a 1x or 2x of the 320x240 frame, and 512 is neither: 512/320 is 1.6,
+ * which integer division would silently flatten to 1 and draw the HUD at
+ * two thirds width down the left of the screen. The scaled coordinates all
+ * feed rdpq_texture_rectangle_scaled, which takes floats anyway.
+ *
+ * The two axes disagreeing (1.6 and 2.0) is not a distortion: at 512x480
+ * stretched to 4:3 a pixel is 1.25 times wider than tall, and 1.6 * 1.25
+ * is exactly 2.0. The art comes out the same apparent shape it has at
+ * 320x240 -- which is the whole requirement. */
+#define UI_XSCALE r_scr_uix
+#define UI_YSCALE r_scr_uiy
 
 typedef struct {
     float x, y, z;     /* Doom convention: x/y is the floor plane, z is up */

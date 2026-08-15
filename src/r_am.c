@@ -52,16 +52,17 @@ void r_am_line(int x0, int y0, int x1, int y1, int palette_index)
     const float nx = -dy / len * AM_HALF;
     const float ny =  dx / len * AM_HALF;
 
-    /* The quad is built entirely in Doom's 320-wide frame and only its X
-     * coordinates are scaled on the way out. Widening the line in the scaled
-     * space instead would halve its apparent thickness at 640x240, where a
-     * pixel is half as wide: this way the line is the 320 line, stretched,
-     * and looks the same. */
-    const float k = (float)UI_XSCALE;
-    const float v0[] = { (ax + nx) * k, ay + ny };
-    const float v1[] = { (bx + nx) * k, by + ny };
-    const float v2[] = { (bx - nx) * k, by - ny };
-    const float v3[] = { (ax - nx) * k, ay - ny };
+    /* The quad is built entirely in Doom's 320x240 frame and scaled on the
+     * way out. Widening the line in the scaled space instead would halve its
+     * apparent thickness at 640x240, where a pixel is half as wide: this way
+     * the line is the 320 line, stretched, and looks the same. At 480 both
+     * axes scale, so the line thickens with everything else rather than
+     * thinning to a hair across a screen with twice the rows. */
+    const float kx = (float)UI_XSCALE, ky = (float)UI_YSCALE;
+    const float v0[] = { (ax + nx) * kx, (ay + ny) * ky };
+    const float v1[] = { (bx + nx) * kx, (by + ny) * ky };
+    const float v2[] = { (bx - nx) * kx, (by - ny) * ky };
+    const float v3[] = { (ax - nx) * kx, (ay - ny) * ky };
     rdpq_triangle(&TRIFMT_AM, v0, v1, v2);
     rdpq_triangle(&TRIFMT_AM, v0, v2, v3);
 }

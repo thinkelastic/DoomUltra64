@@ -121,16 +121,18 @@ static const float flatdbg_col[6][3] = {
 /* The whole bias stack lives in r_flat.h, so walls, flats and sprites
  * cannot be moved out of order independently. */
 #define FLAT_Z_NEAR R_FLAT_Z_NEAR
-/* Eight, not four. Bands step geometrically by FLAT_MAX_DEPTH_RATIO, so
- * the count sets how much depth the invariant actually covers: at the old
- * 4.0 ratio four bands reached 256:1 and spanned any real floor, but
- * tightening the ratio to 2.0 for the hardware's perspective divide
- * silently shrank that to 16:1. Past it the final band is unbounded and
- * breaks the very rule the tighter ratio exists to enforce -- and a
- * corridor floor passes 16:1 easily. Eight bands restore 256:1. Only
- * surfaces that actually span that depth pay for the extra bands; the
- * small-extent early-out below still skips banding entirely for the rest. */
-#define FLAT_MAX_BANDS 8
+/* Fourteen. Bands step geometrically by FLAT_MAX_DEPTH_RATIO, so the
+ * count sets how much depth the invariant actually covers, and the cuts
+ * now land on the GLOBAL octave ladder (see the banding block) rather
+ * than a per-polygon series -- so a polygon's band count is set by which
+ * ladder rungs its depth range crosses, and the count must cover the
+ * whole ladder from the near clip out: fourteen rungs span 2^13:1 from
+ * depth 1, past any real map. A capped ladder would be worse than a
+ * short one: the polygon that hits the cap stops cutting where its
+ * neighbour continues, and the shared edge diverges -- the exact seam
+ * the ladder exists to close. Only surfaces that actually cross rungs
+ * pay; most polygons sit inside one octave and get one band. */
+#define FLAT_MAX_BANDS 14
 
 static const rdpq_trifmt_t TRIFMT_FLAT = {
     .pos_offset   = 0,
@@ -602,21 +604,31 @@ static void draw_one(const r_camera_t *cam, const r_polypt_t *pts, int npts,
     float edge[FLAT_MAX_BANDS + 1];
     int bands = 0;
     {
-        /* Banding exists to bound perspective error in *pixels*, so a surface
-         * that covers few pixels needs none however deep it runs. The vertical
-         * extent at the near end is the bound: dz*focal/dmin. Without this a
-         * distant floor strip a few pixels tall still paid for four bands. */
-        const float extent = fabsf(dz) * cam->focal_y / dmin;
-
-        if (extent < 24.0f && dmax <= dmin * FLAT_MAX_DEPTH_RATIO) {
-            edge[bands++] = dmin;
-        } else {
-            float d = dmin;
-            while (bands < FLAT_MAX_BANDS && d < dmax) {
-                edge[bands++] = d;
-                d *= FLAT_MAX_DEPTH_RATIO;
-            }
-            if (bands == 0) edge[bands++] = dmin;
+        /* Cuts land on GLOBAL depth boundaries -- the powers of two --
+         * not on a series anchored at this polygon's own dmin. Anchored
+         * per-polygon, two regions sharing a boundary edge cut it at
+         * different depths, each side's cut vertex quantises on its own,
+         * and under the corner-sample write rule (29ebf85) the
+         * disagreement drops pixels along the shared edge: the dotted
+         * seam. On the global ladder both sides cut the shared edge at
+         * the same depths between the same welded endpoints, through the
+         * same canonical interpolation, so the two chains stay
+         * bit-identical and every corner sample falls in exactly one.
+         *
+         * The small-extent early-out is gone for the same reason: it was
+         * a per-polygon decision, so one side of a shared edge could
+         * skip a cut the other made. Its job -- sparing tiny far strips
+         * the banding -- the ladder does by itself: a polygon crossing
+         * no rung gets one band and no cuts at all, which is most of
+         * them. Powers of two are exact in float, so every polygon
+         * computes identical rung values, and the band ratio stays
+         * FLAT_MAX_DEPTH_RATIO. */
+        float d = 1.0f;
+        while (d <= dmin) d *= FLAT_MAX_DEPTH_RATIO;
+        edge[bands++] = dmin;
+        while (bands < FLAT_MAX_BANDS && d < dmax) {
+            edge[bands++] = d;
+            d *= FLAT_MAX_DEPTH_RATIO;
         }
         edge[bands] = dmax * 1.001f;      /* keep the far edge inclusive */
     }
@@ -676,6 +688,39 @@ static void draw_one(const r_camera_t *cam, const r_polypt_t *pts, int npts,
     stat_flats++;
 }
 
+/* One crossing point, computed the same way from either side.
+ *
+ * Every clip here used to interpolate from whichever endpoint its
+ * traversal reached first -- a + (b-a)*t. In exact arithmetic the point
+ * is the same either way; in float it differs in the last bit whenever
+ * the two sides of a shared boundary walk it with opposite winding,
+ * which regions always do. One bit was nothing until the corner-sample
+ * write rule (29ebf85: with AA off the RDP writes a pixel only if its
+ * corner sample is inside the span) made any disagreement between the
+ * two sides' chains a dropped pixel wherever it straddles the quantiser.
+ * So the endpoint pair is ordered canonically -- by view-space position,
+ * not by traversal -- and the cut is always computed lo-toward-hi. The
+ * parameter is a ratio of signed distances, so the caller's sign
+ * convention (near or far, left or right) cancels and both halves of a
+ * split share the cut bit-exactly, as the two-pass form always did. */
+static void cut_edge(const fvtx_t *a, const fvtx_t *b, float ua, float ub,
+                     fvtx_t *out)
+{
+    const fvtx_t *lo = a, *hi = b;
+    float ulo = ua, uhi = ub;
+    if (a->d > b->d ||
+        (a->d == b->d && (a->o > b->o ||
+         (a->o == b->o && (a->wx > b->wx ||
+          (a->wx == b->wx && a->wy > b->wy)))))) {
+        lo = b; hi = a; ulo = ub; uhi = ua;
+    }
+    const float t = ulo / (ulo - uhi);
+    out->d  = lo->d  + (hi->d  - lo->d ) * t;
+    out->o  = lo->o  + (hi->o  - lo->o ) * t;
+    out->wx = lo->wx + (hi->wx - lo->wx) * t;
+    out->wy = lo->wy + (hi->wy - lo->wy) * t;
+}
+
 /* Clip by one side plane of the view wedge.
  *
  * `right` selects which: keep offset <= depth*k, or keep offset >= -depth*k.
@@ -704,11 +749,7 @@ static int clip_side(const fvtx_t *in, int n, fvtx_t *out, float k, bool right)
             if (m < FLAT_CLIP_MAX) out[m++] = a; else r_drop_clipofl++;
         }
         if ((sa > 0.0f) != (sb > 0.0f) && m < FLAT_CLIP_MAX) {
-            const float t = sa / (sa - sb);
-            out[m].d  = a.d  + (b.d  - a.d ) * t;
-            out[m].o  = a.o  + (b.o  - a.o ) * t;
-            out[m].wx = a.wx + (b.wx - a.wx) * t;
-            out[m].wy = a.wy + (b.wy - a.wy) * t;
+            cut_edge(&a, &b, sa, sb, &out[m]);
             m++;
         }
         a = b;
@@ -719,11 +760,13 @@ static int clip_side(const fvtx_t *in, int n, fvtx_t *out, float k, bool right)
 /* Clip a view-space polygon by a plane of constant depth. */
 #if R_FUSESPLIT
 /* Both halves of a depth cut in ONE edge walk. Each side keeps clip_depth's
- * boundary predicates and interpolant operands VERBATIM (near still tests
- * and divides on the negated distances), so every emitted vertex -- and
- * every >=0 boundary duplication -- is bit-identical to the two-pass form;
- * only the duplicated vertex loads, distance computations and loop overhead
- * are gone. Proven route-identical by the FUSESPLIT abdiff lever. */
+ * boundary predicates VERBATIM (near still tests on the negated
+ * distances), and both compute the crossing through cut_edge, exactly as
+ * the two-pass form does -- the parameter is a ratio, so the negation
+ * cancels and the two halves share every cut vertex bit-exactly; only the
+ * duplicated vertex loads, distance computations and loop overhead are
+ * gone. Proven route-identical to the two-pass form by the FUSESPLIT
+ * abdiff lever. */
 static void split_depth(const fvtx_t *in, int n,
                         fvtx_t *near_out, int *out_nn,
                         fvtx_t *far_out, int *out_fn, float d0)
@@ -743,11 +786,7 @@ static void split_depth(const fvtx_t *in, int n,
                 else r_drop_clipofl++;
             }
             if ((ua > 0.0f) != (ub > 0.0f) && mf < FLAT_CLIP_MAX) {
-                const float t = ua / (ua - ub);
-                far_out[mf].d  = a.d  + (b.d  - a.d ) * t;
-                far_out[mf].o  = a.o  + (b.o  - a.o ) * t;
-                far_out[mf].wx = a.wx + (b.wx - a.wx) * t;
-                far_out[mf].wy = a.wy + (b.wy - a.wy) * t;
+                cut_edge(&a, &b, ua, ub, &far_out[mf]);
                 mf++;
             }
 
@@ -758,11 +797,7 @@ static void split_depth(const fvtx_t *in, int n,
                 else r_drop_clipofl++;
             }
             if ((na > 0.0f) != (nb > 0.0f) && mn < FLAT_CLIP_MAX) {
-                const float t = na / (na - nb);
-                near_out[mn].d  = a.d  + (b.d  - a.d ) * t;
-                near_out[mn].o  = a.o  + (b.o  - a.o ) * t;
-                near_out[mn].wx = a.wx + (b.wx - a.wx) * t;
-                near_out[mn].wy = a.wy + (b.wy - a.wy) * t;
+                cut_edge(&a, &b, na, nb, &near_out[mn]);
                 mn++;
             }
 
@@ -792,11 +827,7 @@ static int clip_depth(const fvtx_t *in, int n, fvtx_t *out, float d0, bool keep_
             if (m < FLAT_CLIP_MAX) out[m++] = a; else r_drop_clipofl++;
         }
         if ((sa > 0.0f) != (sb > 0.0f) && m < FLAT_CLIP_MAX) {
-            const float t = sa / (sa - sb);
-            out[m].d  = a.d  + (b.d  - a.d ) * t;
-            out[m].o  = a.o  + (b.o  - a.o ) * t;
-            out[m].wx = a.wx + (b.wx - a.wx) * t;
-            out[m].wy = a.wy + (b.wy - a.wy) * t;
+            cut_edge(&a, &b, sa, sb, &out[m]);
             m++;
         }
         a = b;

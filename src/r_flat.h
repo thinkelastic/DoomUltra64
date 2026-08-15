@@ -37,22 +37,73 @@
 #endif
 #define R_FLAT_Z_NEAR ((float)R_FLATZ * 0.1f)
 
-/* Sprites stand ON flats and must win that contact -- but every unit of
- * margin here is also margin over the WALLS, because the flats already
- * lead them. That is unavoidable: flats ahead of walls plus sprites ahead
- * of flats puts sprites ahead of walls, and a sprite beats a wall whenever
- * it stands within (R_SPR_Z_NEAR/R_FLAT_NEAR - 1) of the wall's depth --
- * about a fifth of it at +0.5, which showed as a monster visible through a
- * wall it stood close behind.
+/* Sprites stand ON flats and must win that contact. They used to buy that
+ * with a near constant of their own, two tenths ahead of the flats -- and
+ * every tenth of it was also margin over the WALLS, because the flats
+ * already lead them. That shape is the problem, not the size.
  *
- * So the margin is the smallest that still holds the floor off. It can be
- * small: what it has to beat is the floor's z SAG, and a billboard has
- * none of its own -- all four corners sit at one depth, so the sprite's z
- * is flat while the floor beneath it bows toward the camera mid-span. */
+ * A NEAR offset separates two surfaces by dNEAR/d, so the zone in which a
+ * sprite wrongly beats a wall is a fixed FRACTION of depth --
+ * (R_SPR_Z_NEAR/R_FLAT_NEAR - 1), an eighth at +0.2 -- and an eighth of
+ * the depth GROWS in world units with distance: 37 units at 300, 125 at
+ * 1000. A monster standing that far behind a wall drew straight through
+ * it. Shrinking the constant only slides between 12.5% and the flats' own
+ * 7.5%, and the bottom of that range clips the feet off everything.
+ *
+ * So the sprite is pulled toward the camera by a constant number of WORLD
+ * UNITS instead, and shares the flats' curve. The zone where it beats a
+ * wall becomes those few units at EVERY range, and the two artifacts
+ * separate cleanly because they live at opposite ends of it:
+ *
+ *   near offset   separation ~ 1/d    strongest far away
+ *   world pull    separation ~ 1/d^2  strongest up close
+ *
+ * Clipped feet are only visible up close, where a sprite is big; a sprite
+ * punching through a wall is worst far away, where the old shape spent
+ * its strength. The pull is strongest exactly where it is needed and
+ * fades exactly where it stops mattering. Eight units holds more than an
+ * LSB of this z buffer out to ~1000, by which point a sprite is ten
+ * pixels tall and a tied pixel at its feet cannot be seen.
+ *
+ * The pull only ever makes a sprite win, so its failure mode is bounded:
+ * a thing standing within R_SPR_PULL units BEHIND a wall shows through
+ * it, and at eight units it is touching the wall anyway. */
+/* One tenth ahead of the flats, NOT level with them.
+ *
+ * Dropping to the flats' own curve and relying on the world pull alone was
+ * wrong at range, and barrel explosions are what showed it: the pull
+ * separates as 1/d^2 while a near offset separates as 1/d, so past a few
+ * hundred units the pull is worth less than a z LSB and a big sprite
+ * standing on a floor simply lost to it and vanished. Clipped feet at that
+ * distance are invisible, which is the case the pull was reasoned about;
+ * a whole explosion disappearing is not.
+ *
+ * So the two are combined rather than traded: a tenth of near offset to
+ * hold the ordering at any depth, and the world pull to do the work up
+ * close where the old +0.2 bought its through-wall zone. That puts sprites
+ * 10% of depth ahead of walls instead of 12.5%, and the pull covers the
+ * near field the reduction gives up. */
 #ifndef R_SPRZ
-#define R_SPRZ (R_FLATZ + 2)          /* tenths, relative to the flats */
+#define R_SPRZ (R_FLATZ + 1)          /* tenths, relative to the flats */
 #endif
 #define R_SPR_Z_NEAR  ((float)R_SPRZ * 0.1f)
+
+/* ZERO by default, and the reasoning is worth keeping because the lever
+ * was added to solve a problem the tenth above solves better.
+ *
+ * The pull's whole job was to beat the floor at the sprite's feet. The
+ * tenth of near offset already does that at every depth -- 0.1/d is three
+ * z LSBs of separation even a thousand units out -- so a pull on top of it
+ * wins a contest already won, while adding its own world units to the zone
+ * where a sprite shows through a wall. It made sprites visible through
+ * walls for nothing.
+ *
+ * Kept as a lever because it is the right tool if contact ties ever
+ * reappear up close, where its 1/d^2 separation is strongest. */
+#ifndef R_SPRPULL
+#define R_SPRPULL 0                   /* whole world units toward the eye */
+#endif
+#define R_SPR_PULL ((float)R_SPRPULL)
 
 /* A reflection sits just in front of the pool that shows it: the margin
  * the ghost had when flats were 3.5 and it was 4.5. */

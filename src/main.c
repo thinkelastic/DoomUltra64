@@ -77,6 +77,95 @@ void I_Sound_Update(void);
 
 static bool       level_loaded;
 static r_camera_t cam;
+
+/* --- runtime resolution ---------------------------------------------------
+ *
+ * The options menu's GRAPHIC DETAIL picks between HIGH (512x480 interlaced)
+ * and LOW (320x240). Doom's own M_ChangeDetail already routes through
+ * R_SetViewSize, so the menu needed no new item; d_bridge turns that call
+ * into a request here.
+ *
+ * REQUEST, not an immediate switch. R_SetViewSize is reached from game
+ * logic, which this loop runs after handing the frame to the RDP -- tearing
+ * the framebuffers down at that moment would free memory the RDP is still
+ * rasterising into. The request is honoured at the top of the next frame,
+ * before display_get, which is the one point where nothing is in flight. */
+/* Seeded with the BOOT mode, emphatically not left at zero. Zero is a
+ * request in this scheme -- it differs from the live size -- so a default
+ * of 0,0 made the very first frame switch the screen to 0x0 before the
+ * game had asked for anything, and the first integer division by a screen
+ * dimension trapped: MIPS divides are followed by a teq, so it surfaced as
+ * a divide-by-zero exception rather than as a blank picture. */
+static int pend_scr_w = SCREEN_BOOT_W, pend_scr_h = SCREEN_BOOT_H;
+
+/* Whether the boot allocation was large enough for the HIGH mode. When it
+ * was not, the detail menu still toggles but cannot reach 480i -- better a
+ * setting that does nothing than an assert in the middle of a game. */
+static bool hires_ok;
+
+/* 320x480 interlaced. libdragon ships constants for 512x480 and 640x480 but
+ * not this one, and it is the cheapest 480i this renderer can draw: the
+ * column count -- which is what the occlusion machinery costs scale with --
+ * does not change from 320x240 at all. display_init's own rules are met
+ * (width divisible by 4 for 16bpp, height inside 720). */
+static const resolution_t RES_320x480 = {
+    .width = 320, .height = 480, .interlaced = INTERLACE_HALF
+};
+
+void D_RequestScreen(int w, int h) { pend_scr_w = w; pend_scr_h = h; }
+
+static void screen_apply(void)
+{
+    void V_BarFreeSurface(void);
+
+    /* A degenerate request is a bug in the caller, not something to render:
+     * refuse it rather than divide by it later. */
+    /* A 480-line request the boot allocation cannot back is refused here,
+     * where it is a no-op, rather than inside display_change, where the
+     * size assertion would end the session. */
+    if (!hires_ok && pend_scr_h >= 480) { pend_scr_h = r_scr_h; pend_scr_w = r_scr_w; }
+
+    if (pend_scr_w < SCREEN_BASE_W || pend_scr_h < SCREEN_BASE_H ||
+        pend_scr_w > SCREEN_MAX_W  || pend_scr_h > SCREEN_MAX_H) {
+        pend_scr_w = r_scr_w;
+        pend_scr_h = r_scr_h;
+        return;
+    }
+    if (pend_scr_w == r_scr_w && pend_scr_h == r_scr_h) return;
+
+    /* Everything sized to the old screen goes first: the melt's saved frame
+     * and the status bar's composited strip are both framebuffers in their
+     * own right, and both are lazily reallocated at the new size. */
+    r_wipe_free();
+    V_BarFreeSurface();
+
+    /* display_change, NOT close-then-init.
+     *
+     * It allocates nothing: it asserts the requested mode fits the buffers
+     * already allocated and then just reconfigures the VI. Tearing the
+     * display down and building it back up did allocate -- three ~480 KB
+     * blocks -- and by the time a level has carved up the heap those may
+     * not be contiguous even when the free total is ample. libdragon
+     * asserts "Out of memory" inside display_init, which cannot be caught
+     * or retried, so the switch has to be incapable of failing rather than
+     * merely likely to succeed. Claiming the largest footprint once at
+     * boot (see display_init) makes every later switch free. */
+    display_change(pend_scr_h >= 480 ? RES_320x480 : RESOLUTION_320x240,
+                   DEPTH_16_BPP, 3, GAMMA_NONE,
+                   pend_scr_w == 640 ? FILTERS_DISABLED : FILTERS_RESAMPLE);
+
+    r_scr_w = pend_scr_w;
+    r_scr_h = pend_scr_h;
+    r_scr_uix = (float)r_scr_w / (float)SCREEN_BASE_W;
+    r_scr_uiy = (float)r_scr_h / (float)SCREEN_BASE_H;
+
+    /* The projection follows the frame, on the same terms as at boot. */
+    cam.focal_x = SCREEN_W * 0.5f;
+    cam.focal_y = SCREEN_BASE_W * 0.5f * r_scr_uiy;
+
+    debugf("screen: %dx%d, ui %.2fx%.2f\n",
+           r_scr_w, r_scr_h, (double)r_scr_uix, (double)r_scr_uiy);
+}
 #if D_TESTROOM
 static dt64_tex_t tex_startan, tex_brown, tex_compute;
 static r_wall_t walls[SCENE_NUM_WALLS];
@@ -128,10 +217,14 @@ static void scene_init(void)
     cam.z = EYE_Z;
     cam.angle = 0.0f;
     /* 90 degree horizontal FOV, as in Doom. focal_y is pinned to the 320-wide
-     * frame so wide mode changes the horizontal sampling rate only; see the
-     * note in r_wall.h. */
+     * frame so WIDE changes the horizontal sampling rate only -- and then
+     * scaled by the vertical magnification, so HIRES changes the sampling
+     * rate on both axes and the view stays the same shape. Without that
+     * factor a 480-line frame would show the same pixel count of world
+     * over twice the scanlines: a half-height picture in a letterbox.
+     * See the note in r_wall.h. */
     cam.focal_x = SCREEN_W * 0.5f;
-    cam.focal_y = SCREEN_BASE_W * 0.5f;
+    cam.focal_y = SCREEN_BASE_W * 0.5f * (float)UI_YSCALE;
 
     /* --- real level geometry ------------------------------------------
      * Path B: keep Doom's data and BSP, replace its renderer. This proves the
@@ -695,7 +788,56 @@ int main(void)
      * left to do, and running a bilinear kernel over 1:1 content only smears
      * it: the extra columns we just paid fill rate for get averaged away.
      * Disabled there so wide mode actually shows the resolution. */
-    display_init(R_WIDE ? RESOLUTION_640x240 : RESOLUTION_320x240,
+    /* The USB channel BEFORE the display, not after it.
+     *
+     * display_init asserts on its own arguments and allocates the largest
+     * single block the program ever asks for, and it used to run fifty
+     * lines ahead of the first debug_init_usblog -- so any failure in it
+     * printed to a channel that did not exist yet and the console simply
+     * went quiet. That is exactly what a first 640x480 build did: the ROM
+     * transferred, the cart ran it, and not one byte came back to say
+     * why. Opening the channel first costs nothing when nothing is
+     * listening and turns a silent hang into a message. */
+    debug_init_usblog();
+
+    /* Two buffers at 480, three below it. A 512x480 buffer is 480 KB
+     * against 150 KB at 320x240, and the heap has about 1730 KB free
+     * after the arenas: two buffers plus the z buffer take 1440 KB and
+     * leave room for the melt's saved frame, three would take 1920 KB and
+     * not fit at all. The cost is one frame of the pipelining the comment
+     * above describes -- display_get at the top of the loop can now block
+     * on the buffer the VI is still scanning out, so a frame that
+     * finishes early waits instead of running ahead. At 480 the frame is
+     * not the thing finishing early. */
+    /* Allocated at the LARGEST mode the detail menu can reach, whatever
+     * mode the game boots in, because this is the one moment the heap is
+     * pristine: nothing else has been allocated yet, so the three big
+     * blocks are certain to be contiguous. Every later switch reuses them
+     * through display_change and cannot fail.
+     *
+     * 512x480 covers all three modes -- 640x240 is 307 KB a buffer and
+     * 320x240 is 154 KB, both inside 512x480's 480 KB -- so the reservation
+     * is the price of the toggle existing at all, not of using it. Two
+     * buffers rather than three: three at this size do not fit beside the
+     * arenas, and display_change can drop to any smaller count but never
+     * exceed what was allocated here. */
+    /* PROBED, not assumed. display_init asserts "Out of memory" rather than
+     * returning a failure, so asking for buffers that will not fit takes
+     * the console down before the debug channel has said anything useful.
+     * Three blocks of the largest mode's size is exactly what display_init
+     * is about to ask malloc for; if they come back, they will come back
+     * for it too. */
+    {
+        const size_t fb = (size_t)320 * 480 * 2;   /* 300 KB a buffer */
+        void *p0 = malloc(fb), *p1 = malloc(fb),
+             *p2 = malloc(fb), *p3 = malloc(fb);   /* three plus the z */
+        hires_ok = p0 && p1 && p2 && p3;
+        free(p0); free(p1); free(p2); free(p3);
+        debugf("screen: %lu KB free, hires-capable=%d\n",
+               (unsigned long)(get_memory_size() / 1024), hires_ok);
+    }
+
+    display_init(hires_ok ? RES_320x480 : RESOLUTION_320x240,
                  DEPTH_16_BPP, 3, GAMMA_NONE,
 #if defined(D_VIFILTER) && D_VIFILTER == 0
                  /* The VI's resample filter reads the COVERAGE bits the RDP
@@ -709,8 +851,23 @@ int main(void)
                   * turns it off: harder edges, no seam blending. */
                  FILTERS_DISABLED);
 #else
-                 R_WIDE ? FILTERS_DISABLED : FILTERS_RESAMPLE);
+    /* Keyed on the framebuffer's WIDTH, not on which lever selected it: the
+     * VI always scales to a 640-wide virtual output, so what decides this
+     * is how much horizontal resize is left. 640 has none and the filter
+     * only smears 1:1 content; 320 and 512 both upscale and want it. */
+                 SCREEN_W == 640 ? FILTERS_DISABLED : FILTERS_RESAMPLE);
 #endif
+
+    /* The allocation above is always 512x480; the BOOT mode may not be.
+     * Drop to it now that the memory is claimed -- this reconfigures the VI
+     * and allocates nothing, exactly as the detail menu's later switches
+     * do. */
+    if (!hires_ok || SCREEN_BOOT_H != 480)
+        display_change(SCREEN_BOOT_W == 640 ? RESOLUTION_640x240
+                                            : RESOLUTION_320x240,
+                       DEPTH_16_BPP, 3, GAMMA_NONE,
+                       SCREEN_BOOT_W == 640 ? FILTERS_DISABLED
+                                            : FILTERS_RESAMPLE);
 
     /* Audio before the arenas claim the heap. audio_init reserves DMA buffers
      * the AI reads directly; starting it with the heap nearly full does not
@@ -837,6 +994,10 @@ int main(void)
             cam.angle = vl[3] / 1000.0f;
         }
 #endif
+
+        /* Before display_get, which is the only point in the loop where no
+         * frame is in flight -- see the note on D_RequestScreen. */
+        screen_apply();
 
         surface_t *fb = display_get();
 

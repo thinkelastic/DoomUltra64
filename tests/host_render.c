@@ -25,10 +25,20 @@
 #include "../src/r_sprite.h"
 #include "../src/scene.h"
 
+/* The frame the harness actually rasterises: the renderer's live
+ * dimensions, so its geometry and this buffer agree on where the screen
+ * ends. Those are runtime variables on the console now (the detail menu
+ * switches resolution), and the harness simply never changes them.
+ *
+ * The BUFFERS below cannot follow a variable, so they are declared at the
+ * maxima and indexed by row -- which is why every one of them is
+ * [FB_MAX_H][FB_MAX_W] while the loops run to FB_H/FB_W. */
 #define FB_W SCREEN_W
 #define FB_H SCREEN_H
+#define FB_MAX_W SCREEN_MAX_W
+#define FB_MAX_H SCREEN_MAX_H
 
-static uint8_t  framebuffer[FB_H][FB_W][3];
+static uint8_t  framebuffer[FB_MAX_H][FB_MAX_W][3];
 static uint16_t tlut[256];
 
 /* The texture rectangle currently "resident in TMEM". Wrapping is tracked
@@ -68,8 +78,8 @@ static int   fcont_n;
 /* Per-pixel record, so the outliers can be counted and located rather
  * than collapsed into a range: a handful of wrong pixels and a wholly
  * broken mapping produce the same spread. */
-static float fcont_ds[FB_H][FB_W];
-static uint8_t fcont_has[FB_H][FB_W];
+static float fcont_ds[FB_MAX_H][FB_MAX_W];
+static uint8_t fcont_has[FB_MAX_H][FB_MAX_W];
 static int stat_overflow; /* vertices beyond the RDP coordinate range */
 static int stat_deep;     /* quads spanning too wide a depth range */
 
@@ -627,7 +637,7 @@ int main(int argc, char **argv)
              * disagrees with it. */
             int nout = 0; float med = 0.0f;
             {
-                static float vals[FB_H * FB_W];
+                static float vals[FB_MAX_H * FB_MAX_W];
                 int nv = 0;
                 for (int yy = 0; yy < FB_H; yy++)
                     for (int xx = 0; xx < FB_W; xx++)

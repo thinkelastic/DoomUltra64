@@ -231,17 +231,29 @@ static void store_poly(int ssnum, vec2_t *poly, int n, int *ptcursor)
  * bits -- 1890 pixels off the reference for a lever that was supposed to
  * be neutral at its default. 75/100.0f is exactly 0.75. */
 #define FLAT_NUDGE ((float)R_FLATNUDGE / 100.0f)
+#if R_FLATNUDGE
     float cxp = 0.0f, cyp = 0.0f;
     for (int i = 0; i < n; i++) { cxp += poly[i].x; cyp += poly[i].y; }
     cxp /= (float)n; cyp /= (float)n;
+#endif
 
     float xl = 1e9f, xh = -1e9f, yl = 1e9f, yh = -1e9f;
     for (int i = 0; i < n; i++) {
+#if R_FLATNUDGE
+        /* Compiled out entirely at nudge 0, not merely multiplied by it:
+         * cxp + (x - cxp) is one subtract and one add, and float rounds
+         * each -- the round trip moves a vertex in its last bits, by a
+         * DIFFERENT amount on each side of a shared boundary because the
+         * centroids differ. Under the corner-sample write rule (29ebf85)
+         * a last-bit disagreement is a seam pixel wherever it straddles
+         * the quantiser, and identical chains are the whole fix. A zero
+         * nudge must store the vertex verbatim. */
         const float ox = poly[i].x - cxp, oy = poly[i].y - cyp;
         const float len = sqrtf(ox * ox + oy * oy);
         const float k = len > 1e-3f ? (1.0f + FLAT_NUDGE / len) : 1.0f;
         poly[i].x = cxp + ox * k;
         poly[i].y = cyp + oy * k;
+#endif
 
         r_polypts[*ptcursor].x = poly[i].x;
         r_polypts[*ptcursor].y = poly[i].y;
@@ -263,6 +275,14 @@ static void store_poly(int ssnum, vec2_t *poly, int n, int *ptcursor)
     sd->bx0 = (int16_t)floorf(xl); sd->bx1 = (int16_t)ceilf(xh);
     sd->by0 = (int16_t)floorf(yl); sd->by1 = (int16_t)ceilf(yh);
 }
+
+/* Guarded, unlike FLATWELD beside it, because #if on an undefined name is
+ * a silent 0 -- and this one silently OFF is a geometry regression nothing
+ * would report. The Makefile always defines it; this is for anything that
+ * compiles the file without it. */
+#ifndef R_SEGLINE
+#define R_SEGLINE 1
+#endif
 
 static void build_polys(int num, vec2_t *poly, int n, int *cursor)
 {
@@ -286,6 +306,61 @@ static void build_polys(int num, vec2_t *poly, int n, int *cursor)
             const float x2 = (float)(sg->v2->x >> FRACBITS);
             const float y2 = (float)(sg->v2->y >> FRACBITS);
 
+#if R_SEGLINE
+            /* Clip by the LINEDEF's line, not the seg's own endpoints.
+             *
+             * The two are supposed to be the same line, and are not. Doom's
+             * node builder writes the vertices it creates when it splits a
+             * linedef back into the VERTEXES lump, which is 16-bit INTEGER
+             * -- so a split endpoint is rounded off the true line by up to
+             * ~0.7 units. On a long seg that barely tilts it; on a short
+             * one it is an angular error, and clip_half extends the line
+             * across the whole cell: measured over DOOM.WAD, 289 segs on
+             * two-sided lines swing their cell's boundary more than half a
+             * unit at 128 units out, 181 of them more than a unit, worst
+             * case 11 degrees off a 3.6-unit seg. That is the ~1.2-unit
+             * separation between neighbouring same-plane fans, and it is
+             * not the >>FRACBITS above: map vertices carry no fraction to
+             * lose, so that shift is exact.
+             *
+             * The linedef's own endpoints are ORIGINAL map vertices, never
+             * a rounded split, and the subsectors on both sides of it read
+             * the same two. Passed canonically -- always v1 toward v2, with
+             * the seg's sense moved into keep_front -- because clip_half
+             * takes the front and back of one identical line to bit-exact
+             * complementary results (t = sa/(sa-sb) is invariant when both
+             * distances negate), while re-anchoring the line at the far end
+             * to flip it would round px+dx and lose that. Same reason the
+             * node split above calls it twice on one line. */
+            const line_t *ld = sg->linedef;
+            if (ld && ld->v1 && ld->v2) {
+                const float lx = (float)(ld->v1->x >> FRACBITS);
+                const float ly = (float)(ld->v1->y >> FRACBITS);
+                const float ldx = (float)(ld->v2->x >> FRACBITS) - lx;
+                const float ldy = (float)(ld->v2->y >> FRACBITS) - ly;
+
+                /* Does the seg run with the linedef or against it? Doom
+                 * drops the seg's `side` on load, so it is recovered from
+                 * the direction. In 64-bit because the shifted coordinates
+                 * reach 32767 and their products do not fit an int. The
+                 * two vectors are collinear up to the rounding above, so
+                 * the sign is never in doubt. */
+                const long long sx = (long long)(sg->v2->x >> FRACBITS) -
+                                     (long long)(sg->v1->x >> FRACBITS);
+                const long long sy = (long long)(sg->v2->y >> FRACBITS) -
+                                     (long long)(sg->v1->y >> FRACBITS);
+                const long long dot = sx * (long long)(ld->v2->x >> FRACBITS) -
+                                      sx * (long long)(ld->v1->x >> FRACBITS) +
+                                      sy * (long long)(ld->v2->y >> FRACBITS) -
+                                      sy * (long long)(ld->v1->y >> FRACBITS);
+
+                if (ldx != 0.0f || ldy != 0.0f) {
+                    cn = clip_half(a, cn, b, lx, ly, ldx, ldy, dot >= 0);
+                    for (int k = 0; k < cn; k++) a[k] = b[k];
+                    continue;
+                }
+            }
+#endif
             cn = clip_half(a, cn, b, x1, y1, x2 - x1, y2 - y1, true);
             for (int k = 0; k < cn; k++) a[k] = b[k];
         }
@@ -769,7 +844,16 @@ static void build_flat_regions(void)
      * every floor's geometry for no observed benefit. */
 #if R_FLATWELD
     {
-        const float EPS_PERP = 0.05f;   /* how near the edge counts as "on" */
+        /* Wide on purpose. Node splitters store integer coordinates, so a
+         * split vertex can sit most of a unit off the line its neighbour
+         * derives for the same boundary. Welding it is still right: the
+         * vertex is copied VERBATIM, so both chains kink through the same
+         * point identically -- chain identity is what the corner-sample
+         * write rule needs (29ebf85), not straightness. What the slop
+         * must not do is capture vertices of genuinely different nearby
+         * edges; EPS_END keeps corners out, and parallel edges under a
+         * unit apart do not survive Doom's own map format. */
+        const float EPS_PERP = 0.75f;   /* how near the edge counts as "on" */
         const float EPS_END  = 0.25f;   /* ignore what is already a corner  */
         int welded = 0;
 

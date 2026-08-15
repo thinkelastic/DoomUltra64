@@ -1867,9 +1867,25 @@ void D_LightsUpdate(void)
 #endif
 }
 
-/* The view is always the full screen here: there is no status bar inset to
- * shrink it into, and the renderer has no scaled modes. */
-void R_SetViewSize(int blocks, int detail) { (void)blocks; (void)detail; }
+/* The view is always the full screen here -- there is no status bar inset to
+ * shrink it into, so `blocks` has nothing to do. `detail` does: it is the
+ * options menu's GRAPHIC DETAIL, and this port spends it on RESOLUTION
+ * rather than on vanilla's pixel doubling.
+ *
+ *   detail 0  HIGH  320x480 interlaced
+ *   detail 1  LOW   320x240
+ *
+ * Doom calls this whenever the setting changes (M_ChangeDetail) and once at
+ * startup, so the request covers both. The switch itself cannot happen here
+ * -- this runs inside a game tic, with the RDP still drawing -- so it is
+ * only recorded; main.c performs it between frames. */
+void R_SetViewSize(int blocks, int detail)
+{
+    (void)blocks;
+    void D_RequestScreen(int w, int h);
+    if (detail) D_RequestScreen(SCREEN_BASE_W, SCREEN_BASE_H);
+    else        D_RequestScreen(SCREEN_BASE_W, 480);
+}
 
 /* Doom's video layer keeps a back buffer it can copy regions of, so a menu
  * can be drawn over a frozen frame and lifted off again. The RDP redraws

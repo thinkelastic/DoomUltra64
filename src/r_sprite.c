@@ -54,6 +54,12 @@ typedef struct {
     /* 1.0 draws in the opaque alpha-cut groups; anything lower routes to
      * the translucent tail pass -- smoke and bullet puffs. */
     float       alpha;
+    /* Depth value for the z buffer, from the PULLED depth -- see the bias
+     * stack in r_flat.h. Carried on the job rather than recomputed in
+     * draw_tile, which runs once per tile: the pull needs a divide the
+     * texture's own 1/w cannot supply, and a billboard sits at one depth,
+     * so it is one divide per sprite instead of one per tile. */
+    float       z;
     uint8_t     mipped;
 } sprjob_t;
 
@@ -234,6 +240,16 @@ void r_sprite_add(const r_camera_t *cam, const r_thing_t *t,
      * isolates fill rate. */
     if (tspr->mip && scale_y < 0.5f) { j->tex = tspr->mip; j->mipped = 1; }
     j->depth = depth;
+    /* Pulled toward the eye by whole world units, on the flats' own curve
+     * -- the bias stack in r_flat.h explains why the pull is world-space
+     * and the curve is shared. Clamped rather than allowed to cross the
+     * eye: a sprite closer than the pull would otherwise invert through
+     * infinity, and everything that near is already at depth 0. */
+    {
+        const float zd = depth - R_SPR_PULL;
+        const float zv = zd > 1.0f ? 1.0f - R_SPR_Z_NEAR / zd : 0.0f;
+        j->z = zv > 0.0f ? zv : 0.0f;
+    }
     j->sx    = sx;
     j->sy    = sy;
     j->scale_x = scale_x;
@@ -276,8 +292,12 @@ static void draw_tile(const sprjob_t *j, int s0, int t0, int s1, int t1,
     /* Ahead of the floor it stands on -- see the bias stack in r_flat.h.
      * This used the shared wall constant, which worked only while the
      * flats sat behind it; once they moved ahead, the floor won the
-     * contact and clipped the feet off every standing thing. */
-    const float z  = 1.0f - R_SPR_Z_NEAR * iw;
+     * contact and clipped the feet off every standing thing. It then used
+     * a near constant of its own, which held the feet but leaked an
+     * eighth of the depth over the walls; the pull that replaced it is
+     * computed once per job, since every tile of a billboard shares the
+     * one depth. */
+    const float z  = j->z;
 
     float v[4][10];
     const float xs[4] = { x0, x1, x1, x0 };
@@ -493,8 +513,14 @@ void r_sprite_flush(void)
  * is 240 rows with the bar overlaid on the bottom 32 (rows 208..240), so the
  * weapon shifts down by 240-200-32 = 8: its bottom edge meets the bar's top
  * exactly as on the PC. The previous 40-row shift pinned it to the screen
- * bottom instead, leaving the pistol half-buried under the bar. */
-#define PSPRITE_YSHIFT (SCREEN_H - 200 - 32)
+ * bottom instead, leaving the pistol half-buried under the bar.
+ *
+ * Off the BASE height, not SCREEN_H. This is a coordinate in the 320x240
+ * frame that UI_YSCALE magnifies on the way out, so measuring it against
+ * the real screen would count the magnification twice: at 480 rows it came
+ * to 248, doubled to 496, and put the whole weapon below the bottom edge of
+ * a 480-line screen -- the gun and hand simply vanished. */
+#define PSPRITE_YSHIFT (SCREEN_BASE_H - 200 - 32)
 
 /* Muzzle-flash opacity. Bright saturated art over the weapon: high
  * enough to read as a flare through composite video, low enough that
@@ -560,7 +586,8 @@ void r_psprite_draw(void)
                 /* Cull before the upload, not after it. */
                 const float x0 = (ox + (float)s0) * UI_XSCALE;
                 const float x1 = (ox + (float)s1) * UI_XSCALE;
-                const float y0 = oy + (float)t0, y1 = oy + (float)t1;
+                const float y0 = (oy + (float)t0) * UI_YSCALE;
+                const float y1 = (oy + (float)t1) * UI_YSCALE;
                 if (x1 < 0.0f || x0 > (float)SCREEN_W) continue;
                 if (y1 < 0.0f || y0 > (float)SCREEN_H) continue;
 

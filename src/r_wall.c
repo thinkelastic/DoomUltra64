@@ -222,6 +222,15 @@ static uint8_t           push_memo_ti;
 
 int r_tri_wall, r_tri_flat, r_tri_spr, r_tri_sky;
 
+/* The live screen dimensions and the UI magnifications derived from them.
+ * Defined here rather than in main.c because the host harness links this
+ * translation unit and not that one, and it needs them too. Boot values;
+ * r_screen_set (main.c) is the only writer after that. */
+int   r_scr_w = SCREEN_BOOT_W;
+int   r_scr_h = SCREEN_BOOT_H;
+float r_scr_uix = (float)SCREEN_BOOT_W / (float)SCREEN_BASE_W;
+float r_scr_uiy = (float)SCREEN_BOOT_H / (float)SCREEN_BASE_H;
+
 static float cam_focal_y, cam_z;
 
 /* Shared with r_flat, r_sprite and r_bsp: every per-frame consumer of the

@@ -31,13 +31,21 @@
  * same on screen: at 640x240 a pixel is half as wide, so 8 framebuffer
  * columns cover the same distance 4 do at 320. That also keeps WIPE_COLS --
  * and the melt's random walk -- identical between modes. */
-#define WIPE_STRIP   (4 * (SCREEN_W / SCREEN_BASE_W))
+/* The multiplier is floored at 1: the width is a runtime value now, and a
+ * screen narrower than the 320 frame would make this zero and turn the
+ * WIPE_COLS division below into a divide by zero -- which on MIPS is a
+ * trap, not a wrong number. */
+#define WIPE_STRIP   (4 * (SCREEN_W > SCREEN_BASE_W ? SCREEN_W / SCREEN_BASE_W : 1))
 #define WIPE_COLS    (SCREEN_W / WIPE_STRIP)
+/* Most columns the melt can ever need: the widest screen divided by the
+ * narrowest strip, which is what col_y has to be sized for now that the
+ * width is chosen at runtime. */
+#define WIPE_COLS_MAX (SCREEN_MAX_W / 4)
 
 /* Doom's melt, per strip instead of per column: a negative offset is a
  * delay before this strip starts moving, then it accelerates to 8 pixels
  * a tic. */
-static int   col_y[WIPE_COLS];
+static int   col_y[WIPE_COLS_MAX];
 static bool  wiping;
 static surface_t saved;
 static bool  saved_valid;
@@ -57,6 +65,18 @@ bool r_wipe_active(void) { return wiping; }
 void r_wipe_start(const surface_t *from)
 {
     if (wiping || !from) return;
+
+    /* A capture from a DIFFERENT screen size is worse than none: the melt
+     * would draw a 240-row image down a 480-row screen, leaving the frame
+     * it captured -- status bar and all -- sitting across the middle of the
+     * picture. The detail menu frees this on the way through, but the
+     * surface outlives any single switch, so it checks its own shape rather
+     * than trusting that. */
+    if (saved_valid &&
+        (saved.width != SCREEN_W || saved.height != SCREEN_H)) {
+        surface_free(&saved);
+        saved_valid = false;
+    }
 
     if (!saved_valid) {
         saved = surface_alloc(FMT_RGBA16, SCREEN_W, SCREEN_H);

@@ -15,3 +15,5 @@ assets/
 *.ram
 *.sav
 toolchain/libdragon/
+# Python bytecode from the tools/ scripts.
+__pycache__/
