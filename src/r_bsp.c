@@ -44,7 +44,7 @@ angle_t     R_PointToAngle2(fixed_t x1, fixed_t y1, fixed_t x2, fixed_t y2);
  * alongside every texture choice rather than once per seg, because a
  * single sidedef can carry a shiny door as its middle and plain
  * concrete above it. */
-#if R_DOORMIRROR
+#if R_ENVMAP
 int D_TextureIsMirror(int picnum);
 #define D_WALL_MIRROR(pic) \
     (cur_wall.mirror = (uint8_t)D_TextureIsMirror(pic))
@@ -1022,15 +1022,24 @@ R_HOT static void render_subsector(int num)
                 sh[1] = lit + add[1]; if (sh[1] > 1.0f) sh[1] = 1.0f;
                 sh[2] = lit + add[2]; if (sh[2] > 1.0f) sh[2] = 1.0f;
             }
-#if R_DOORMIRROR
-            /* Every thing the walk sees is a candidate for a door's
-             * mirror -- including the player, whose own sprite is queued
-             * each frame and only ever rejected for sitting at depth
-             * zero. Reflected across a door two paces away it lands four
-             * paces out and draws like anything else. */
-            { void r_mirror_thing(float x, float y, float z, void *spr,
-                                  const float sh[3], unsigned ang);
-              r_mirror_thing(t.x, t.y, t.z, t.spr, sh, (unsigned)mang); }
+#if R_SPRSHINE
+            /* Roughly cylindrical props take the shine. Barrels are the
+             * case it was written for; the tech pillars are the same shape
+             * and read the same way. Anything not a cylinder must stay off
+             * it -- the highlight assumes u = sin(azimuth) across the
+             * sprite, which is true of a barrel and false of a monster.
+             *
+             * NOT WHILE IT IS EXPLODING. A barrel keeps its type through
+             * its death states and only the SPRITE changes, so the shine
+             * followed it onto the fireball -- a specular highlight sliding
+             * across an explosion, which is wrong twice over: the thing is
+             * no longer a cylinder, and it is emitting light rather than
+             * catching it. Fullbright is the exact test: all five S_BEXP
+             * states carry FF_FULLBRIGHT (info.c), and the rule generalises
+             * -- anything self-illuminated has no specular to give. */
+            if ((mo->type == MT_BARREL || mo->type == MT_MISC31 ||
+                 mo->type == MT_MISC32) && !(mo->frame & FF_FULLBRIGHT))
+                r_sprite_shine_next();
 #endif
             r_sprite_add(cur_cam, &t, sh,
                          (mo->frame & FF_FULLBRIGHT) ? -1 : lit_ll,
@@ -1063,9 +1072,12 @@ R_HOT static void render_subsector(int num)
                     if (t.z - ph < 128.0f) {
                         float prgb[3];
                         D_FlatGlowRGB(ss->sector->floorpic, prgb);
+                        /* Liquid, or merely polished? The reflective set
+                         * holds both, and only the wet ones ripple. */
                         r_reflect_add(cur_cam, &t, sh,
                                       (mo->frame & FF_FULLBRIGHT) ? -1 : lit_ll,
-                                      ph, prgb);
+                                      ph, prgb,
+                                      D_FlatGlow(ss->sector->floorpic) > 0.0f);
                     }
                 }
             }

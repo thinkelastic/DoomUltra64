@@ -1089,6 +1089,12 @@ void p_level_reset_assets(void)
      * of stale reference the comment above warns about: keep it and the next
      * level's flat that lands in slot 7 inherits the last one's glow. */
     void D_FlatGlowReset(void);
+#if R_ENVMAP
+    /* Polished-wall textures are recorded by resolved INDEX, exactly as the
+     * emissive flats are, so a stale table lets the next level's texture in
+     * the same slot inherit the sheen. Reset with the table it mirrors. */
+    void D_MirrorReset(void);
+#endif
 
     mem_reset(MEM_ARENA_LEVEL);
     dt64_release_all();
@@ -1104,5 +1110,8 @@ void p_level_reset_assets(void)
     R_SpriteFrameReset();
 #if D_DYNLIGHT
     D_FlatGlowReset();
+#if R_ENVMAP
+    D_MirrorReset();
+#endif
 #endif
 }

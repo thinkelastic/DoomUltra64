@@ -36,7 +36,7 @@
  * 16.9 to 21.3 ms median at 640x240 while the fill barely registered. At
  * 320x480 that cost does not move at all; only the RDP's fill doubles.
  * Against a 512-wide 480i it is 2x the pixels rather than 3.2x, and it
- * fits THREE buffers in less memory than 512x480 fits two, so the frame
+ * fits THREE buffers in less memory than 320x480 fits two, so the frame
  * pipelining survives as well.
  *
  * The pixels are not square, and that is expected: 320 across a 4:3 frame
@@ -58,7 +58,7 @@
 #endif
 
 /* The mode the game BOOTS in. It is no longer the mode it stays in: the
- * options menu's GRAPHIC DETAIL switches between HIGH (512x480) and LOW
+ * options menu's GRAPHIC DETAIL switches between HIGH (320x480) and LOW
  * (320x240) while the game runs, so the dimensions below are variables and
  * these are only their initial values. */
 #if R_HIRES
@@ -115,7 +115,7 @@ extern float r_scr_uix, r_scr_uiy;
  * two thirds width down the left of the screen. The scaled coordinates all
  * feed rdpq_texture_rectangle_scaled, which takes floats anyway.
  *
- * The two axes disagreeing (1.6 and 2.0) is not a distortion: at 512x480
+ * The two axes disagreeing (1.6 and 2.0) is not a distortion: at 320x480
  * stretched to 4:3 a pixel is 1.25 times wider than tall, and 1.6 * 1.25
  * is exactly 2.0. The art comes out the same apparent shape it has at
  * 320x240 -- which is the whole requirement. */
@@ -189,8 +189,13 @@ typedef struct {
      * plane and glow_rgb as its tint; glow stays 0 for the non-liquids,
      * which nulls the light spill without a second code path. */
     uint8_t reflect;
-    /* A polished metal door: what stands in front of it is mirrored back
-     * across its own vertical plane. */
+#endif
+    /* A polished metal door or panel: it takes the environment-map sheen
+     * across its own vertical plane. Guarded by R_ENVMAP, NOT by D_DYNLIGHT:
+     * the sheen has no dynamic-light dependency, and having the field under
+     * one guard while its readers sat under another made ENVMAP=1 with
+     * DYNLIGHT=0 fail to compile. */
+#if R_ENVMAP
     uint8_t mirror;
 #endif
 } r_wall_t;
@@ -213,7 +218,7 @@ extern float r_view_cs, r_view_sn;
  * .text.hot contiguously, first in .text). The per-seg walk's working set
  * exceeds the 16 KB direct-mapped I-cache, so SOME functions must alias;
  * this block chooses which by keeping the nine per-seg core functions
- * mutually conflict-free (~14.4 KB) and its layout deterministic across
+ * mutually conflict-free (~16,320 B) and its layout deterministic across
  * relinks. Membership changes must keep the block under 16 KB and be
  * re-measured on hardware (ph_walk_us) -- every placement change re-rolls
  * every conflict outside the block. Host builds ignore the section. */

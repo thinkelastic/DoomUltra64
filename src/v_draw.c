@@ -40,6 +40,10 @@ const char *W_LumpName(lumpindex_t lump);
  * ~25 patches a frame, all programming identical state. */
 static bool ui_active;
 
+/* Defined with the blit it guards; declared here because V_BeginUI, which
+ * resets it, comes first in the file. */
+void v_upload_memo_reset(void);
+
 /* Vertical placement of Doom's 320x200 UI on this 320x240 screen.
  *
  * v_yshift is added to every patch draw; d_ui sets it per subsystem (the
@@ -80,6 +84,7 @@ void V_RestoreBuffer(void)
 void V_BeginUI(void)
 {
     ui_active = true;
+    v_upload_memo_reset();      /* another pass owned TILE0 before this */
 /* A RUNTIME test now, not a #if. The question is the same -- is the UI
  * drawn 1:1, in which case COPY mode's four texels a clock apply -- but
  * the answer changes when the detail menu does, so it cannot be decided
@@ -193,6 +198,23 @@ static void v_blit(const dt64_tex_t *tex, float ox, float oy)
     v_blit_at(tex, ox, oy);
 }
 
+/* One-entry upload memo.
+ *
+ * The UI draws the SAME small patch over and over: M_DrawSaveLoadBorder
+ * repeats one centre piece about twenty-four times per slot across six
+ * slots, and text repeats letters. Every one of those was a full TMEM
+ * upload, so the load/save screen alone cost a few hundred uploads a frame
+ * where every other menu costs a handful -- which is exactly why only that
+ * screen crawled while the rest stayed fast.
+ *
+ * Consecutive-duplicate only, which is all this needs and keeps it honest:
+ * anything else that touches TILE0 resets it. The wall flush uses the same
+ * idiom for the same reason. */
+static const dt64_tex_t *memo_tex;
+static int memo_s0, memo_t0, memo_s1, memo_t1;
+
+void v_upload_memo_reset(void) { memo_tex = NULL; }
+
 static void v_blit_at(const dt64_tex_t *tex, float ox, float oy)
 {
     const int w = tex->width, h = tex->height;
@@ -211,7 +233,12 @@ static void v_blit_at(const dt64_tex_t *tex, float ox, float oy)
             if (x1 < 0.0f || x0 > (float)SCREEN_W) continue;
             if (y1 < 0.0f || y0 > (float)SCREEN_H) continue;
 
-            dt64_upload_tile(TILE0, tex, NULL, s0, t0, s1, t1);
+            if (tex != memo_tex || s0 != memo_s0 || t0 != memo_t0 ||
+                s1 != memo_s1 || t1 != memo_t1) {
+                dt64_upload_tile(TILE0, tex, NULL, s0, t0, s1, t1);
+                memo_tex = tex;
+                memo_s0 = s0; memo_t0 = t0; memo_s1 = s1; memo_t1 = t1;
+            }
             /* Scaled form even at 1x, where it is the same rectangle: one
              * code path, and the S range is stated explicitly rather than
              * implied by the destination width. */
@@ -405,6 +432,7 @@ void V_BarBlit(void)
 #endif
     dt64_bind_tlut();
     rdpq_mode_tlut(TLUT_RGBA16);
+    v_upload_memo_reset();      /* the strip's own tiles displaced TILE0 */
 }
 
 /* Find the baked art for a cached patch. */

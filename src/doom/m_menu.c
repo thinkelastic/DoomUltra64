@@ -74,11 +74,11 @@ int			showMessages = 1;
 
 // Blocky mode, has default, 0 = high, 1 = normal
 /* DoomN64: this port spends GRAPHIC DETAIL on RESOLUTION rather than on
- * vanilla's pixel doubling -- HIGH is 512x480 interlaced, LOW is 320x240
- * (see R_SetViewSize in d_bridge.c). Nothing persists it: m_config.c is not
- * compiled here, so M_LoadDefaults never runs and this initialiser IS the
- * stored setting. LOW by default, because it is the mode that holds frame
- * rate; HIGH is the one you opt into.
+ * vanilla's pixel doubling -- HIGH is 320x480 interlaced, LOW is 320x240
+ * (see R_SetViewSize in d_bridge.c). This initialiser is only the FIRST-RUN
+ * value: D_OptionsLoad restores the player's choice from options.cfg beside
+ * the ROMs before the title screen, and every menu change writes it back.
+ * LOW to begin with, because it is the mode that holds frame rate.
  *
  * Derived from the build's boot mode so the two cannot disagree: a HIRES=1
  * ROM comes up at 480i and would otherwise be dropped to LOW the moment
@@ -897,6 +897,9 @@ void M_SfxVol(int choice)
     }
 	
     S_SetSfxVolume(sfxVolume * 8);
+
+    /* DoomN64: persist to the shared options file beside the ROMs. */
+    { void D_OptionsSave(void); D_OptionsSave(); }
 }
 
 void M_MusicVol(int choice)
@@ -914,6 +917,9 @@ void M_MusicVol(int choice)
     }
 	
     S_SetMusicVolume(musicVolume * 8);
+
+    /* DoomN64: persist to the shared options file beside the ROMs. */
+    { void D_OptionsSave(void); D_OptionsSave(); }
 }
 
 
@@ -1047,6 +1053,9 @@ void M_ChangeMessages(int choice)
 	players[consoleplayer].message = DEH_String(MSGON);
 
     message_dontfuckwithme = true;
+
+    /* DoomN64: persist to the shared options file beside the ROMs. */
+    { void D_OptionsSave(void); D_OptionsSave(); }
 }
 
 
@@ -1220,6 +1229,11 @@ void M_ChangeDetail(int choice)
 	players[consoleplayer].message = DEH_String(DETAILHI);
     else
 	players[consoleplayer].message = DEH_String(DETAILLO);
+
+    /* DoomN64: settings live in a file beside the ROMs, shared with Doom II.
+     * Written on every change rather than at exit, because a console has no
+     * orderly shutdown to hook -- the player switches it off. */
+    { void D_OptionsSave(void); D_OptionsSave(); }
 }
 
 

@@ -385,6 +385,36 @@ static inline float visibility_at(float depth)
  * it does not flatten the whole wall into one brightness. */
 #define GLOW_RISE 96.0f
 
+#if D_DYNLIGHT
+/* The pool's light on the wall it laps against, RIPPLING.
+ *
+ * A liquid surface is never flat, so the light it throws up a wall should not
+ * be either -- a still glow over moving water is the tell that the light is
+ * painted on. This modulates the glow's STRENGTH only: no texture coordinate
+ * is touched, so the wall's art stays put and just the lighting breathes.
+ *
+ * Travelling, not pulsing: the phase carries a term in world position, so the
+ * bright band moves ALONG the wall instead of the whole surface brightening
+ * and dimming together, which reads as a flicker rather than as water.
+ *
+ * The clock is Doom's own leveltime plus the sub-tic, times the same constant
+ * the reflection wobble uses (r_sprite.c), so the surface, what it reflects
+ * and what it lights all move in sympathy. Computed here rather than shared
+ * through a global because the walls draw BEFORE the reflection pass updates
+ * that clock, and one frame of skew is not worth the coupling. */
+#define GLOW_RIPPLE_AMT  0.34f     /* fraction of the glow that moves */
+#define GLOW_RIPPLE_K    0.021f    /* per world unit along the wall  */
+
+static inline float glow_ripple(float wx, float wy)
+{
+    extern int   leveltime;
+    extern float d_subtic;
+    const float t = ((float)leveltime + d_subtic) * 0.095f;
+    return 1.0f + GLOW_RIPPLE_AMT * sinf((wx + wy) * GLOW_RIPPLE_K + t);
+}
+#endif
+
+
 static inline float lit_shade(float light, float depth, float finv,
                               float wx, float wy, float wz,
                               const r_wall_t *wall)
@@ -401,7 +431,8 @@ static inline float lit_shade(float light, float depth, float finv,
     if (wall->glow > 0.0f) {
         const float h = wz - wall->glowz;
         if (h >= 0.0f && h < GLOW_RISE)
-            l += wall->glow * (1.0f - h * (1.0f / GLOW_RISE));
+            l += wall->glow * (1.0f - h * (1.0f / GLOW_RISE))
+                            * glow_ripple(wx, wy);
     }
 #else
     (void)wall;
@@ -427,7 +458,8 @@ static inline uint32_t quad_tint(const r_wall_t *wall, float light,
     if (wall->glow > 0.0f) {
         const float h = wz - wall->glowz;
         if (h >= 0.0f && h < GLOW_RISE)
-            gadd = wall->glow * (1.0f - h * (1.0f / GLOW_RISE));
+            gadd = wall->glow * (1.0f - h * (1.0f / GLOW_RISE))
+                              * glow_ripple(wx, wy);
     }
     return r_light_tint(wx, wy, wz, light, gadd, wall->glow_rgb);
 }
@@ -731,16 +763,20 @@ R_HOT void r_draw_wall_win(const r_camera_t *cam, const r_wall_t *wall,
             void r_reflect_wall_add(const r_wall_t *w);
             r_reflect_wall_add(wall);
         }
-#if R_DOORMIRROR
-        /* A polished door reflects across its own VERTICAL plane.
-         * Published here for the reason the pool walls are: this function
-         * already knows the wall is on screen and worth drawing. Under
-         * the same detail lever, since it is the same kind of luxury. */
-        if (wall->mirror && !detailLevel) {
-            void r_mirror_wall_add(const r_wall_t *w);
-            r_mirror_wall_add(wall);
-        }
+    }
 #endif
+
+#if R_ENVMAP
+    /* Polished metal takes the environment sheen. Published here for the
+     * same reason the pool ghosts are: this function already knows the wall
+     * is on screen and worth drawing. Under the detail lever with them --
+     * it is the same class of luxury. */
+    {
+        extern int detailLevel;
+        if (wall->mirror && !detailLevel) {
+            void r_env_wall_add(const r_wall_t *w);
+            r_env_wall_add(wall);
+        }
     }
 #endif
 

@@ -57,6 +57,13 @@ void *p_level_thing_sprite(int type);
 #include <string.h>
 #include <math.h>
 
+/* The barrel's green, shared by the intact can's rim bead and by the blast
+ * it becomes. Green-dominant with enough red to keep a hot core, and clear
+ * of the BFG's (0.50, 1.00, 0.45) so the two do not read alike. */
+#define BARREL_GLOW_R 0.58f
+#define BARREL_GLOW_G 1.00f
+#define BARREL_GLOW_B 0.40f
+
 /* --- renderer: name lookup -------------------------------------------- */
 
 /* Doom stores texture and flat *indices* in sidedefs and sectors, resolved
@@ -64,7 +71,7 @@ void *p_level_thing_sprite(int type);
  * texture actually referenced by the level, loaded from the cartridge -- so
  * these map Doom's names onto our indices and the rest of the loader is
  * unchanged. */
-#if R_DOORMIRROR
+#if R_ENVMAP
 /* Polished metal walls -- the grey doors and panels. Recorded by
  * resolved index, as the emissive flats are, because the name is gone by
  * the time anything draws: the loader resolves once and the renderer only
@@ -88,8 +95,15 @@ static int mirror_for_name(const char *n)
     /* Exact names, not prefixes: DOORTRAK and DOORSTOP are the dirty
      * track and jamb around a door, not the polished leaf, and BIGDOOR3
      * is rusted brown. */
+    /* Doors first, then the polished METAL WALL plates -- the same material,
+     * and a corridor of brushed steel has as much claim to catching the room
+     * as a door does. Deliberately only the SMOOTH ones: the rusted, grated
+     * and riveted variants (METAL2, BIGDOOR3, SHAWN1) are matte and would
+     * read as wet rather than polished. */
     static const char *const shiny[] = {
-        "DOOR1", "DOOR3", "BIGDOOR2", "BIGDOOR4", "SHAWN2", "METAL1"
+        "DOOR1", "DOOR3", "BIGDOOR2", "BIGDOOR4", "SHAWN2", "METAL1",
+        "SHAWN3", "METAL",  "SILVER1", "SILVER2", "SILVER3",
+        "SUPPORT3", "TEKWALL1", "TEKWALL4"
     };
     /* Compared over eight bytes, not as C strings: Doom's sidedef name
      * fields are char[8] and carry NO terminator when the name fills
@@ -109,7 +123,7 @@ static int mirror_for_name(const char *n)
 int R_TextureNumForName(const char *name)
 {
     const int idx = p_level_resolve(name, "");
-#if R_DOORMIRROR
+#if R_ENVMAP
     if (idx >= 0 && num_mirror < MIRROR_MAX && mirror_for_name(name)) {
         for (int i = 0; i < num_mirror; i++)
             if (mirror_pic[i] == (int16_t)idx) return idx;
@@ -1066,6 +1080,66 @@ void D_TicStart(void)
  * tic ever runs, and the renderer must not walk an empty BSP. */
 static boolean d_level_resident;
 boolean d_level_resident_set(boolean v) { return d_level_resident = v; }
+/* --- shared options ------------------------------------------------------
+ *
+ * A tiny key/value text file in the ROM folder, shared by both games. Text
+ * rather than a packed struct so it survives a version change by ignoring
+ * what it does not recognise, and so it can be read and edited on the card
+ * without a tool. Unknown keys and missing lines keep their built-in value,
+ * which is what makes adding a setting later a one-line change.
+ *
+ * m_config.c is not compiled in this port, so none of Doom's own default
+ * machinery runs; this is the whole of it. */
+/* The four settings, by their real names: the menu's two live in m_menu.h
+ * and the volumes in doomstat.h. Declared here rather than pulling both
+ * headers in, which this file deliberately does not do. */
+extern int detailLevel, showMessages, sfxVolume, musicVolume, screenblocks;
+void S_SetSfxVolume(int volume);
+void S_SetMusicVolume(int volume);
+
+void D_OptionsSave(void)
+{
+    boolean D_OptionsWrite(const char *text);
+    char buf[192];
+    snprintf(buf, sizeof buf,
+             "# DoomUltra64 settings, shared with Doom2Ultra64\n"
+             "detail %d\n"
+             "messages %d\n"
+             "sfx %d\n"
+             "music %d\n",
+             detailLevel, showMessages, sfxVolume, musicVolume);
+    D_OptionsWrite(buf);
+}
+
+void D_OptionsLoad(void)
+{
+    boolean D_OptionsRead(char *buf, size_t cap);
+    char buf[192];
+    if (!D_OptionsRead(buf, sizeof buf)) return;
+
+    for (char *p = buf; p && *p; ) {
+        char *nl = strchr(p, '\n');
+        if (nl) *nl = '\0';
+        int v;
+        if      (sscanf(p, "detail %d", &v) == 1)   detailLevel = v ? 1 : 0;
+        else if (sscanf(p, "messages %d", &v) == 1) showMessages = v ? 1 : 0;
+        else if (sscanf(p, "sfx %d", &v) == 1)
+            sfxVolume = v < 0 ? 0 : (v > 15 ? 15 : v);
+        else if (sscanf(p, "music %d", &v) == 1)
+            musicVolume = v < 0 ? 0 : (v > 15 ? 15 : v);
+        p = nl ? nl + 1 : NULL;
+    }
+
+    /* The resolution is a renderer state, not just a menu number: ask for it
+     * the same way the detail toggle does, or the setting would only take
+     * effect the next time the player touched the menu. */
+    { void R_SetViewSize(int blocks, int detail);
+      R_SetViewSize(screenblocks, detailLevel); }
+
+    S_SetSfxVolume(sfxVolume * 8);
+    S_SetMusicVolume(musicVolume * 8);
+}
+
 int D_InLevel(void) { return gamestate == GS_LEVEL && d_level_resident; }
 
 /* Will this frame's UI paint the opaque status-bar band at the bottom?
@@ -1624,10 +1698,13 @@ void D_LightsUpdate(void)
                                                           mo->frame, 0);
                     const float top = bs && bs->topoffset > 0
                                     ? (float)bs->topoffset : 28.0f;
+                    /* Same hue as the blast below, so the rim glow and the
+                     * explosion are visibly the same substance. */
                     r_bead_add((float)mo->x / 65536.0f,
                                (float)mo->y / 65536.0f,
                                (float)mo->z / 65536.0f + top * 0.92f,
-                               7.0f, 0.42f, 1.00f, 0.38f, 0.30f);
+                               7.0f, BARREL_GLOW_R, BARREL_GLOW_G,
+                               BARREL_GLOW_B, 0.30f);
                     continue;
                 }
 #else
@@ -1644,7 +1721,16 @@ void D_LightsUpdate(void)
 #endif
                 }
                 radius = 560.0f;
-                cr = 1.00f; cg = 0.64f; cb = 0.30f;
+                /* TOXIC GREEN, not a petrol fireball. What is in the can is
+                 * the green ooze the intact barrel's bead already glows with
+                 * -- so the blast is that stuff igniting, and it should read
+                 * as the same substance rather than as a generic explosion
+                 * that happens to be standing where a barrel was.
+                 *
+                 * Green-DOMINANT rather than pure green: a little red keeps
+                 * the core hot and stops it reading as a BFG discharge, which
+                 * sits at (0.50, 1.00, 0.45) and wants to stay distinct. */
+                cr = BARREL_GLOW_R; cg = BARREL_GLOW_G; cb = BARREL_GLOW_B;
                 break;
             case MT_PLASMA:      radius = 288.0f; intensity = 0.75f;
                                  cr = 0.45f; cg = 0.65f; cb = 1.00f; break;

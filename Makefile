@@ -25,7 +25,7 @@ ifeq ($(GAME),doom2)
 ROM           = doom2
 FS            = filesystem-doom2
 IWAD_DEFAULT  = assets/DOOM2.WAD
-N64_ROM_TITLE = "Doom II"
+N64_ROM_TITLE = "Doom2Ultra64"
 # Which IWAD and which music file this cartridge looks for on the card. The
 # game is also identified from the IWAD's own lumps at boot, which is what
 # drives Doom's logic; this only decides the filenames to open, and has to be
@@ -35,7 +35,7 @@ else
 ROM           = doom
 FS            = filesystem
 IWAD_DEFAULT  = assets/DOOM.WAD
-N64_ROM_TITLE = "Doom"
+N64_ROM_TITLE = "DoomUltra64"
 endif
 
 # DEBUG=1 enables libdragon's RDP command validator and an on-screen control
@@ -327,6 +327,55 @@ N64_CFLAGS += -DR_BARCOPY=$(BARCOPY)
 # black band appears along or below the horizon.
 SKYCLAMP ?= 1
 N64_CFLAGS += -DR_SKYCLAMP=$(SKYCLAMP)
+
+# REFLWOB=<tenths of a world unit> is how far the water carries a reflection
+# sideways at full throw. 0 stops the ripple without removing the machinery.
+#
+# WORLD units, deliberately, because the water is ONE SURFACE. The amplitude
+# used to be a fraction of each image's own projected width -- defensible in
+# that a distant reflection then wobbles by as much of itself as a near one
+# does, but it made the displacement a property of the reflected OBJECT
+# rather than of the liquid. A cacodemon and a shotgun shell floating side by
+# side at the same depth below the same ripple were bent by different
+# amounts, and the wall ghosts were worse: they passed half the projected
+# span between their own endpoints, so the same water swung a 512-unit wall
+# an order of magnitude further than a barrel beside it.
+#
+# The perspective behaviour the fraction was protecting survives for free:
+# the throw is scaled by pixels-per-world-unit, which already falls off as
+# 1/depth. 26 reproduces the old amplitude for a typical 40-texel monster,
+# which is the case the 0.13 fraction was tuned against, so the look should
+# read as it did -- except that everything in a pool now rides the same wave.
+REFLWOB ?= 26
+N64_CFLAGS += -DR_REFLWOB=$(REFLWOB)
+
+# REFLDECAL=1 draws liquid reflections in the RDP's DECAL z-mode, coplanar
+# with the pool, instead of biasing them in front of it.
+#
+# A ghost's z is the depth at which the eye ray meets the water, so it is
+# coplanar with the pool by construction -- precisely what decal mode is for.
+# The old scheme instead pushed it a constant NEARER than the pool so it would
+# win the tie: R_REFL_Z_NEAR = FLAT_Z_NEAR + 1.0. That wins against the pool,
+# and against everything else inside the same margin. Because a near offset
+# separates surfaces by dNEAR/d, the margin covers a fixed FRACTION of depth,
+# so a thing standing in the outer part of the distance to a pool was drawn
+# over by its own reflection -- 11% of the pool's depth when FLATZ was 3.5,
+# and 25% once FLATZ moved to 4.3, since the ghost was pinned to FLATZ + 1 and
+# rode along.
+#
+# No bias can fix that, which is why this is a mode change rather than another
+# constant: a one-sided nearer-than test cannot distinguish "the pool" from
+# "just in front of the pool". Coplanarity can. With decal the ghost takes the
+# flats' own near constant, lands on the pool, and is occluded by anything
+# genuinely nearer.
+#
+# libdragon notes decal mode is not bulletproof against z-fighting. This is
+# its best case -- ghost and pool are the same plane through the same near
+# constant -- but REFLDECAL=0 restores the biased form, and that is the lever
+# to reach for if a reflection flickers or drops out rather than merely
+# sitting in the wrong order.
+REFLDECAL ?= 1
+N64_CFLAGS += -DR_REFLDECAL=$(REFLDECAL)
 
 # CLEARCOL=r,g,b paints the framebuffer clear that colour instead of black.
 # A gap probe: any pixel no primitive covered keeps it, so two builds with
@@ -634,6 +683,13 @@ N64_CFLAGS += -DR_HALO=$(HALO)
 SHAFT ?= 1
 N64_CFLAGS += -DR_SHAFT=$(SHAFT)
 
+# SHAFTAMT=<hundredths> is how strongly a beam reads. The two failure modes
+# are close together: too low and it is not light at all, too high and it
+# stops being light in the AIR and becomes a solid pale slab hanging in the
+# room. 0.42 was the slab, 0.21 was the correction and undershot.
+SHAFTAMT ?= 32
+N64_CFLAGS += -DR_SHAFTAMT=$(SHAFTAMT)
+
 # REFLECT=1 draws mirror images of things standing over glowing liquid --
 # a monster wading through nukage reflects in it, dimmed and tinted the
 # pool's own hue. The image is masked to pool pixels by the z-buffer alone
@@ -656,23 +712,74 @@ N64_CFLAGS += -DR_REFLECT=$(REFLECT)
 REFLWOBBLE ?= 1
 N64_CFLAGS += -DR_REFLWOBBLE=$(REFLWOBBLE)
 
-# DOORMIRROR=1 reflects what stands in front of DOOR1, DOOR3, BIGDOOR2/4,
-# SHAWN2 or METAL1 back across the door's own vertical plane, clipped to
-# the door -- including the player, whose sprite the renderer already
-# queues and only ever rejects for sitting at depth zero. It reflects
-# THINGS only: a true mirror would have to show the room behind you,
-# which means walking the BSP again from a mirrored camera, and that is a
-# second world render on a frame that is already CPU-bound.
+# ENVMAP=1 gives polished metal walls -- DOOR1, DOOR3, BIGDOOR2/4, SHAWN2,
+# METAL1 -- an environment-map sheen, so a door catches and moves the room's
+# light instead of reading as a flat painted panel.
 #
-# OFF BY DEFAULT: unfinished. Every stage is verified working on hardware
-# and in emulation -- the textures register, the walls publish, the things
-# pass the reach, depth and alpha tests -- but the final clip of the ghost
-# quad against the door's screen polygon returns the empty set at poses
-# where it plainly should not, so nothing reaches the framebuffer. The
-# clip's inside-ness sign is the prime suspect. Do not ship at 1 until a
-# pose-by-pose A/B shows the image.
-DOORMIRROR ?= 0
-N64_CFLAGS += -DR_DOORMIRROR=$(DOORMIRROR)
+# This REPLACES the door mirror, which reflected the things standing in front
+# of a door across its own plane. That never shipped: its ghost-quad clip
+# returned the empty set at poses where it plainly should not, and a true
+# mirror cannot show the room BEHIND the viewer without walking the BSP again
+# from a mirrored camera -- a second world render on a frame already CPU-bound.
+#
+# The sheen costs one quad and one 32x32 tile per door, because two properties
+# of this renderer collapse the usual per-vertex reflect to nothing: a door is
+# a VERTICAL plane, so its normal is constant and reflection leaves the view
+# ray's vertical component alone; and the camera never PITCHES, so screen x is
+# view azimuth and screen y is view elevation, both by a fixed scale. The
+# reflected azimuth is 2*theta_normal - theta_view, which over a door's width
+# is affine in screen x -- and affine in screen space is what a flat textured
+# quad already interpolates. Hence no perspective correction and no per-pixel
+# work; see the note at the top of src/r_env.c.
+#
+# The map itself is synthesised at first use rather than baked: what a door
+# reflects in a Doom room is not a scene, it is a bright band where the walls
+# meet the ceiling lights. No cartridge space, no wad2n64 change.
+#
+# ENVAMT=<hundredths> sets how strongly it reads; the door's own texture has
+# to survive underneath, so this is a sheen and not a mirror. It also rides
+# the wall's light, so a door in a dark room stops being flat without glowing.
+ENVMAP ?= 1
+N64_CFLAGS += -DR_ENVMAP=$(ENVMAP)
+ENVAMT ?= 18
+N64_CFLAGS += -DR_ENVAMT=$(ENVAMT)
+# ENVKNEE=<0..255> is the sector light level below which a door gets NO sheen.
+# A knee rather than a slope: polished metal catches a room that has something
+# to catch, and a dim room does not give a weak highlight so much as none --
+# a faint sheen in the dark reads as a rendering fault, not as a material.
+# 48 of 255 is roughly "anything but a near-black room".
+ENVKNEE ?= 48
+N64_CFLAGS += -DR_ENVKNEE=$(ENVKNEE)
+# ENVFULL=<0..255> is where it reaches full strength. Ramping all the way to
+# fullbright left every ordinary room at about a third and the sheen never
+# really arrived; stopping at 176 means "off in the dark, on everywhere else"
+# with a ramp wide enough not to be an edge you can walk across.
+ENVFULL ?= 176
+N64_CFLAGS += -DR_ENVFULL=$(ENVFULL)
+
+# SPRSHINE=1 gives roughly cylindrical props -- barrels, tech pillars -- a
+# sliding specular highlight, so they stop reading as flat cutouts.
+#
+# NOT an environment map, and it cannot be one: a billboard has no surface
+# normal to reflect. Every sprite faces the camera, so a real env lookup would
+# return the same answer for every barrel everywhere and read as a wash
+# sliding with the view. What a cylinder does have is a KNOWN shape --
+# horizontal position across the sprite IS angle around the barrel -- so the
+# highlight of a fixed room light lands at u = sin((theta_light - theta_view)/2)
+# and slides across the sprite as the player walks around it.
+#
+# Honest for a cylinder and wrong for anything else, which is why the walk
+# arms it per thing TYPE rather than the pass applying it to every sprite.
+#
+# Drawn as a second pass over the same tiles: RGB from SHADE, alpha from
+# TEX0 * SHADE, so the sprite's own cutout masks it and a transparent texel
+# contributes nothing. It rides the thing's own lighting, so a barrel in a
+# dark room stops being flat without glowing. SPRSHINEAMT is hundredths at
+# the band's centre.
+SPRSHINE ?= 1
+N64_CFLAGS += -DR_SPRSHINE=$(SPRSHINE)
+SPRSHINEAMT ?= 26
+N64_CFLAGS += -DR_SPRSHINEAMT=$(SPRSHINEAMT)
 
 # CI4FLATS=1 ships every flat whose 4096 indices share one high nibble as
 # full-resolution 64x64 CI4 (59 of the IWAD's 107, losslessly) instead of
@@ -801,7 +908,7 @@ N64_MKDFS_ROOT = $(FS)
 # never assembles patches at runtime. The full set is ~4.6 MB, nothing against
 # a cartridge, and the runtime loads only the ones a level actually names.
 
-src = src/main.c src/mem.c src/dt64.c src/r_wall.c src/wad.c src/p_level.c src/r_bsp.c src/r_flat.c src/r_sky.c src/r_sprite.c src/r_am.c src/r_tri.c src/r_pvs.c src/r_wipe.c
+src = src/main.c src/mem.c src/dt64.c src/r_wall.c src/wad.c src/p_level.c src/r_bsp.c src/r_flat.c src/r_sky.c src/r_sprite.c src/r_am.c src/r_tri.c src/r_pvs.c src/r_wipe.c src/r_env.c
 
 # Only compiled when asked for, so an ordinary ROM carries none of it. See the
 # RSPIDLE comment above.
@@ -1026,7 +1133,7 @@ $(ROM).z64: $(BUILD_DIR)/$(ROM).dfs
 # IWADs -- a public release normally ships without them, and the pack says
 # what it skipped.
 RELVER := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-RELZIP := DoomN64-$(RELVER).zip
+RELZIP := DoomUltra64-$(RELVER).zip
 .PHONY: release
 release:
 	@$(MAKE) --no-print-directory EXTWAD=1
@@ -1040,8 +1147,8 @@ release:
 	done
 	@rm -rf $(BUILD_DIR)/release
 	@mkdir -p $(BUILD_DIR)/release/Doom/saves
-	@cp doom.z64  $(BUILD_DIR)/release/Doom/Doom.z64
-	@cp doom2.z64 $(BUILD_DIR)/release/Doom/Doom2.z64
+	@cp doom.z64  $(BUILD_DIR)/release/Doom/DoomUltra64.z64
+	@cp doom2.z64 $(BUILD_DIR)/release/Doom/Doom2Ultra64.z64
 	@for m in DOOMMUS.WAD DOOM2MUS.WAD; do \
 	    if [ -f "$$m" ]; then cp "$$m" $(BUILD_DIR)/release/Doom/; \
 	    else echo "    [NOTE ] $$m not present -- archive ships without it"; fi; \

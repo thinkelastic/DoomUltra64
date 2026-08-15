@@ -119,7 +119,26 @@
 
 /* A reflection sits just in front of the pool that shows it: the margin
  * the ghost had when flats were 3.5 and it was 4.5. */
+/* Under REFLDECAL the ghost is COPLANAR with the pool, not biased in front
+ * of it, so it takes the flats' own constant and the RDP's decal z-mode
+ * decides where it lands. The +1.0 form below is the fallback.
+ *
+ * That +1.0 was never tunable in isolation, which is why this stopped being
+ * a constant. It had to exceed the pool's banding sag, so the ghost was
+ * pinned to FLAT_Z_NEAR + 1 and its lead over the WALLS' 4.0 was whatever
+ * FLATZ happened to make it -- when FLATZ moved 3.5 -> 4.3 the ghost went
+ * 4.5 -> 5.3 and the zone in which a mirror wrongly drew over something
+ * standing in front of it went from 11% of the pool's depth to 25%. A bias
+ * cannot separate "nearer than the pool" from "the pool"; an equality test
+ * can, which is what decal mode is. */
+#ifndef R_REFLDECAL
+#define R_REFLDECAL 1
+#endif
+#if R_REFLDECAL
+#define R_REFL_Z_NEAR (R_FLAT_Z_NEAR)
+#else
 #define R_REFL_Z_NEAR (R_FLAT_Z_NEAR + 1.0f)
+#endif
 
 /* Flats are batched exactly like walls, and for the same reason: a texture
  * upload costs far more than a triangle. Drawing them as the BSP walk finds

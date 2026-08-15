@@ -37,35 +37,33 @@ void r_sprite_flush(void);
 #define R_REFLECT 0
 #endif
 #if R_REFLECT
+/* `liquid` selects whether the image ripples: the reflective set also holds
+ * polished DRY surfaces (teleporter pads, marble, blue tech plate), which
+ * mirror but do not move. */
 void r_reflect_add(const r_camera_t *cam, const r_thing_t *t,
                    const float sh[3], int fog_ll,
-                   float plane_h, const float pool_rgb[3]);
+                   float plane_h, const float pool_rgb[3], int liquid);
 /* The visible footprint of a reflective flat, straight from the BSP walk's
  * flat regions (the same polygons the vapor pass consumes). Ghosts are
  * clipped to these in screen space, which is what confines a mirror image
  * to its own surface: the z-test alone cannot tell a reflective floor
- * from a same-height neighbour, a farther pool, or untouched sky. */
+ * from a same-height neighbour, a farther pool, or untouched sky. The z
+ * side of the masking is decal mode (REFLDECAL), not a bias -- see the
+ * note in r_reflect_flush for why a bias could not work. */
 void r_reflect_region(const r_polypt_t *pts, int npts, float h);
 void r_reflect_flush(const r_camera_t *cam);
 #endif
 
-/* Door mirrors: polished metal walls reflect the things standing in
- * front of them, across the wall's own vertical plane. */
-#ifndef R_DOORMIRROR
-#define R_DOORMIRROR 0
+#ifndef R_SPRSHINE
+#define R_SPRSHINE 0
 #endif
-#if R_DOORMIRROR
-void r_mirror_begin(void);
-void r_mirror_wall_add(const r_wall_t *w);
-void r_mirror_thing(float x, float y, float z, void *spr,
-                    const float sh[3], unsigned ang);
-void r_mirror_flush(const r_camera_t *cam);
+#if R_SPRSHINE
+/* Arm the cylindrical shine for the NEXT thing queued; the walk calls this
+ * for barrels and other roughly-cylindrical props. Cleared by r_sprite_add
+ * whether or not that thing survives its culls. */
+void r_sprite_shine_next(void);
 #else
-static inline void r_mirror_begin(void) {}
-static inline void r_mirror_thing(float x, float y, float z, void *spr,
-                                  const float sh[3], unsigned ang)
-{ (void)x; (void)y; (void)z; (void)spr; (void)sh; (void)ang; }
-static inline void r_mirror_flush(const r_camera_t *cam) { (void)cam; }
+static inline void r_sprite_shine_next(void) {}
 #endif
 
 int  r_sprite_count(void);

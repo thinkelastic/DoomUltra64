@@ -1,10 +1,16 @@
 /*
- * DoomN64 -- milestone 1: real Doom wall textures rasterised by the RDP.
+ * DoomUltra64 -- the frame loop.
  *
- * Proves the pipeline end to end: WAD -> build-time CI8 composition -> ROM
- * filesystem -> TMEM tiles -> perspective-correct, fogged triangles.
+ * Owns the display, the frame's structure and the order the renderer's passes
+ * run in; the passes themselves live in r_*.c and the game logic behind
+ * d_bridge.c. Two things here are load-bearing and easy to disturb:
  *
- * Stick/D-pad walks, L/R strafe, C-left/right turn.
+ *   - the RESOLUTION is a runtime choice (the options menu's Graphic Detail),
+ *     so SCREEN_W/SCREEN_H are variables and the switch may only happen at
+ *     the top of a frame, where nothing is in flight;
+ *   - the frame tail is PIPELINED -- rdpq_detach_show returns while the RDP
+ *     is still rasterising, and the work after it is deliberately placed in
+ *     that shadow. Blocking there gives the time back.
  */
 
 #include <libdragon.h>
@@ -19,6 +25,7 @@
 #include "r_flat.h"
 #include "r_halo.h"
 #include "r_sky.h"
+#include "r_env.h"
 #include "r_sprite.h"
 #include "r_vapor.h"
 #include "wad.h"
@@ -80,7 +87,7 @@ static r_camera_t cam;
 
 /* --- runtime resolution ---------------------------------------------------
  *
- * The options menu's GRAPHIC DETAIL picks between HIGH (512x480 interlaced)
+ * The options menu's GRAPHIC DETAIL picks between HIGH (320x480 interlaced)
  * and LOW (320x240). Doom's own M_ChangeDetail already routes through
  * R_SetViewSize, so the menu needed no new item; d_bridge turns that call
  * into a request here.
@@ -103,7 +110,12 @@ static int pend_scr_w = SCREEN_BOOT_W, pend_scr_h = SCREEN_BOOT_H;
  * setting that does nothing than an assert in the middle of a game. */
 static bool hires_ok;
 
-/* 320x480 interlaced. libdragon ships constants for 512x480 and 640x480 but
+/* Frames left before every framebuffer has been redrawn at the current size.
+ * Set by screen_apply, counted down in the loop; the melt refuses to start
+ * while it is non-zero. */
+static int scr_settle;
+
+/* 320x480 interlaced. libdragon ships constants for 320x480 and 640x480 but
  * not this one, and it is the cheapest 480i this renderer can draw: the
  * column count -- which is what the occlusion machinery costs scale with --
  * does not change from 320x240 at all. display_init's own rules are met
@@ -194,6 +206,16 @@ static void screen_apply(void)
     display_change(pend_scr_h >= 480 ? RES_320x480 : RESOLUTION_320x240,
                    DEPTH_16_BPP, 3, GAMMA_NONE,
                    vi_filter_for(pend_scr_w));
+
+    /* Every framebuffer now holds content of the WRONG SIZE until it has
+     * been drawn at the new one, and there are three of them. A melt started
+     * before they have all come round captures whichever buffer prev_fb
+     * happens to point at, and the part of it below the old height is
+     * pre-switch content -- the frame duplicated top and bottom. It needs a
+     * screen change and a wipe close together, which is exactly what booting
+     * into HIGH from saved options produces: the mode switches on frame one
+     * and the title screen follows immediately. */
+    scr_settle = 3;
 
     r_scr_w = pend_scr_w;
     r_scr_h = pend_scr_h;
@@ -386,6 +408,13 @@ static void scene_init(void)
         D_PlayerView(&cam.x, &cam.y, &cam.z, &cam.angle);
         D_UI_LevelStart();
 #else
+        /* Settings from the shared file beside the ROMs, before the title
+         * screen so the resolution the player chose is the one they boot
+         * into rather than something that snaps a frame later. m_config.c
+         * is not compiled here, so this is the only thing that restores
+         * them. */
+        { void D_OptionsLoad(void); D_OptionsLoad(); }
+
         /* Boot into the title screen with the attract demos cycling behind
          * the menu, exactly as chocolate doom's D_DoomMain ends. */
         {
@@ -606,6 +635,11 @@ typedef int boolean_stub_t;
  * between the BSP walk and each flush is what decides where to optimise. */
 #if D_HWSTAT
 static uint32_t ph_walk_us, ph_wallflush_us, ph_flatflush_us, ph_sprite_us;
+/* The passes nobody ever timed. They turned out to be the largest single
+ * block on a nukage-heavy map -- see the profiling notes -- which is exactly
+ * what an unmeasured phase is for. refl is the liquid mirrors; fx is the
+ * shafts, sky, halos and vapor together. */
+static uint32_t ph_refl_us, ph_fx_us;
 #endif
 
 /* Sub-tic phase for frame interpolation: how far into the next tic the
@@ -841,7 +875,7 @@ int main(void)
      * listening and turns a silent hang into a message. */
     debug_init_usblog();
 
-    /* Two buffers at 480, three below it. A 512x480 buffer is 480 KB
+    /* Two buffers at 480, three below it. A 320x480 buffer is 480 KB
      * against 150 KB at 320x240, and the heap has about 1730 KB free
      * after the arenas: two buffers plus the z buffer take 1440 KB and
      * leave room for the melt's saved frame, three would take 1920 KB and
@@ -856,8 +890,8 @@ int main(void)
      * blocks are certain to be contiguous. Every later switch reuses them
      * through display_change and cannot fail.
      *
-     * 512x480 covers all three modes -- 640x240 is 307 KB a buffer and
-     * 320x240 is 154 KB, both inside 512x480's 480 KB -- so the reservation
+     * 320x480 covers all three modes -- 640x240 is 307 KB a buffer and
+     * 320x240 is 154 KB, both inside 320x480's 480 KB -- so the reservation
      * is the price of the toggle existing at all, not of using it. Two
      * buffers rather than three: three at this size do not fit beside the
      * arenas, and display_change can drop to any smaller count but never
@@ -881,7 +915,7 @@ int main(void)
     display_init(hires_ok ? RES_320x480 : RESOLUTION_320x240,
                  DEPTH_16_BPP, 3, GAMMA_NONE, vi_filter_for(SCREEN_W));
 
-    /* The allocation above is always 512x480; the BOOT mode may not be.
+    /* The allocation above is always 320x480; the BOOT mode may not be.
      * Drop to it now that the memory is claimed -- this reconfigures the VI
      * and allocates nothing, exactly as the detail menu's later switches
      * do. */
@@ -1034,8 +1068,9 @@ int main(void)
             int ga;
             const int gs = D_FlowState(&ga);
             if (last_state >= 0 && gs != last_state && have_prev &&
-                !r_wipe_active())
+                !r_wipe_active() && scr_settle == 0)
                 r_wipe_start(prev_fb);
+            if (scr_settle > 0) scr_settle--;
             last_state = gs;
             have_prev = prev_fb != NULL;
         }
@@ -1127,8 +1162,8 @@ int main(void)
 
         r_flat_begin();
         r_sprite_begin();
-        r_mirror_begin();
         r_vapor_begin();
+        r_env_begin();
         r_halo_begin();
         r_setup_walls();
         r_sky_span_reset();
@@ -1197,16 +1232,28 @@ int main(void)
               /* Mirror images of things over glowing pools: after the
                * sprites (nearer actors occlude them via z), before sky
                * and vapor (spill repaint, haze over the mirror). */
+#if D_HWSTAT
+              { const uint32_t t_ = TICKS_READ();
+                r_reflect_flush(&cam);
+                ph_refl_us += TICKS_TO_US(TICKS_SINCE(t_)); }
+#else
               r_reflect_flush(&cam);
-#if R_DOORMIRROR
-              r_mirror_flush(&cam);
 #endif
 #endif
           } }
 
+        /* Polished metal, after the walls are in the depth buffer and
+         * before the backdrop: the sheen sits on the leaf, not on the sky. */
+        { int D_InLevel(void); int D_AutomapActive(void);
+          if (level_loaded && D_InLevel() && !D_AutomapActive())
+              r_env_flush(&cam); }
+
         /* Backdrop last, depth-tested: it fills only the pixels the world
          * left untouched, and only in the columns the walk saw sky. */
         { int D_InLevel(void); int D_AutomapActive(void);
+#if D_HWSTAT
+          const uint32_t t_fx = TICKS_READ();
+#endif
           /* Beams before the backdrop: the sky covers the part of a
            * shaft that is behind it, which is what keeps the beam out
            * of the sky instead of smeared across it. */
@@ -1221,7 +1268,11 @@ int main(void)
           if (level_loaded && D_InLevel() && !D_AutomapActive())
               r_halo_flush(&cam);
           if (level_loaded && D_InLevel() && !D_AutomapActive())
-              r_vapor_flush(&cam); }
+              r_vapor_flush(&cam);
+#if D_HWSTAT
+          ph_fx_us += TICKS_TO_US(TICKS_SINCE(t_fx));
+#endif
+        }
 
 #if R_BARSCISSOR
         /* Full screen again for everything that draws INTO the band: the
@@ -1426,6 +1477,54 @@ int main(void)
         if (warm < 60) warm++;
         else if (frame_total_us > worst_us) worst_us = frame_total_us;
 
+#if D_HWSTAT
+        /* WHERE the worst frame happened, not just how bad it was.
+         *
+         * A peak with no coordinates cannot be revisited: the whole point of
+         * a profiling run is to come back to the pose with VIEWLOCK or FREEZE
+         * and work on it, and "56.9 ms somewhere in the demo" does not permit
+         * that. So the window's worst frame carries its map, its pose and its
+         * own phase split.
+         *
+         * The phase counters accumulate across the window and are zeroed with
+         * it, so the per-frame cost is their delta since the previous frame --
+         * hence the four shadows, reset in the same place the counters are. */
+        static uint32_t win_us, win_submit, win_walk, win_wall, win_flat, win_spr;
+        static uint32_t win_refl, win_fx;
+        static int win_ep, win_map, win_x, win_y, win_z, win_a;
+        static uint32_t pw_prev, pl_prev, pf_prev, ps_prev, pr_prev, px_prev;
+        {
+            const uint32_t d_walk = ph_walk_us      - pw_prev;
+            const uint32_t d_wall = ph_wallflush_us - pl_prev;
+            const uint32_t d_flat = ph_flatflush_us - pf_prev;
+            const uint32_t d_spr  = ph_sprite_us    - ps_prev;
+            const uint32_t d_refl = ph_refl_us      - pr_prev;
+            const uint32_t d_fx   = ph_fx_us        - px_prev;
+            pw_prev = ph_walk_us;      pl_prev = ph_wallflush_us;
+            pf_prev = ph_flatflush_us; ps_prev = ph_sprite_us;
+            pr_prev = ph_refl_us;      px_prev = ph_fx_us;
+
+            if (warm >= 60 && frame_total_us > win_us) {
+                extern int gameepisode, gamemap;
+                win_us   = frame_total_us;
+                /* Splits the frame in two at the right place: submit_us is
+                 * CPU only, frame_total_us includes the wait for the RDP. So
+                 * (total - submit) is RDP-bound time and
+                 * (submit - walk - wall - flat - spr) is CPU work in the
+                 * passes nothing else times -- sky, vapor, halos, the
+                 * automap and the UI. Without this the shortfall is just
+                 * "unaccounted" and could be either. */
+                win_submit = submit_us;
+                win_walk = d_walk; win_wall = d_wall;
+                win_flat = d_flat; win_spr  = d_spr;
+                win_refl = d_refl; win_fx   = d_fx;
+                win_ep   = gameepisode; win_map = gamemap;
+                win_x = (int)cam.x; win_y = (int)cam.y; win_z = (int)cam.z;
+                win_a = (int)(cam.angle * 1000.0f);
+            }
+        }
+#endif
+
         /* Periodic stats over USB: on hardware this is how frame numbers
          * reach the host without reading them off the television. Outside
          * the measured span, so it perturbs nothing there -- but debugf over
@@ -1471,6 +1570,24 @@ int main(void)
                            (unsigned long)ph_sprite_us);
                     ph_walk_us = ph_wallflush_us = 0;
                     ph_flatflush_us = ph_sprite_us = 0;
+                    /* The per-frame shadows track those counters, so they
+                     * have to be zeroed with them or the next frame's delta
+                     * underflows into a vast bogus peak. */
+                    pw_prev = pl_prev = pf_prev = ps_prev = 0;
+                    pr_prev = px_prev = 0;
+                    ph_refl_us = ph_fx_us = 0;
+                    /* The window's worst, with the pose that produced it --
+                     * this is the line a profiling run exists to collect. */
+                    debugf("worst: %luus sub=%lu E%dM%d pose=%d,%d,%d,%d "
+                           "walk=%lu wall=%lu flat=%lu spr=%lu "
+                           "refl=%lu fx=%lu\n",
+                           (unsigned long)win_us, (unsigned long)win_submit,
+                           win_ep, win_map,
+                           win_x, win_y, win_z, win_a,
+                           (unsigned long)win_walk, (unsigned long)win_wall,
+                           (unsigned long)win_flat, (unsigned long)win_spr,
+                           (unsigned long)win_refl, (unsigned long)win_fx);
+                    win_us = 0;
                     /* Arena high-water marks during play, not just at load.
                      * The load-time report fires before the first level's
                      * textures and every sprite frame is demand-loaded, so it

@@ -258,6 +258,70 @@ void D_SetDataDir(const char *dir)
     if (dir) snprintf(data_dir, sizeof data_dir, "%s", dir);
 }
 
+/* --- shared options file -------------------------------------------------
+ *
+ * Settings live in the ROM FOLDER, not in saves/ and not per game: Doom and
+ * Doom II sit side by side in the same directory and there is one player with
+ * one preference about resolution, messages and volume. Putting the file
+ * beside the ROMs is what makes it shared -- a per-game path would give the
+ * same person two answers depending on which cartridge image booted.
+ *
+ * Its own directory list, ordered folder-first, because the save list starts
+ * with saves/ and that is exactly where this must NOT go. */
+static const char *const opt_dirs[] = {
+    "sd:/Doom/", "sd:/DOOM/", "sd:/doom/", "sd:/",
+};
+#define OPT_NAME "options.cfg"
+
+static void save_dir_ensure(void);   /* defined below; the options file
+                                      * needs the same folder to exist */
+
+/* The candidate folders, IWAD's own first when there is one. */
+static int opt_dir_at(int i, char *out, size_t cap)
+{
+    if (data_dir[0]) {
+        if (i == 0) { snprintf(out, cap, "%s%s", data_dir, OPT_NAME); return 1; }
+        i--;
+    }
+    if (i >= (int)(sizeof opt_dirs / sizeof opt_dirs[0])) return 0;
+    snprintf(out, cap, "%s%s", opt_dirs[i], OPT_NAME);
+    return 1;
+}
+
+/* Reads into `buf`, NUL-terminated; false if no file was found anywhere. */
+boolean D_OptionsRead(char *buf, size_t cap)
+{
+    char path[80];
+    for (int i = 0; opt_dir_at(i, path, sizeof path); i++) {
+        FILE *f = fopen(path, "rb");
+        if (!f) continue;
+        const size_t got = fread(buf, 1, cap - 1, f);
+        fclose(f);
+        buf[got] = '\0';
+        if (got > 0) return true;
+    }
+    return false;
+}
+
+boolean D_OptionsWrite(const char *text)
+{
+    char path[80];
+    const size_t len = strlen(text);
+
+    /* The folder has to exist before a file can be made in it; save_dir_ensure
+     * already creates sd:/Doom, and is a no-op after its first call. */
+    save_dir_ensure();
+
+    for (int i = 0; opt_dir_at(i, path, sizeof path); i++) {
+        FILE *f = fopen(path, "wb");
+        if (!f) continue;
+        const size_t put = fwrite(text, 1, len, f);
+        fclose(f);
+        if (put == len) return true;
+    }
+    return false;
+}
+
 static void save_dir_ensure(void)
 {
     static bool tried;

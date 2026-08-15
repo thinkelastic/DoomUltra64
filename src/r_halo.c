@@ -116,6 +116,12 @@ void r_halo_init(void)
 /* Sector light below which a well is not lit enough to throw a beam. */
 #define SHAFT_MIN_LIGHT 96
 
+/* Beam strength, hundredths. See the note at the shaft_prism call. */
+#ifndef R_SHAFTAMT
+#define R_SHAFTAMT 32
+#endif
+#define SHAFT_AMT ((float)R_SHAFTAMT * 0.01f)
+
 /* How much of the opening's outline the beam keeps. A sky well is a
  * subsector polygon and those are convex but not always tidy; eight is
  * more corners than any real skylight has and bounds the per-shaft work.
@@ -568,10 +574,14 @@ void r_shaft_flush(const r_camera_t *cam)
         const shaftjob_t *s = &shafts[i];
         /* Daylight through a hole: warm white, scaled by how bright the
          * sector under it actually is. The texture carries the fall from
-         * the opening to the floor; the vertex alpha sets its scale. Half
-         * what it was -- at full strength the beam read as a solid pale
-         * slab rather than as light in the air. */
-        shaft_prism(cam, s, 0.21f * s->lum);
+         * the opening to the floor; the vertex alpha sets its scale.
+         *
+         * A lever rather than a constant, because the two failure modes sit
+         * close together: too low and the beam is not read as light at all,
+         * too high and it stops being light in the air and becomes a solid
+         * pale slab hanging in the room. It was 0.42 once, which was the
+         * slab; 0.21 was the correction and undershot. */
+        shaft_prism(cam, s, SHAFT_AMT * s->lum);
     }
     num_shafts = 0;
 }

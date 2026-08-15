@@ -18,7 +18,9 @@
  * Strips are WIPE_STRIP pixels wide rather than one, which is the whole
  * concession to the hardware: 320 single-column uploads a frame would be
  * absurd, and at four the melt still reads as Doom's. TMEM decides the
- * ceiling -- a strip is width * 240 * 2 bytes and must fit in 4 KB.
+ * ceiling -- a strip is width * height * 2 bytes and must fit in 4 KB, so
+ * at 4 texels wide that is 1920 bytes at 240 rows and 3840 at 480. Both fit
+ * the full tile at either height.
  */
 #include "r_wipe.h"
 
@@ -41,6 +43,10 @@
  * narrowest strip, which is what col_y has to be sized for now that the
  * width is chosen at runtime. */
 #define WIPE_COLS_MAX (SCREEN_MAX_W / 4)
+
+/* Rows per upload. The height this pass was written for and the only one it
+ * is known to survive; see the note in r_wipe_draw. */
+#define WIPE_CHUNK_H  240
 
 /* Doom's melt, per strip instead of per column: a negative offset is a
  * delay before this strip starts moving, then it accelerates to 8 pixels
@@ -115,6 +121,12 @@ void r_wipe_start(const surface_t *from)
      * kinder to RDRAM than the melt's own tall thin strips. */
     rdpq_attach(&saved, NULL);
     rdpq_set_mode_copy(false);
+    /* RGBA16 MUST NOT sample through the TLUT -- V_BarBlit takes the same
+     * precaution for the same tiles. Without it these blits read palette
+     * entries instead of pixels, and worse, an enabled TLUT reserves the
+     * upper half of TMEM: the tile then has 2048 bytes rather than 4096.
+     * That is exactly the 240-vs-480 threshold this went wrong at. */
+    rdpq_mode_tlut(TLUT_NONE);
     for (int ty = 0; ty < SCREEN_H; ty += 32)
         for (int tx = 0; tx < SCREEN_W; tx += 64) {
             const int w = tx + 64 > SCREEN_W ? SCREEN_W - tx : 64;
@@ -164,6 +176,15 @@ void r_wipe_draw(void)
     /* Straight texel copy: no shading, no depth, no filtering. The saved
      * frame is already the finished picture. */
     rdpq_set_mode_copy(false);
+    /* Same reason as the capture: RGBA16 must not sample through the TLUT,
+     * or these blits read palette entries instead of pixels.
+     *
+     * It is NOT a TMEM size limit, which an earlier version of this comment
+     * claimed. libdragon budgets the tile by FORMAT alone -- 4096 bytes for
+     * RGBA16 whether or not a TLUT is bound (rdpq_tex.c) -- so a 4-texel
+     * strip at 8 bytes a row fits 480 rows either way. The duplicated frame
+     * had a different cause; see scr_settle in main.c. */
+    rdpq_mode_tlut(TLUT_NONE);
 
     for (int i = 0; i < WIPE_COLS; i++) {
         const int y = col_y[i];
@@ -183,11 +204,41 @@ void r_wipe_draw(void)
          * not one. */
         if (h <= 1) continue;
 
-        surface_t strip = surface_make_sub(&saved, x0, 0, WIPE_STRIP, h);
-        rdpq_tex_upload(TILE0, &strip, NULL);
-        rdpq_texture_rectangle(TILE0, x0, y > 0 ? y : 0,
-                               x0 + WIPE_STRIP, (y > 0 ? y : 0) + h, 0, 0);
+        /* CHUNKED at the height this melt was designed around.
+         *
+         * The geometry is not the problem -- instrumented on a real 480i run,
+         * the capture, the saved surface and the strip are all exactly
+         * 4 x 480 with a 640-byte stride. What does not survive is the tall
+         * upload itself: this pass was written when a strip was at most 240
+         * rows ("width * 240 * 2 bytes" in the header note above), and at
+         * 480 the frame comes back duplicated down the column. Rather than
+         * keep guessing at which RDP limit that is -- three theories have
+         * been wrong, including a TMEM one that libdragon's own source
+         * refutes -- the strip is split into pieces of the height that has
+         * always worked. Two uploads per column during a melt, which lasts
+         * under a second and is not a frame-rate concern.
+         *
+         * Each piece takes its source rows from the same offset it draws to,
+         * so the melt is unchanged: the saved frame still slides down as one
+         * image, it is simply delivered in bands. */
+        for (int off = 0; off < h; off += WIPE_CHUNK_H) {
+            int ch = h - off;
+            if (ch > WIPE_CHUNK_H) ch = WIPE_CHUNK_H;
+            if (ch <= 1) break;         /* same zero-height guard as above */
+
+            surface_t strip =
+                surface_make_sub(&saved, x0, off, WIPE_STRIP, ch);
+            rdpq_tex_upload(TILE0, &strip, NULL);
+            const int dy = (y > 0 ? y : 0) + off;
+            rdpq_texture_rectangle(TILE0, x0, dy,
+                                   x0 + WIPE_STRIP, dy + ch, 0, 0);
+        }
     }
+
+    /* Hand the TLUT back: the UI bracket that follows draws CI8 text and
+     * would otherwise sample it as raw colour. */
+    dt64_bind_tlut();
+    rdpq_mode_tlut(TLUT_RGBA16);
 }
 
 void r_wipe_free(void)

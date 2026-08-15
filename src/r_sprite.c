@@ -22,11 +22,9 @@
 #include "r_sprite.h"
 #include "r_flat.h"     /* R_FLAT_NEAR: the depth scale walls and flats share */
 #include "r_tri.h"
-#include "r_fastmath.h"   /* floor/ceil as one FPU op, not a libm call */
+#include "r_fastmath.h"
+#include "r_light.h"     /* the registry the shine points at */   /* floor/ceil as one FPU op, not a libm call */
 
-#ifndef R_DOORMIRROR
-#define R_DOORMIRROR 0
-#endif
 #ifndef R_REFLWOBBLE
 #define R_REFLWOBBLE 0
 #endif
@@ -62,6 +60,14 @@ typedef struct {
      * so it is one divide per sprite instead of one per tile. */
     float       z;
     uint8_t     mipped;
+#if R_SPRSHINE
+    /* Cylindrical specular pass: see spr_shine_flush. Carries the view
+     * azimuth to the thing, which is what slides the highlight as the
+     * player walks around it. */
+    uint8_t     shine;
+    float       vaz;
+    float       laz;    /* azimuth TO the dominant light */
+#endif
 } sprjob_t;
 
 /* 16-aligned for the same reason r_wall.c's quads[] is: the array landed at
@@ -86,6 +92,11 @@ typedef struct {
     float       w_top;       /* sprite's world top; rows run down from it */
     float       plane_h;     /* the waterline */
     float       sr, sg, sb;  /* dimmed, pool-tinted shade */
+    /* Whether the plane below is an actual LIQUID. The reflective set also
+     * holds polished DRY surfaces -- teleporter pads, marble, the blue tech
+     * plate -- registered with glow 0 for exactly this reason: they mirror,
+     * but nothing about them ripples. Only liquids wobble. */
+    uint8_t     liquid;
 } refljob_t;
 static refljob_t refl[REFL_MAX];
 static int       numrefl;
@@ -108,6 +119,29 @@ typedef struct {
 static reflregion_t reflreg[REFL_REGION_MAX];
 static int          numreflreg;
 
+/* Each footprint PROJECTED, once per frame.
+ *
+ * The clip below runs per ghost QUAD, and it used to re-project every
+ * footprint inside that loop -- a transform and a near-clip of up to 16
+ * points, a reciprocal each, and a winding sum, all recomputed for a result
+ * that depends only on the camera and the region. Neither changes during a
+ * flush. On a nukage map that is (ghosts x tiles x regions) projections a
+ * frame where (regions) would do: the profiling run put liquid reflections at
+ * 36-42 ms of the worst E2M2 frames, larger than the BSP walk.
+ *
+ * Hoisted here, the per-quad work is the Sutherland-Hodgman clip alone. The
+ * cached values are exactly what the inner loop computed, so the emitted
+ * geometry is bit-identical -- this is a pure loop-invariant hoist, not an
+ * approximation. */
+typedef struct {
+    float px[24], py[24];
+    float h;
+    float sgn;          /* screen winding: which side of an edge is inside */
+    float bx0, bx1, by0, by1;   /* screen bounds of the projected footprint */
+    int   n;            /* < 3 means the footprint projected to nothing */
+} reflproj_t;
+static reflproj_t reflproj[REFL_REGION_MAX];
+
 #if R_REFLWOBBLE
 /* A reflection on moving water is not a mirror -- it is a mirror that the
  * surface keeps bending. Now that the liquid itself drifts and swells, a
@@ -122,7 +156,29 @@ static int          numreflreg;
  *
  * Driven off the same clock as the liquid's own ripple, so the surface
  * and what it reflects move in sympathy rather than arguing. */
-#define WOBBLE_AMP    0.13f     /* of the image's half-width */
+/* Throw in WORLD UNITS, not in fractions of the image.
+ *
+ * The amplitude used to be a fraction of each image's own projected
+ * half-width, for a defensible reason -- it keeps a distant reflection
+ * wobbling by as much of itself as a near one does. But the water is ONE
+ * SURFACE. Scaling by the reflected object's size means a cacodemon and a
+ * shotgun shell floating side by side in the same pool, at the same depth
+ * below the same ripple, are displaced by different amounts. It was worse
+ * for the wall ghosts, which passed half the projected span BETWEEN THEIR
+ * ENDPOINTS: a long wall's reflection swung by a fraction of its whole
+ * on-screen length, so the same water bent a 512-unit wall an order of
+ * magnitude further than a barrel beside it.
+ *
+ * A world-space throw scaled by the projection keeps the perspective
+ * behaviour the original wanted -- pixels per world unit already falls off
+ * as 1/depth, so a distant ripple still shrinks correctly -- while making
+ * the displacement a property of the surface rather than of what is being
+ * reflected. 2.6 units reproduces the old throw for a typical 40-texel
+ * monster, which is what the 0.13 fraction was tuned against. */
+#ifndef R_REFLWOB
+#define R_REFLWOB     26        /* tenths of a world unit; 0 = no wobble */
+#endif
+#define WOBBLE_WORLD  ((float)R_REFLWOB * 0.1f)
 #define WOBBLE_K      0.055f    /* per world unit of depth below the plane */
 
 static float wobble_t;
@@ -149,12 +205,16 @@ static void wobble_update(void)
  * to its source at the surface and free below it: the throw now ramps
  * from nothing at the contact line to full a short way under, which keeps
  * the join fixed while the body of the image still rides the swell. */
-static inline float wobble_at(float depth_below, float half_width_px)
+/* `px_per_unit` is the projection scale at the image -- focal_x/depth --
+ * so the world-space throw above arrives in screen pixels and still falls
+ * off with distance. Every image in a pool at a given depth below the
+ * surface now shifts by the same amount, whatever its size. */
+static inline float wobble_at(float depth_below, float px_per_unit)
 {
     float grip = depth_below * (1.0f / WOBBLE_ANCHOR);
     if (grip < 0.0f) grip = 0.0f;
     if (grip > 1.0f) grip = 1.0f;
-    return WOBBLE_AMP * half_width_px * grip *
+    return WOBBLE_WORLD * px_per_unit * grip *
            sinf(depth_below * WOBBLE_K + wobble_t);
 }
 #endif
@@ -200,9 +260,26 @@ int r_sprite_count(void)   { return stat_drawn; }
 int r_sprite_uploads(void) { return stat_uploads; }
 int r_sprite_dropped(void) { return stat_dropped; }
 
+#if R_SPRSHINE
+/* Fallback bearing for the highlight, used only where no dynamic light
+ * reaches the prop -- there, any direction is equally defensible. */
+#define SHINE_LIGHT_AZ  0.9f
+
+/* Armed by the walk for the next thing it queues; see r_sprite_shine_next.
+ * CLEARED UNCONDITIONALLY at the top of r_sprite_add, before any early
+ * return, because an armed latch that survives a rejected sprite lands on
+ * whatever is queued next -- the exact bug the halo scale latch had. */
+static bool spr_shine_next;
+void r_sprite_shine_next(void) { spr_shine_next = true; }
+#endif
+
 void r_sprite_add(const r_camera_t *cam, const r_thing_t *t,
                   const float sh[3], int fog_ll, float alpha)
 {
+#if R_SPRSHINE
+    const bool want_shine = spr_shine_next;
+    spr_shine_next = false;
+#endif
     if (!t->spr) return;
     if (numjobs >= SPR_MAX_JOBS) { stat_dropped++; return; }
 
@@ -261,6 +338,41 @@ void r_sprite_add(const r_camera_t *cam, const r_thing_t *t,
      * half size: same picture, a quarter of the TMEM tiles and quads. */
     j->tex = (dt64_tex_t *)t->spr;
     j->mipped = 0;
+#if R_SPRSHINE
+    j->shine = (uint8_t)want_shine;
+    /* Azimuth from the eye to the thing. atan2 once per shiny thing, and
+     * there are a handful in a room -- barrels and tech pillars. */
+    j->vaz = want_shine ? atan2f(dy, dx) : 0.0f;
+    /* POINT AT A REAL LIGHT when there is one.
+     *
+     * The highlight's whole claim is that it is a reflection of the room, so
+     * keying it to a fixed compass bearing was a placeholder: it looked
+     * plausible in isolation and wrong the moment a torch was visibly on the
+     * other side of the barrel. The registry already carries every dynamic
+     * light's position, so the dominant one at this thing is a short scan --
+     * a handful of lights, and only for the few props that are armed.
+     *
+     * Ranked by the same falloff the shading query uses, so the light that
+     * lights the barrel most is the one it mirrors. The fixed bearing stays
+     * as the fallback for rooms with no dynamic light at all, where any
+     * direction is equally defensible. */
+    j->laz = SHINE_LIGHT_AZ;
+#if D_DYNLIGHT
+    if (want_shine) {
+        float best = 0.0f;
+        const int nl = r_light_count();
+        for (int li = 0; li < nl; li++) {
+            const r_light_t *l = &r_lights[li];
+            const float lx = l->x - t->x, ly = l->y - t->y, lz = l->z - t->z;
+            const float dd2 = lx * lx + ly * ly + lz * lz;
+            float f = 1.0f - dd2 * l->inv_r2;
+            if (f <= 0.0f) continue;               /* out of reach */
+            f *= l->intensity;
+            if (f > best) { best = f; j->laz = atan2f(ly, lx); }
+        }
+    }
+#endif
+#endif
     /* Tested against the vertical scale, which is unchanged by wide mode, so
      * sprite LOD picks the same level as the 320 build. Same reasoning as the
      * wall mip test in r_wall.c: keep uploads fixed so a frame-time A/B
@@ -384,6 +496,191 @@ static void draw_tile(const sprjob_t *j, int s0, int t0, int s1, int t1,
     r_tri_spr += 2;
 }
 
+#if R_SPRSHINE
+/* --- cylindrical shine --------------------------------------------------
+ *
+ * A barrel is a CYLINDER drawn as a billboard, and that is the whole trick.
+ * A billboard has no surface normal to reflect -- every one of them faces the
+ * camera, so a real environment map would return the same lookup for every
+ * barrel everywhere and read as a flat wash sliding with the view. What a
+ * cylinder does have is a KNOWN shape: horizontal position across the sprite
+ * is angle around the barrel, u = sin(azimuth - view).
+ *
+ * So the specular highlight of a fixed environment light on a mirror-ish
+ * cylinder lands where the surface normal bisects the view and light
+ * directions, which puts it at
+ *
+ *      u_highlight = sin((theta_light - theta_view) / 2)
+ *
+ * across the sprite. Walk around a barrel and the band slides over it; stand
+ * still and it stays put. That is the entire effect, and it is honest for
+ * anything roughly cylindrical and wrong for anything else -- which is why it
+ * is opt-in per thing type rather than applied to every sprite.
+ *
+ * Drawn as a second pass over the same tiles, so the sprite's own alpha does
+ * the masking: the combiner takes RGB from SHADE and alpha from TEX0 * SHADE,
+ * so a transparent texel contributes nothing and the silhouette costs no
+ * extra work. No alpha compare needed -- alpha zero already leaves memory
+ * alone under the standard blender.
+ */
+
+/* Where the room's light comes from, in world radians. Doom has no
+ * directional light to ask, so this is a convention: pick one and let every
+ * cylinder agree on it, which is what makes the highlights move together. */
+/* Half-width of the band in u, and how hard it reaches its peak. */
+#define SHINE_WIDTH     0.55f
+
+#ifndef R_SPRSHINEAMT
+#define R_SPRSHINEAMT 38            /* hundredths at the band's centre */
+#endif
+#define SHINE_AMT ((float)R_SPRSHINEAMT * 0.01f)
+
+/* Shared with the door sheen: R_ENVKNEE is in Doom's 0..255 light units, and
+ * a sprite's shade is the same quantity already normalised. */
+#ifndef R_ENVKNEE
+#define R_ENVKNEE 72
+#endif
+#ifndef R_ENVFULL
+#define R_ENVFULL 176
+#endif
+#define SHINE_KNEE ((float)R_ENVKNEE / 255.0f)
+#define SHINE_FULL ((float)R_ENVFULL / 255.0f)
+
+static void spr_shine_flush(void)
+{
+    int any = 0;
+    for (int i = 0; i < numjobs; i++) if (jobs[i].shine) { any = 1; break; }
+    if (!any) return;
+
+    /* RGB from SHADE (the highlight), alpha from TEX0 * SHADE (the sprite's
+     * cutout times the band's strength). Same lerp blender the vapor and
+     * halo passes use. */
+    rdpq_mode_combiner(RDPQ_COMBINER1((0, 0, 0, SHADE), (TEX0, 0, SHADE, 0)));
+    rdpq_mode_blender(RDPQ_BLENDER((IN_RGB, IN_ALPHA, MEMORY_RGB, INV_MUX_ALPHA)));
+    rdpq_mode_alphacompare(0);
+    rdpq_mode_zbuf(true, false);       /* the sprite already wrote its depth */
+    rdpq_mode_filter(FILTER_POINT);
+
+    for (int i = 0; i < numjobs; i++) {
+        const sprjob_t *j = &jobs[i];
+        if (!j->shine) continue;
+
+        const dt64_tex_t *tex = j->tex;
+        const int w = tex->width, h = tex->height;
+        const int tw = w < DT64_TILE_W ? w : DT64_TILE_W;
+        const int th = h < DT64_TILE_H ? h : DT64_TILE_H;
+        if (w <= 0 || h <= 0) continue;
+
+        /* Wrapped into (-pi, pi] before halving. vaz comes from atan2, so it
+         * jumps by 2*pi as a thing crosses due west -- and the HALF angle has
+         * period 4*pi, so that jump NEGATES u_hl instead of leaving it fixed.
+         * The highlight swapped ends of the barrel in a single frame, at an
+         * azimuth having nothing to do with the light. */
+        float daz = j->laz - j->vaz;
+        while (daz >  (float)M_PI) daz -= 2.0f * (float)M_PI;
+        while (daz < -(float)M_PI) daz += 2.0f * (float)M_PI;
+        const float u_hl = sinf(0.5f * daz);
+        /* The opaque pass may have swapped in the half-size mip; its own draw
+         * scales by 2 to compensate and this pass did not, so a distant barrel
+         * got a half-scale highlight parked in its lower right. */
+        const float m    = j->mipped ? 2.0f : 1.0f;
+        const float scx  = j->scale_x * m, scy = j->scale_y * m;
+        const float x0f  = j->sx - (float)tex->leftoffset * scx;
+        const float y0f  = j->sy - (float)tex->topoffset  * scy;
+        const float invw = 2.0f / (float)w;      /* texel -> u in [-1,1] */
+
+        for (int t0 = 0; t0 < h; t0 += th) {
+            const int t1 = t0 + th > h ? h : t0 + th;
+            const float ya = y0f + (float)t0 * scy;
+            const float yb = y0f + (float)t1 * scy;
+            if (yb < 0.0f || ya > (float)SCREEN_H) continue;
+
+            for (int s0 = 0; s0 < w; s0 += tw) {
+                const int s1 = s0 + tw > w ? w : s0 + tw;
+                const float xa = x0f + (float)s0 * scx;
+                const float xb = x0f + (float)s1 * scx;
+                if (xb < 0.0f || xa > (float)SCREEN_W) continue;
+
+                /* Rides the thing's own lighting, on the same knee the door
+                 * sheen uses. The shade is genuinely 0..1 here (r_bsp clamps
+                 * it), so this needs the threshold and no rescue. It carries
+                 * the fog term too, which is wanted: something far enough to
+                 * be washed out should not hold a crisp specular. */
+                const float lit = j->sr > j->sg ? j->sr : j->sg;
+                if (lit <= SHINE_KNEE) continue;
+                float klit = (lit - SHINE_KNEE) / (SHINE_FULL - SHINE_KNEE);
+                if (klit > 1.0f) klit = 1.0f;
+                klit *= SHINE_AMT;
+
+                dt64_upload_tile(TILE0, (dt64_tex_t *)tex, NULL, s0, t0, s1, t1);
+                stat_uploads++;
+
+                /* SUBDIVIDED ACROSS THE SPRITE, not evaluated at the tile's
+                 * two edges.
+                 *
+                 * The band is a quadratic in u and the RDP interpolates shade
+                 * linearly, so sampling only at the ends can represent a ramp
+                 * but never a peak. That was fatal rather than approximate
+                 * here: every armed sprite is narrower than one 64-texel tile
+                 * (a barrel is 23 wide), so the only samples were u = -1 and
+                 * u = +1 -- the silhouette's edges. The highlight was
+                 * therefore ABSENT whenever the model placed it near the
+                 * middle of the barrel and full only when it placed it off
+                 * the side, the exact inverse of the intent, with a dead arc
+                 * of roughly 30% of azimuths. Strips cost vertices, not
+                 * uploads: TMEM and the tile above are untouched. */
+                enum { SHINE_STRIPS = 8 };
+                const float fw = (float)(s1 - s0) / (float)SHINE_STRIPS;
+                for (int q = 0; q < SHINE_STRIPS; q++) {
+                    const float fa = (float)s0 + fw * (float)q;
+                    const float fb = fa + fw;
+                    const float ua = fa * invw - 1.0f;
+                    const float ub = fb * invw - 1.0f;
+                    float ka = 1.0f - (ua - u_hl) * (ua - u_hl) /
+                                      (SHINE_WIDTH * SHINE_WIDTH);
+                    float kb = 1.0f - (ub - u_hl) * (ub - u_hl) /
+                                      (SHINE_WIDTH * SHINE_WIDTH);
+                    if (ka < 0.0f) ka = 0.0f;
+                    if (kb < 0.0f) kb = 0.0f;
+                    if (ka <= 0.0f && kb <= 0.0f) continue;   /* off the band */
+                    ka *= klit; kb *= klit;
+
+                    const float qa = x0f + fa * scx;
+                    const float qb = x0f + fb * scx;
+
+                    float v[4][10];
+                    const float xs[4] = { qa, qb, qb, qa };
+                    const float ys[4] = { ya, ya, yb, yb };
+                    const float ss[4] = { fa, fb, fb, fa };
+                    const float ts[4] = { (float)t0, (float)t0,
+                                          (float)t1, (float)t1 };
+                    const float as[4] = { ka, kb, kb, ka };
+                    for (int k = 0; k < 4; k++) {
+                        v[k][0] = xs[k];
+                        v[k][1] = ys[k];
+                        v[k][2] = v[k][3] = v[k][4] = 1.0f;  /* white */
+                        v[k][5] = as[k];
+                        v[k][6] = ss[k];
+                        v[k][7] = ts[k];
+                        v[k][8] = 1.0f;
+                        /* A hair nearer than the sprite: the opaque pass
+                         * z-WRITES, so testing at an equal value fails at
+                         * every pixel. 0.1/d is a near constant a tenth
+                         * ahead, and the shine draws nowhere but on its own
+                         * sprite so winning is all it can do. */
+                        float zs = j->z - 0.1f / j->depth;
+                        if (zs < 0.0f) zs = 0.0f;
+                        v[k][9] = zs;
+                    }
+                    r_tri_quad(&TRIFMT_SPR, v[0], v[1], v[2], v[3]);
+                    r_tri_spr += 2;
+                }
+            }
+        }
+    }
+}
+#endif /* R_SPRSHINE */
+
 /* Distinct textures in the current batch, so each is uploaded once per tile
  * rather than once per instance. E1M1 places 25 identical armour bonuses; they
  * should cost one upload between them, not 25. */
@@ -499,6 +796,12 @@ void r_sprite_flush(void)
             }
         }
     }
+#if R_SPRSHINE
+    /* Cylindrical highlights over the opaque sprites, before the translucent
+     * tail changes the mode block out from under them. */
+    spr_shine_flush();
+#endif
+
     /* --- translucent tail: smoke and puffs -----------------------------
      * Far to near (the array is depth-ascending, so walk it backward),
      * blended against what is already there, z-tested so the world
@@ -678,7 +981,7 @@ void r_psprite_draw(void)
  * vice versa. */
 void r_reflect_add(const r_camera_t *cam, const r_thing_t *t,
                    const float sh[3], int fog_ll,
-                   float plane_h, const float pool_rgb[3])
+                   float plane_h, const float pool_rgb[3], int liquid)
 {
     if (!t->spr || numrefl >= REFL_MAX) return;
     if (cam->z <= plane_h + 1.0f) return;   /* eye at the waterline: no image */
@@ -714,6 +1017,10 @@ void r_reflect_add(const r_camera_t *cam, const r_thing_t *t,
     j->scale_y = scale_y;
     j->w_top   = w_top;
     j->plane_h = plane_h;
+    /* Written, not merely declared. The wobble gate reads this and the field
+     * sat at its static zero, so thing ghosts stopped rippling over nukage
+     * entirely while the wall ghosts behind them still did. */
+    j->liquid  = (uint8_t)(liquid != 0);
 
     /* Fogged like the caster, then dimmed toward the pool's own hue: a
      * reflection off rippling emissive liquid is darker than what casts it
@@ -776,6 +1083,43 @@ static int refl_project_region(const r_camera_t *cam, const reflregion_t *rg,
     return m;
 }
 
+/* Project every queued footprint and take its winding, once for the frame.
+ * Called at the top of the flush, before any ghost is clipped. */
+static void refl_project_all(const r_camera_t *cam)
+{
+    for (int i = 0; i < numreflreg; i++) {
+        reflproj_t *p = &reflproj[i];
+        p->h = reflreg[i].h;
+        p->n = refl_project_region(cam, &reflreg[i], p->px, p->py);
+        if (p->n < 3) continue;
+
+        /* The footprint's winding on screen decides which side is inside. */
+        float area = 0.0f;
+        for (int k = 0; k < p->n; k++) {
+            const int j = k + 1 < p->n ? k + 1 : 0;
+            area += p->px[k] * p->py[j] - p->px[j] * p->py[k];
+        }
+        p->sgn = area >= 0.0f ? 1.0f : -1.0f;
+
+        /* Screen bounds, so a ghost that lands nowhere near this pool can be
+         * rejected before the clip rather than by it. A frame carries up to
+         * REFL_REGION_MAX footprints and a given ghost overlaps one or two of
+         * them, but every quad was being walked through the full
+         * Sutherland-Hodgman against all of them -- one pass per footprint
+         * EDGE, each copying 10-float rows. Rejecting on bounds cannot change
+         * what is drawn: a quad outside the bounds is outside the polygon, so
+         * the clip it skips would have returned nothing. */
+        p->bx0 = p->bx1 = p->px[0];
+        p->by0 = p->by1 = p->py[0];
+        for (int k = 1; k < p->n; k++) {
+            if (p->px[k] < p->bx0) p->bx0 = p->px[k];
+            if (p->px[k] > p->bx1) p->bx1 = p->px[k];
+            if (p->py[k] < p->by0) p->by0 = p->py[k];
+            if (p->py[k] > p->by1) p->by1 = p->py[k];
+        }
+    }
+}
+
 /* One Sutherland-Hodgman step over 10-float rows. Rows carry s,t already
  * multiplied by iw, so every attribute is screen-linear and the plain lerp
  * at the cut is perspective-exact. */
@@ -807,24 +1151,30 @@ int refl_clip_edge(float in[][10], int n, float out[][10],
  * footprint of its plane; emit the surviving fans. A ghost whose plane
  * has no visible footprint emits nothing -- which is also the correct
  * fate of a mirror over a pool the frame never drew. */
-static void refl_emit_clipped(const r_camera_t *cam, float q[4][10],
-                              float plane_h)
+static void refl_emit_clipped(float q[4][10], float plane_h)
 {
+    /* The quad's own bounds, once for all footprints. */
+    float qx0 = q[0][0], qx1 = q[0][0], qy0 = q[0][1], qy1 = q[0][1];
+    for (int i = 1; i < 4; i++) {
+        if (q[i][0] < qx0) qx0 = q[i][0];
+        if (q[i][0] > qx1) qx1 = q[i][0];
+        if (q[i][1] < qy0) qy0 = q[i][1];
+        if (q[i][1] > qy1) qy1 = q[i][1];
+    }
+
     for (int rgi = 0; rgi < numreflreg; rgi++) {
-        const reflregion_t *rg = &reflreg[rgi];
-        if (rg->h > plane_h + 0.5f || rg->h < plane_h - 0.5f) continue;
+        /* Read the frame's projection instead of redoing it; refl_project_all
+         * ran once at the top of the flush. */
+        const reflproj_t *rp = &reflproj[rgi];
+        if (rp->n < 3) continue;
+        if (rp->h > plane_h + 0.5f || rp->h < plane_h - 0.5f) continue;
+        /* Disjoint on screen: the clip would return nothing. */
+        if (qx1 < rp->bx0 || qx0 > rp->bx1 ||
+            qy1 < rp->by0 || qy0 > rp->by1) continue;
 
-        float px[24], py[24];
-        const int pn = refl_project_region(cam, rg, px, py);
-        if (pn < 3) continue;
-
-        /* The footprint's winding on screen decides which side is inside. */
-        float area = 0.0f;
-        for (int i = 0; i < pn; i++) {
-            const int j = i + 1 < pn ? i + 1 : 0;
-            area += px[i] * py[j] - px[j] * py[i];
-        }
-        const float sgn = area >= 0.0f ? 1.0f : -1.0f;
+        const float *px = rp->px, *py = rp->py;
+        const int    pn = rp->n;
+        const float  sgn = rp->sgn;
 
         float a[14][10], b[14][10];
         memcpy(a, q, sizeof(float) * 40);
@@ -865,16 +1215,6 @@ static void refl_emit_clipped(const r_camera_t *cam, float q[4][10],
  * polygon math at all. */
 /* The blend the door mirror uses: texture alpha times vertex alpha, mixed
  * with what is there, z-tested and never written. */
-#if R_DOORMIRROR
-static void halo_reflect_mode(void)
-{
-    rdpq_mode_combiner(RDPQ_COMBINER1((TEX0, 0, SHADE, 0), (TEX0, 0, SHADE, 0)));
-    rdpq_mode_blender(RDPQ_BLENDER((IN_RGB, IN_ALPHA, MEMORY_RGB, INV_MUX_ALPHA)));
-    rdpq_mode_alphacompare(0);
-    rdpq_mode_zbuf(true, false);
-    rdpq_mode_filter(FILTER_POINT);
-}
-#endif
 
 void r_reflect_flush(const r_camera_t *cam)
 {
@@ -888,6 +1228,11 @@ void r_reflect_flush(const r_camera_t *cam)
     wobble_update();
 #endif
 
+    /* Every footprint projected ONCE, before any ghost is clipped against
+     * them. This is the whole of the reflection optimisation: the clip below
+     * runs per ghost quad and used to redo this work inside that loop. */
+    refl_project_all(cam);
+
     /* Blended, z-tested, never z-written. Texture alpha rides through the
      * combiner's alpha channel, so transparent texels leave the memory
      * pixel alone and solid ones mix at the vertex alpha. Point sampling
@@ -897,6 +1242,28 @@ void r_reflect_flush(const r_camera_t *cam)
     rdpq_mode_alphacompare(0);
     rdpq_mode_zbuf(true, false);
     rdpq_mode_filter(FILTER_POINT);
+
+#if R_REFLDECAL
+    /* DECAL, not a bias. The ghost's z is the depth at which the eye ray
+     * meets the water, so it is COPLANAR with the pool by construction --
+     * exactly the case this z-mode exists for.
+     *
+     * The old scheme pushed the ghost a constant in FRONT of the pool so it
+     * would win the tie against it. That works, and it also wins against
+     * anything else inside the same margin: since the margin is a near
+     * offset it covers a fixed FRACTION of depth, so a monster standing in
+     * the outer quarter of the distance to a pool was drawn through by its
+     * own reflection. A one-sided nearer-than test cannot tell "the pool"
+     * from "just in front of the pool"; decal mode tests for coplanarity
+     * instead, so the ghost lands on the pool and is occluded by everything
+     * genuinely nearer, which is the whole requirement.
+     *
+     * libdragon warns this is not bulletproof against z-fighting. Here the
+     * ghost and the pool are the same plane through the same near constant,
+     * which is the best case for it -- but REFLDECAL=0 restores the biased
+     * form if a reflection ever flickers. */
+    rdpq_mode_zmode(ZMODE_DECAL);
+#endif
 
     const float cy = SCREEN_H * 0.5f;
 
@@ -987,9 +1354,13 @@ void r_reflect_flush(const r_camera_t *cam)
              * moved but sheared -- which is what carries the eye from one
              * band to the next as a continuous wave rather than a stack
              * of offset strips. */
-            const float hw = (float)tex->width * j->scale_x * 0.5f;
-            const float wob_hi = wobble_at(j->plane_h - zi_hi, hw);
-            const float wob_lo = wobble_at(j->plane_h - zi_lo, hw);
+            /* Liquids only. A polished floor reflects without rippling --
+             * see the note on `liquid` in refljob_t. */
+            /* scale_x IS pixels per world unit at this billboard's depth. */
+            const float wob_hi = j->liquid
+                ? wobble_at(j->plane_h - zi_hi, j->scale_x) : 0.0f;
+            const float wob_lo = j->liquid
+                ? wobble_at(j->plane_h - zi_lo, j->scale_x) : 0.0f;
 #else
             const float wob_hi = 0.0f, wob_lo = 0.0f;
 #endif
@@ -1021,14 +1392,21 @@ void r_reflect_flush(const r_camera_t *cam)
                     v[i][8] = iw;
                     v[i][9] = zs[i];
                 }
-                refl_emit_clipped(cam, v, j->plane_h);
+                refl_emit_clipped(v, j->plane_h);
             }
         }
     }
     numrefl = 0;
 #if D_DYNLIGHT
-    /* The walls over the same pools, in the same mode block. */
+    /* The walls over the same pools, in the same mode block -- and so under
+     * the same decal z-mode, which they want for the same reason. */
     reflect_walls_emit(cam);
+#endif
+#if R_REFLDECAL
+    /* Hand the standard z-mode back. Render modes persist across passes, and
+     * the sky and vapor that follow are NOT coplanar decals -- leaving decal
+     * set would have them fight the geometry they are meant to sit behind. */
+    rdpq_mode_zmode(ZMODE_STANDARD);
 #endif
 }
 #endif /* R_REFLECT */
@@ -1058,6 +1436,7 @@ typedef struct {
     float plane_h;
     float sr, sg, sb;        /* dimmed, pool-tinted, light-scaled */
     uint8_t light;
+    uint8_t liquid;          /* ripples only over an actual liquid */
 } rwrefl_t;
 static rwrefl_t rwrefl[REFL_WALL_MAX];
 /* numrwrefl is declared beside numrefl at the top of the file: the frame
@@ -1085,6 +1464,9 @@ void r_reflect_wall_add(const r_wall_t *w)
     r->u0      = w->u0;
     r->len     = w->len;
     r->plane_h = w->glowz;
+    /* glow is 0 for the polished non-liquids and non-zero for sludge, lava
+     * and blood -- the wall struct already carries the distinction. */
+    r->liquid  = (uint8_t)(w->glow > 0.0f);
     r->light   = w->light;
 
     const float l = (float)w->light * (1.0f / 255.0f);
@@ -1167,13 +1549,14 @@ static void reflect_walls_emit(const r_camera_t *cam)
          * s via invw; the alpha fade to zero at the band's foot is what
          * reads as water. */
 #if R_REFLWOBBLE
-        /* The wall's ghost bends with the same water. Its half-width in
-         * pixels is half the span between the projected endpoints. */
-        const float hw_w = (xr - xl) * 0.5f;
-        const float wob_t_ = wobble_at(r->plane_h - zi_top,
-                                       hw_w < 0.0f ? -hw_w : hw_w);
-        const float wob_b_ = wobble_at(r->plane_h - zi_bot,
-                                       hw_w < 0.0f ? -hw_w : hw_w);
+        /* The wall's ghost bends with the same water, and by the same
+         * amount as anything else floating in it -- the projection scale
+         * across the band, not the wall's own on-screen length. */
+        const float pxu_w = cam->focal_x * (iw1 + iw2) * 0.5f;
+        const float wob_t_ = r->liquid
+            ? wobble_at(r->plane_h - zi_top, pxu_w) : 0.0f;
+        const float wob_b_ = r->liquid
+            ? wobble_at(r->plane_h - zi_bot, pxu_w) : 0.0f;
 #else
         const float wob_t_ = 0.0f, wob_b_ = 0.0f;
 #endif
@@ -1211,255 +1594,8 @@ static void reflect_walls_emit(const r_camera_t *cam)
                 v[c][9] = z;
             }
         }
-        refl_emit_clipped(cam, v, r->plane_h);
+        refl_emit_clipped(v, r->plane_h);
     }
     numrwrefl = 0;
 }
 #endif /* R_REFLECT && D_DYNLIGHT */
-
-#if R_DOORMIRROR
-/* --- door mirrors --------------------------------------------------------
- *
- * A polished metal door reflects what stands in front of it. The pools
- * mirror about a HORIZONTAL plane, which for a camera that never pitches
- * leaves a billboard a billboard; a door mirrors about a VERTICAL one,
- * which is the same arithmetic applied to x and y instead of z -- and
- * since the things being reflected are billboards either way, the image
- * is again just a billboard at the mirrored position.
- *
- * What this deliberately does NOT do is reflect the room. A true mirror
- * would show the corridor behind you, which means walking the BSP again
- * from a mirrored camera and clipping it to the door -- a second world
- * render, on a frame that is already CPU-bound. So this shows the things
- * only, dim enough to read as a suggestion on dark metal rather than as
- * a claim about geometry.
- */
-#define MIRROR_WALL_MAX  4
-#define MIRROR_THING_MAX 24
-#define MIRROR_REACH     320.0f    /* how far in front of a door reflects */
-
-typedef struct {
-    float x1, y1, x2, y2;     /* the door, in plan */
-    float zbot, ztop;
-} mirwall_t;
-
-typedef struct {
-    float x, y, z;
-    void *spr;
-    float sr, sg, sb;
-} mirthing_t;
-
-static mirwall_t  mirwalls[MIRROR_WALL_MAX];
-static int        num_mirwalls;
-static mirthing_t mirthings[MIRROR_THING_MAX];
-static int        num_mirthings;
-
-void r_mirror_begin(void)
-{
-    num_mirwalls = 0;
-    num_mirthings = 0;
-}
-
-void r_mirror_wall_add(const r_wall_t *w)
-{
-    if (num_mirwalls >= MIRROR_WALL_MAX || w->ztop <= w->zbot) return;
-    /* One entry per door leaf: the wall arrives once per uncovered column
-     * range, and a doubled entry would draw the image twice. */
-    for (int i = 0; i < num_mirwalls; i++)
-        if (mirwalls[i].x1 == w->x1 && mirwalls[i].y1 == w->y1 &&
-            mirwalls[i].x2 == w->x2 && mirwalls[i].y2 == w->y2) return;
-
-    mirwall_t *m = &mirwalls[num_mirwalls++];
-    m->x1 = w->x1; m->y1 = w->y1;
-    m->x2 = w->x2; m->y2 = w->y2;
-    m->zbot = w->zbot; m->ztop = w->ztop;
-}
-
-void r_mirror_thing(float x, float y, float z, void *spr,
-                    const float sh[3], unsigned ang)
-{
-    (void)ang;
-    if (!spr || num_mirthings >= MIRROR_THING_MAX) return;
-    mirthing_t *t = &mirthings[num_mirthings++];
-    t->x = x; t->y = y; t->z = z; t->spr = spr;
-    t->sr = sh[0]; t->sg = sh[1]; t->sb = sh[2];
-}
-
-void r_mirror_flush(const r_camera_t *cam)
-{
-    if (!num_mirwalls || !num_mirthings) { num_mirwalls = 0; return; }
-
-    const float cs = r_view_cs, sn = r_view_sn;
-    const float cx = SCREEN_W * 0.5f, cy = SCREEN_H * 0.5f;
-
-    halo_reflect_mode();
-
-    for (int wi = 0; wi < num_mirwalls; wi++) {
-        const mirwall_t *m = &mirwalls[wi];
-
-        /* The door's plane: a unit normal and a point on it. */
-        float ex = m->x2 - m->x1, ey = m->y2 - m->y1;
-        const float elen = sqrtf(ex * ex + ey * ey);
-        if (elen < 1.0f) continue;
-        ex /= elen; ey /= elen;
-        const float nx = -ey, ny = ex;          /* unit normal */
-
-        /* Its four corners, projected, as the clip polygon. Near-clipped
-         * along the segment so a door the camera stands beside still
-         * yields a usable quad. */
-        float d1 = (m->x1 - cam->x) * cs + (m->y1 - cam->y) * sn;
-        float d2 = (m->x2 - cam->x) * cs + (m->y2 - cam->y) * sn;
-        float o1 = (m->x1 - cam->x) * sn - (m->y1 - cam->y) * cs;
-        float o2 = (m->x2 - cam->x) * sn - (m->y2 - cam->y) * cs;
-        const float NEARP = 8.0f;
-        if (d1 < NEARP && d2 < NEARP) continue;
-        if (d1 < NEARP) { const float t = (NEARP - d1) / (d2 - d1);
-                          d1 = NEARP; o1 += (o2 - o1) * t; }
-        else if (d2 < NEARP) { const float t = (NEARP - d2) / (d1 - d2);
-                          d2 = NEARP; o2 += (o1 - o2) * t; }
-
-        const float iw1 = 1.0f / d1, iw2 = 1.0f / d2;
-        const float xl = cx + o1 * cam->focal_x * iw1;
-        const float xr = cx + o2 * cam->focal_x * iw2;
-        const float yt1 = cy - (m->ztop - cam->z) * cam->focal_y * iw1;
-        const float yb1 = cy - (m->zbot - cam->z) * cam->focal_y * iw1;
-        const float yt2 = cy - (m->ztop - cam->z) * cam->focal_y * iw2;
-        const float yb2 = cy - (m->zbot - cam->z) * cam->focal_y * iw2;
-
-        float px[4], py[4];
-        px[0] = xl; py[0] = yt1;
-        px[1] = xr; py[1] = yt2;
-        px[2] = xr; py[2] = yb2;
-        px[3] = xl; py[3] = yb1;
-
-        float area = 0.0f;
-        for (int i = 0; i < 4; i++) {
-            const int j = i + 1 < 4 ? i + 1 : 0;
-            area += px[i] * py[j] - px[j] * py[i];
-        }
-        const float sgn = area >= 0.0f ? 1.0f : -1.0f;
-
-        for (int ti = 0; ti < num_mirthings; ti++) {
-            const mirthing_t *t = &mirthings[ti];
-
-            /* Signed distance to the plane. Only what stands IN FRONT is
-             * reflected -- behind the door is another room. */
-            const float sd = (t->x - m->x1) * nx + (t->y - m->y1) * ny;
-            const float cd = (cam->x - m->x1) * nx + (cam->y - m->y1) * ny;
-            if (sd * cd <= 0.0f) continue;          /* opposite sides */
-            const float adist = sd < 0.0f ? -sd : sd;
-            if (adist > MIRROR_REACH) continue;
-
-            /* Mirror across the plane: p' = p - 2*(p-a).n * n */
-            const float mx = t->x - 2.0f * sd * nx;
-            const float my = t->y - 2.0f * sd * ny;
-
-            const float dx = mx - cam->x, dy = my - cam->y;
-            const float depth = dx * cs + dy * sn;
-            if (depth < SPR_NEAR) continue;
-
-            const dt64_tex_t *tex = (const dt64_tex_t *)t->spr;
-            const float offs = dx * sn - dy * cs;
-            const float scale_x = cam->focal_x / depth;
-            const float scale_y = cam->focal_y / depth;
-            const float iw = 1.0f / depth;
-            const float sx = cx + offs * scale_x;
-
-            const float x_left = sx - (float)tex->leftoffset * scale_x;
-            const float y_top  = cy - (t->z + (float)tex->topoffset
-                                       - cam->z) * scale_y;
-
-            /* Dimmer the further the thing stands from the door, as a
-             * real reflection loses to the metal's own colour. */
-            const float k = 0.55f * (1.0f - adist * (1.0f / MIRROR_REACH));
-            if (k <= 0.02f) continue;
-
-            /* Depth of the DOOR, not of the image.
-             *
-             * A reflection stands behind the mirror, so taking the
-             * mirrored thing's own depth put the ghost further away than
-             * the door that shows it -- and the door, being opaque and
-             * already in the z-buffer, won every pixel. Nothing drew.
-             *
-             * What the eye sees is the image ON the surface, so the depth
-             * that matters is where the sight-line crosses the door
-             * plane: the camera sits at signed distance cd, the mirrored
-             * point at -sd on the far side, and the crossing is that
-             * fraction along the ray. Biased slightly nearer so it beats
-             * the door's own pixels and still loses to anything standing
-             * between you and it. */
-            const float tcross = cd / (cd + sd);
-            if (tcross <= 0.0f || tcross >= 1.0f) continue;
-            const float dcross = depth * tcross;
-            if (dcross < 1.0f) continue;
-            float z = 1.0f - (R_FLAT_NEAR + 0.6f) / dcross;
-            if (z < 0.0f) z = 0.0f;
-
-            const int w = tex->width, h = tex->height;
-            const int tw = w < DT64_TILE_W ? w : DT64_TILE_W;
-            const int th = h < DT64_TILE_H ? h : DT64_TILE_H;
-
-            for (int t0 = 0; t0 < h; t0 += th) {
-                const int t1 = t0 + th > h ? h : t0 + th;
-                for (int s0 = 0; s0 < w; s0 += tw) {
-                    const int s1 = s0 + tw > w ? w : s0 + tw;
-                    const float qx0 = x_left + (float)s0 * scale_x;
-                    const float qx1 = x_left + (float)s1 * scale_x;
-                    const float qy0 = y_top  + (float)t0 * scale_y;
-                    const float qy1 = y_top  + (float)t1 * scale_y;
-                    if (qx1 < 0.0f || qx0 > (float)SCREEN_W) continue;
-                    if (qy1 < 0.0f || qy0 > (float)SCREEN_H) continue;
-
-                    dt64_upload_tile(TILE0, (dt64_tex_t *)t->spr, NULL,
-                                     s0, t0, s1, t1);
-                    stat_uploads++;
-
-                    float q[4][10];
-                    const float xs[4] = { qx0, qx1, qx1, qx0 };
-                    const float ys[4] = { qy0, qy0, qy1, qy1 };
-                    const float ss[4] = { (float)s0, (float)s1,
-                                          (float)s1, (float)s0 };
-                    const float ts[4] = { (float)t0, (float)t0,
-                                          (float)t1, (float)t1 };
-                    for (int i = 0; i < 4; i++) {
-                        q[i][0] = xs[i]; q[i][1] = ys[i];
-                        q[i][2] = t->sr; q[i][3] = t->sg; q[i][4] = t->sb;
-                        q[i][5] = k;
-                        q[i][6] = ss[i] * iw; q[i][7] = ts[i] * iw;
-                        q[i][8] = iw;
-                        q[i][9] = z;
-                    }
-
-                    /* Clipped to the door itself. Without this the image
-                     * would spill across the wall beside it, which is the
-                     * single most obvious way a fake mirror gives itself
-                     * away. */
-                    float a[14][10], bb[14][10];
-                    memcpy(a, q, sizeof(float) * 40);
-                    int n = 4, flip = 0;
-                    for (int e = 0; e < 4 && n >= 3; e++) {
-                        const int j = e + 1 < 4 ? e + 1 : 0;
-                        n = refl_clip_edge(flip ? bb : a, n, flip ? a : bb,
-                                           px[e], py[e], px[j], py[j], sgn);
-                        flip ^= 1;
-                    }
-                    if (n < 3) continue;
-
-                    float (*p)[10] = flip ? bb : a;
-                    float v[14][10];
-                    for (int i = 0; i < n; i++) {
-                        memcpy(v[i], p[i], sizeof(float) * 10);
-                        v[i][6] = p[i][6] / p[i][8];
-                        v[i][7] = p[i][7] / p[i][8];
-                    }
-                    for (int i = 1; i + 1 < n; i++) {
-                        rdpq_triangle(&TRIFMT_SPR, v[0], v[i], v[i + 1]);
-                        r_tri_spr++;
-                    }
-                }
-            }
-        }
-    }
-    num_mirwalls = 0;
-}
-#endif /* R_DOORMIRROR */
