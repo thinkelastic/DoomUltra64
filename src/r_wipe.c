@@ -66,6 +66,21 @@ void r_wipe_start(const surface_t *from)
 {
     if (wiping || !from) return;
 
+    /* The SOURCE has to be the live screen size, and this is not paranoia:
+     * the capture below walks `from` to SCREEN_H, and screen_apply() changes
+     * SCREEN_H at the top of a frame while prev_fb still points at the frame
+     * BEFORE it -- one 240-row buffer. surface_make_sub does pointer
+     * arithmetic and does not bounds-check, so rows 240..479 come out of
+     * whatever follows that buffer in RDRAM, which is the next framebuffer
+     * of the display's set of three, holding a nearly identical picture.
+     * The melt then shows the frame twice, stacked: the reported duplicate
+     * of the screen top and bottom in 480i.
+     *
+     * Refused outright rather than clamped. A melt is a transition, and
+     * skipping one is invisible next to half a screen of the wrong frame;
+     * there is no partial capture here that is better than none. */
+    if ((int)from->width != SCREEN_W || (int)from->height != SCREEN_H) return;
+
     /* A capture from a DIFFERENT screen size is worse than none: the melt
      * would draw a 240-row image down a 480-row screen, leaving the frame
      * it captured -- status bar and all -- sitting across the middle of the

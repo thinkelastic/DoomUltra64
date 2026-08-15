@@ -192,6 +192,60 @@ N64_CFLAGS += -DR_FLATZ=$(FLATZ)
 SPRZ ?= $(shell expr $(FLATZ) + 2)
 N64_CFLAGS += -DR_SPRZ=$(SPRZ)
 
+# SPRFADE=<world units> makes SPRZ's margin over the flats DECAY with depth,
+# on the curve D0/(D0 + d). 0 keeps the flat constant SPRZ always was.
+#
+# The margin has to exist and only has to exist NEAR. What it protects is the
+# contact with the floor a thing stands on; what it costs is that the same
+# tenths sit ahead of the WALLS, and a near offset separates by dNEAR/d -- so
+# the zone in which a sprite wrongly beats a wall is a fixed FRACTION of the
+# depth, which is a GROWING number of world units. That is the whole reason
+# distant enemies show through walls and near ones never do: at a flat SPRZ
+# 45 the zone is 12.5% of depth, 12 units at depth 100 and 250 at 2000.
+#
+# Fading it collapses the far end without touching the near one. At the
+# default 256, against FLATZ=43 / SPRZ=45:
+#
+#   depth      0    128    256    512   1000   2000
+#   near     4.50   4.43   4.40   4.37   4.34   4.32
+#   zone     12.5%  10.8%  10.0%   9.2%   8.5%   8.1%
+#   units       0     14     26     47     85    162      (was 125 / 250)
+#
+# 7.5% IS THE FLOOR and this deliberately stops above it: sprites must stay
+# ahead of the FLATS at every depth or the floor takes the feet, and for a
+# big distant sprite the whole thing -- that is how pull-only lost barrel
+# explosions. The flats lead the walls by (FLATZ/40 - 1), so no sprite bias
+# can beat 7.5% while FLATZ is 43. Lowering FLATZ is the next lever, and a
+# different contact: it answers to wall-versus-ceiling corners.
+SPRFADE ?= 256
+N64_CFLAGS += -DR_SPRFADE=$(SPRFADE)
+
+# SPROCCL=1 occlusion-culls sprites against the BSP walk's own closed
+# columns, instead of queueing them and letting the z buffer decide.
+#
+# This is the actual fix for a distant monster drawing through a wall, and
+# the two levers above are not -- they only ever moved the range at which it
+# starts. The reason is structural: a sprite must beat the FLATS or a floor
+# clips the feet off what stands on it, the flats already lead the WALLS by
+# (FLATZ/40 - 1), and a near offset separates surfaces by dNEAR/d -- so the
+# margin that wins the near contact is a fixed FRACTION of depth ahead of
+# the walls, and a fixed fraction is a GROWING number of world units. 12.5%
+# is 12 units at depth 100 and 250 at 2000. No single constant is right at
+# both ends, which is what the whole bias stack in r_flat.h is a record of.
+#
+# So the question is removed rather than tuned: a thing the walk has already
+# walled off is never queued, and its depth never has to argue. The test is
+# the same one the subtree cull uses (solid columns, then the loosest open
+# window over them), it is only valid because the walk runs front to back,
+# and it is conservative -- one open column under the sprite keeps it.
+#
+# 0 restores the z-only behaviour, which is what to set if a sprite ever
+# disappears that should not: this culls on geometry the walk believes is
+# closed, so a bug in the occlusion arrays shows up here as a missing
+# monster rather than as a missing wall.
+SPROCCL ?= 1
+N64_CFLAGS += -DR_SPROCCL=$(SPROCCL)
+
 # CLEARCOL=r,g,b paints the framebuffer clear that colour instead of black.
 # A gap probe: any pixel no primitive covered keeps it, so two builds with
 # different values differ on exactly the holes and nowhere else.

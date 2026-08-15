@@ -631,6 +631,48 @@ static bool range_covered(int first, int last)
     return first >= start->first && last <= start->last;
 }
 
+/* Is a screen rectangle wholly behind what the walk has already closed?
+ *
+ * The same two-part test the subtree cull uses -- solid columns, then the
+ * loosest open window over them -- exported for the SPRITE queue, which had
+ * no occlusion of its own and leaned entirely on the z buffer.
+ *
+ * Leaning on z is what puts distant monsters through walls. Sprites must
+ * beat the FLATS to keep a floor from clipping the feet off what stands on
+ * it, the flats already lead the WALLS, and a near offset separates by
+ * dNEAR/d -- so the margin that wins the floor contact is a fixed FRACTION
+ * of depth ahead of the walls, which is a growing number of world units. No
+ * value of that constant is right at both ends, and the bias stack in
+ * r_flat.h is the record of trying. This removes the question instead: a
+ * thing behind a wall is not drawn at all, so its depth never has to argue.
+ *
+ * VALID ONLY DURING THE WALK, and only because the walk runs FRONT TO BACK.
+ * Everything nearer than this subsector has already emitted its walls and
+ * closed its columns, so the state read here is exactly the occlusion that
+ * applies to a thing standing in it -- the same reason r_flat's region cull
+ * may read it. A thing is never occluded by its own cell's walls: the cell
+ * is convex and the thing is inside it.
+ *
+ * Conservative in both directions. clip_window returns the LOOSEST window
+ * over the range, so one open column anywhere under the sprite keeps it
+ * alive, and the row test carries the same one-pixel slack the subtree cull
+ * uses. It culls only what is provably covered. */
+bool r_bsp_occluded(int x0, int x1, float y0, float y1)
+{
+    if (x0 < 0) x0 = 0;
+    if (x1 > SCREEN_W - 1) x1 = SCREEN_W - 1;
+    if (x1 < x0) return true;                  /* nothing on screen */
+
+    if (range_covered(x0, x1)) return true;
+
+    float wtop, wbot;
+    clip_window(x0, x1, &wtop, &wbot);
+    if (wtop >= wbot) return true;             /* every column closed */
+    if (y0 > wbot + 1.0f) return true;         /* wholly below the window */
+    if (y1 < wtop - 1.0f) return true;         /* wholly above it */
+    return false;
+}
+
 /* Which side of a node's partition line a point lies on: 0 = front, 1 = back,
  * matching Doom's R_PointOnSide, in floats rather than fixed point.
  *

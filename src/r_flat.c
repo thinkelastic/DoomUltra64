@@ -185,7 +185,11 @@ typedef struct {
 #define FLAT_MAX_JOBS      256
 #define FLAT_MAX_TEXTURES  32
 
-static flatjob_t   jobs[FLAT_MAX_JOBS];
+/* Aligned so the 16-byte record above actually IS one D-cache line per job.
+ * Without this the array landed at 8 mod 16 and every job straddled two
+ * lines -- which made the size comment above false as built. r_wall.c's
+ * quads[] has always done this; these two were simply missed. */
+static _Alignas(16) flatjob_t jobs[FLAT_MAX_JOBS];
 static int         numjobs;
 static dt64_tex_t *jobtex[FLAT_MAX_TEXTURES];
 static int         numjobtex;

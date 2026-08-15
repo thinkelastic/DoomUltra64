@@ -47,8 +47,19 @@
  * get their own lifetime the reservation is one number away. */
 #define MEM_SPRITE_ARENA    0
 
-/* One level's lumps. The largest Ultimate Doom map is 186 KB. */
-#define MEM_LEVEL_ARENA     (256 * 1024)
+/* One level's lumps -- for a loader that no longer exists. p_load_level was
+ * the only consumer and is dead-stripped: it appears nowhere in the linked
+ * image (--gc-sections is in N64_LDFLAGS, and `nm build/doom.elf` finds it
+ * while finding 355 other file-local statics), yet mem.c reserved the quarter
+ * megabyte unconditionally at startup. Doom's own Z_Malloc zone owns level
+ * lumps now.
+ *
+ * Zero rather than deleted, exactly as MEM_SPRITE_ARENA above: the arena id
+ * stays valid, mem_reset(MEM_ARENA_LEVEL) in p_level.c stays a legal no-op on
+ * a zero-capacity arena, and mem.c's `assertf(base || !capacity)` already
+ * tolerates the zero case. 256 KB back on a machine where the texture arena
+ * has been measured at 1914 of 2048 KB. */
+#define MEM_LEVEL_ARENA     0
 
 /* --- arenas -------------------------------------------------------------
  *

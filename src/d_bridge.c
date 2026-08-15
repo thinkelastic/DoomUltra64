@@ -217,12 +217,41 @@ void D_FlatGlowReset(void)
 static float glow_for_name(const char *n, uint8_t *cls)
 {
     /* Prefix matches: the WAD numbers the animation frames (NUKAGE1..3,
-     * LAVA1..4), and every frame of one animation glows the same. */
+     * LAVA1..4), and every frame of one animation glows the same. Safe for
+     * these four because the IWADs hold nothing else under the prefix --
+     * NUKAGE stops at 3, LAVA and FWATER at 4, BLOOD at 3. */
     if (!strncasecmp(n, "NUKAGE", 6)) { *cls = D_GLOW_NUKAGE; return 0.55f; }
     if (!strncasecmp(n, "LAVA",   4)) { *cls = D_GLOW_LAVA;   return 0.70f; }
-    if (!strncasecmp(n, "SLIME",  5)) { *cls = D_GLOW_SLIME;  return 0.45f; }
     if (!strncasecmp(n, "BLOOD",  5)) { *cls = D_GLOW_BLOOD;  return 0.30f; }
     if (!strncasecmp(n, "FWATER", 6)) { *cls = D_GLOW_WATER;  return 0.25f; }
+
+    /* SLIME IS NOT A PREFIX, and treating it as one is why Doom II's MAP04
+     * steamed. The name covers four unrelated Doom II sets, and only half
+     * of them are wet:
+     *
+     *   SLIME01..04  brown flowing sludge          liquid
+     *   SLIME05..08  dark green sludge             liquid
+     *   SLIME09..12  cracked rock over lava        rock, but glowing
+     *   SLIME13      mossy green brick             plain floor
+     *   SLIME14..16  riveted metal plate           plain floor
+     *
+     * SLIME15 is the main floor of MAP04 -- 62 of its 122 sectors -- so
+     * half that level was a mirror under a haze of green vapor. Doom's own
+     * animdefs is the tell and agrees: it animates 01-04, 05-08 and 09-12
+     * and leaves 13..16 alone, because they are not liquid frames at all.
+     *
+     * 09..12 keeps a glow but changes family. It is red lava showing
+     * through broken rock, not sludge, so the vapor over it should be
+     * lava's smoke rather than a green haze -- and it is dimmer than an
+     * open lava pool, being mostly rock by area. */
+    if (!strncasecmp(n, "SLIME", 5)) {
+        const int k = (n[5] >= '0' && n[5] <= '9' && n[6] >= '0' && n[6] <= '9')
+                    ? (n[5] - '0') * 10 + (n[6] - '0') : -1;
+        if (k >= 1 && k <= 8)   { *cls = D_GLOW_SLIME; return 0.45f; }
+        if (k >= 9 && k <= 12)  { *cls = D_GLOW_LAVA;  return 0.40f; }
+        /* 13..16 and anything else: a floor like any other. */
+    }
+
     *cls = D_GLOW_NONE;
     return 0.0f;
 }

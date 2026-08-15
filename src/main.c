@@ -114,6 +114,34 @@ static const resolution_t RES_320x480 = {
 
 void D_RequestScreen(int w, int h) { pend_scr_w = w; pend_scr_h = h; }
 
+/* The VI's resample filter decision, in ONE place.
+ *
+ * VIFILTER=0 was DEAD, and silently so. It reached only the display_init in
+ * main(), and the boot-mode drop immediately after it passed FILTERS_RESAMPLE
+ * unconditionally -- a branch taken in every default build, because
+ * SCREEN_BOOT_H is 240 whenever HIRES=0. So the lever could be set to 0, the
+ * build could come up, and the filter was on the whole time.
+ *
+ * That is worse than a missing optimisation. The filter reads the coverage
+ * bits the RDP writes at polygon edges and blends across them during scanout,
+ * which is exactly the kind of thing the seam investigation was hunting -- and
+ * a0603c9 lists "the VI resample filter" among the causes ELIMINATED on
+ * evidence. Any such elimination done with a default build tested nothing.
+ *
+ * Keyed on the framebuffer's WIDTH, not on which lever selected it: the VI
+ * always scales to a 640-wide virtual output, so what decides this is how much
+ * horizontal resize is left. 640 has none and the filter only smears 1:1
+ * content; 320 and 512 both upscale and want it. */
+static filter_options_t vi_filter_for(int w)
+{
+#if defined(D_VIFILTER) && D_VIFILTER == 0
+    (void)w;
+    return FILTERS_DISABLED;
+#else
+    return w == 640 ? FILTERS_DISABLED : FILTERS_RESAMPLE;
+#endif
+}
+
 static void screen_apply(void)
 {
     void V_BarFreeSurface(void);
@@ -133,7 +161,20 @@ static void screen_apply(void)
     }
     if (pend_scr_w == r_scr_w && pend_scr_h == r_scr_h) return;
 
-    /* Everything sized to the old screen goes first: the melt's saved frame
+    /* DRAIN FIRST. The two surfaces freed below are RDP texture SOURCES for
+     * the frame submitted at the bottom of the previous loop iteration, which
+     * is deliberately not waited on -- the melt samples `saved` and the status
+     * bar samples `bar_surf`. display_change drains nothing (it only stages VI
+     * state), and surface_free hands the block back to newlib, which writes
+     * its own free-chunk bookkeeping into it. Freeing while the RDP still
+     * reads is a torn status bar at best and a wild DMA at worst.
+     *
+     * Costs one drain per detail toggle and nothing during play: the
+     * unchanged-size early-out above returns on every other frame. The tree
+     * already takes this precaution in d_verify.c. */
+    rspq_wait();
+
+    /* Everything sized to the old screen goes next: the melt's saved frame
      * and the status bar's composited strip are both framebuffers in their
      * own right, and both are lazily reallocated at the new size. */
     r_wipe_free();
@@ -152,7 +193,7 @@ static void screen_apply(void)
      * boot (see display_init) makes every later switch free. */
     display_change(pend_scr_h >= 480 ? RES_320x480 : RESOLUTION_320x240,
                    DEPTH_16_BPP, 3, GAMMA_NONE,
-                   pend_scr_w == 640 ? FILTERS_DISABLED : FILTERS_RESAMPLE);
+                   vi_filter_for(pend_scr_w));
 
     r_scr_w = pend_scr_w;
     r_scr_h = pend_scr_h;
@@ -838,25 +879,7 @@ int main(void)
     }
 
     display_init(hires_ok ? RES_320x480 : RESOLUTION_320x240,
-                 DEPTH_16_BPP, 3, GAMMA_NONE,
-#if defined(D_VIFILTER) && D_VIFILTER == 0
-                 /* The VI's resample filter reads the COVERAGE bits the RDP
-                  * writes at polygon edges and blends those pixels with
-                  * their neighbours during scanout. Two primitives sharing
-                  * an edge each write partial coverage there, so the filter
-                  * blends on the seam and emits a pixel that is neither
-                  * polygon's colour -- a line of stray colour between
-                  * triangles, produced after the framebuffer is finished
-                  * and so invisible to every check that reads it. This
-                  * turns it off: harder edges, no seam blending. */
-                 FILTERS_DISABLED);
-#else
-    /* Keyed on the framebuffer's WIDTH, not on which lever selected it: the
-     * VI always scales to a 640-wide virtual output, so what decides this
-     * is how much horizontal resize is left. 640 has none and the filter
-     * only smears 1:1 content; 320 and 512 both upscale and want it. */
-                 SCREEN_W == 640 ? FILTERS_DISABLED : FILTERS_RESAMPLE);
-#endif
+                 DEPTH_16_BPP, 3, GAMMA_NONE, vi_filter_for(SCREEN_W));
 
     /* The allocation above is always 512x480; the BOOT mode may not be.
      * Drop to it now that the memory is claimed -- this reconfigures the VI
@@ -866,8 +889,7 @@ int main(void)
         display_change(SCREEN_BOOT_W == 640 ? RESOLUTION_640x240
                                             : RESOLUTION_320x240,
                        DEPTH_16_BPP, 3, GAMMA_NONE,
-                       SCREEN_BOOT_W == 640 ? FILTERS_DISABLED
-                                            : FILTERS_RESAMPLE);
+                       vi_filter_for(SCREEN_BOOT_W));
 
     /* Audio before the arenas claim the heap. audio_init reserves DMA buffers
      * the AI reads directly; starting it with the heap nearly full does not

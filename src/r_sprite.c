@@ -22,6 +22,7 @@
 #include "r_sprite.h"
 #include "r_flat.h"     /* R_FLAT_NEAR: the depth scale walls and flats share */
 #include "r_tri.h"
+#include "r_fastmath.h"   /* floor/ceil as one FPU op, not a libm call */
 
 #ifndef R_DOORMIRROR
 #define R_DOORMIRROR 0
@@ -63,7 +64,10 @@ typedef struct {
     uint8_t     mipped;
 } sprjob_t;
 
-static sprjob_t jobs[SPR_MAX_JOBS];
+/* 16-aligned for the same reason r_wall.c's quads[] is: the array landed at
+ * 8 mod 16, so every job straddled a D-cache line boundary it did not need
+ * to. Eight bytes of bss. */
+static _Alignas(16) sprjob_t jobs[SPR_MAX_JOBS];
 static int      numjobs;
 static int      stat_drawn, stat_uploads, stat_dropped;
 
@@ -228,6 +232,29 @@ void r_sprite_add(const r_camera_t *cam, const r_thing_t *t,
     if (top > (float)SCREEN_H + 2.0f ||
         top + (float)tspr->height * scale_y < -2.0f) return;
 
+#if R_SPROCCL
+    /* Occlusion, not depth. A thing the walk has already walled off is
+     * dropped here rather than queued and left to lose a z compare it
+     * cannot reliably win -- see r_bsp_occluded for why the z bias alone
+     * never could. This is what stops a distant monster drawing through a
+     * wall; the bias stack only ever decided how far away it started.
+     *
+     * Called from inside the BSP walk (r_sprite_add's only caller) so the
+     * occlusion state is the front-to-back one this thing is subject to. */
+    {
+        bool r_bsp_occluded(int x0, int x1, float y0, float y1);
+        /* rf_*_i32, not floorf/ceilf: those are real jal libm calls that also
+         * drag two cold cache lines into the walk, and the (int) cast then
+         * adds a redundant trunc.w.s on the return. floor.w.s rounds toward
+         * -inf and yields the integer directly, so this is bit-identical --
+         * these are screen columns, bounded far inside int32, and
+         * r_bsp_occluded clamps them anyway. */
+        if (r_bsp_occluded(rf_floor_i32(sx - halfw), rf_ceil_i32(sx + halfw),
+                           top, top + (float)tspr->height * scale_y))
+            return;
+    }
+#endif
+
     sprjob_t *j = &jobs[numjobs++];
 
     /* Drop to the half-resolution frame once the sprite is drawn at less than
@@ -246,8 +273,40 @@ void r_sprite_add(const r_camera_t *cam, const r_thing_t *t,
      * eye: a sprite closer than the pull would otherwise invert through
      * infinity, and everything that near is already at depth 0. */
     {
+        /* The near constant FADES with depth, from the sprites' own toward
+         * the flats'. See the bias stack in r_flat.h for the shape; what it
+         * buys is here.
+         *
+         * A near offset separates two surfaces by dNEAR/d, so the zone in
+         * which a sprite wrongly beats a WALL is a fixed FRACTION of depth
+         * -- (NEAR_spr/4.0 - 1) -- and a fixed fraction is a growing number
+         * of world units. At the flat 4.5 that is 12.5%: 12 units at depth
+         * 100, where the thing is touching the wall and nobody sees it, and
+         * 250 units at 2000, where a whole room's depth of monsters draws
+         * straight through. That is why it is only ever reported far away.
+         *
+         * The margin is only NEEDED up close. What it protects is the
+         * contact with the floor the thing stands on -- clipped feet -- and
+         * that contact is sub-pixel long before the through-wall zone gets
+         * large. So the extra margin over the flats decays as D0/(D0 + d):
+         * essentially all of it inside a couple of hundred units, nearly
+         * none of it out where walls matter.
+         *
+         * IT CANNOT REACH ZERO, and the floor is not chosen here. Sprites
+         * must stay ahead of the FLATS at every depth or the floor wins the
+         * tie and takes the feet -- or, for something big and far like a
+         * barrel explosion, the whole sprite. The flats themselves lead the
+         * walls by (R_FLAT_Z_NEAR/4.0 - 1), so that fraction is the best any
+         * sprite bias can do: 7.5% at FLATZ=43. This fade closes the gap
+         * between 12.5% and that floor; going below it means lowering FLATZ,
+         * which is a different contact and a different lever. */
+        float nearc = R_SPR_Z_NEAR;
+#if R_SPRFADE
+        nearc = R_FLAT_Z_NEAR + (R_SPR_Z_NEAR - R_FLAT_Z_NEAR) *
+                ((float)R_SPRFADE / ((float)R_SPRFADE + depth));
+#endif
         const float zd = depth - R_SPR_PULL;
-        const float zv = zd > 1.0f ? 1.0f - R_SPR_Z_NEAR / zd : 0.0f;
+        const float zv = zd > 1.0f ? 1.0f - nearc / zd : 0.0f;
         j->z = zv > 0.0f ? zv : 0.0f;
     }
     j->sx    = sx;

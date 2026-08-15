@@ -22,6 +22,14 @@ void r_sprite_add(const r_camera_t *cam, const r_thing_t *t,
                   const float sh[3], int fog_ll, float alpha);
 void r_sprite_flush(void);
 
+/* Occlusion-cull queued sprites against the BSP walk's own closed columns
+ * (r_bsp_occluded). Host builds compile it out for the same reason as the
+ * reflections below: the harness links r_sprite.c without r_bsp.c, so the
+ * call would not resolve. The N64 build gets it from the Makefile. */
+#ifndef R_SPROCCL
+#define R_SPROCCL 0
+#endif
+
 /* Liquid reflections: mirror images of things over glowing pools, drawn
  * after the sprite pass and masked to pool pixels by the z-buffer alone
  * (see r_reflect_flush in r_sprite.c). Host builds compile them out. */

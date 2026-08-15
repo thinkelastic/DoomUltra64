@@ -105,6 +105,18 @@
 #endif
 #define R_SPR_PULL ((float)R_SPRPULL)
 
+/* How fast the margin above decays back toward the flats' own constant, in
+ * world units -- see SPRFADE in the Makefile for the table and for why the
+ * decay stops at the flats rather than at the walls. The margin is what
+ * keeps a floor from clipping the feet off what stands on it, and it is
+ * only visible up close; the same tenths sit ahead of the WALLS at every
+ * depth, where they buy a distant thing drawing through one. Fading the
+ * first away with distance keeps the near contact and drops most of the
+ * far cost. 0 restores the constant margin. */
+#ifndef R_SPRFADE
+#define R_SPRFADE 256
+#endif
+
 /* A reflection sits just in front of the pool that shows it: the margin
  * the ghost had when flats were 3.5 and it was 4.5. */
 #define R_REFL_Z_NEAR (R_FLAT_Z_NEAR + 1.0f)
