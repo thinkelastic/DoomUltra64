@@ -30,11 +30,35 @@
 
 #if D_DYNLIGHT
 
-/* Enough for a firefight without the per-vertex loop growing teeth. Once
- * it is full, the slot worth least HERE is the one that goes -- see
+/* Sixteen. This was eight, and the number that held it there was the cost
+ * of the per-vertex loop, which ran over every light in the FRAME whether or
+ * not it could reach the surface being shaded -- so a ninth light was paid
+ * for by every lit vertex on screen, and the registry evicted instead (see
  * r_light_prio: the furthest contribute least and are most likely already
- * below a palette step. */
-#define R_LIGHT_MAX 8
+ * below a palette step).
+ *
+ * The selected set below breaks that coupling. Callers that already run a
+ * sphere-vs-box test to decide whether a surface is lit at all now keep the
+ * ANSWER as a bitmask instead of a boolean, and the per-vertex loop walks
+ * only the lights that reach this surface. The cost of a slot is then what
+ * it actually illuminates rather than what happens to be in the frame, and
+ * the cap can rise to where a barrel cluster -- eight on its own, per the
+ * halo alpha note below -- stops evicting the fireball that set it off.
+ *
+ * Sixteen and not more because the mask is carried in a uint16_t, and
+ * because r_light_t is 32 bytes: sixteen slots are 512 B against an 8 KB
+ * data cache, and the eviction scan is still linear. */
+#ifndef R_LIGHTMAX
+#define R_LIGHTMAX 16
+#endif
+#define R_LIGHT_MAX R_LIGHTMAX
+
+/* Whether the per-vertex query walks the surface's reach mask or the whole
+ * frame list. See the Makefile: the two are meant to be bit-identical at
+ * equal R_LIGHTMAX, and that is checked with abdiff rather than asserted. */
+#ifndef R_LIGHTSEL
+#define R_LIGHTSEL 1
+#endif
 
 typedef struct {
     float x, y, z;
@@ -96,6 +120,9 @@ extern float r_light_halo_dz[R_LIGHT_MAX];
 void r_light_halo_alpha_next(float a);
 extern float r_light_halo_a[R_LIGHT_MAX];
 extern int       r_light_num;
+#if D_HWSTAT
+extern int       r_light_peak, r_light_full;
+#endif
 
 /* Clear the frame's list. Called once per frame before the BSP walk, since the
  * walk is what emits the geometry that reads it. */
@@ -238,6 +265,75 @@ static inline int r_light_reaches_box(float bx0, float by0,
     return 0;
 }
 
+/* The same test, keeping WHICH lights reached instead of only whether any
+ * did. Bit i is r_lights[i]. A caller that stores this in place of the
+ * boolean pays nothing extra here -- the loop is the one it was already
+ * running -- and buys a per-vertex loop over the lights that reach this
+ * surface rather than over the frame's whole list. It loses the early-out
+ * the boolean form has, which is why both exist. */
+static inline uint32_t r_light_mask_box(float bx0, float by0,
+                                        float bx1, float by1, float z)
+{
+    uint32_t m = 0;
+
+    for (int i = 0; i < r_light_num; i++) {
+        const r_light_t *l = &r_lights[i];
+        const float cx = l->x < bx0 ? bx0 : (l->x > bx1 ? bx1 : l->x);
+        const float cy = l->y < by0 ? by0 : (l->y > by1 ? by1 : l->y);
+        const float dx = cx - l->x;
+        const float dy = cy - l->y;
+        const float dz = z - l->z;
+        if (1.0f - (dx * dx + dy * dy + dz * dz) * l->inv_r2 > 0.0f)
+            m |= 1u << i;
+    }
+    return m;
+}
+
+/* The selected set: the lights a mask names, compacted to indices so the
+ * per-vertex loop is over a count rather than over 16 bit tests. Expanded
+ * once per surface, read once per vertex.
+ *
+ * Deliberately NOT the implicit state of r_light_at_rgb: the point queries
+ * (a thing's own light in the walk, a vapor pool) are interleaved with the
+ * surface queries and would silently inherit whatever surface was selected
+ * last. Those keep the whole-list functions above, unchanged; only the
+ * paths that own a mask call the _sel form. */
+extern uint8_t r_light_sel[R_LIGHT_MAX];
+extern int     r_light_nsel;
+
+static inline void r_light_select(uint32_t mask)
+{
+    int n = 0;
+
+    for (int i = 0; i < r_light_num; i++)
+        if (mask & (1u << i)) r_light_sel[n++] = (uint8_t)i;
+    r_light_nsel = n;
+}
+
+/* r_light_at_rgb over the selected set. Identical arithmetic, so a surface
+ * whose mask names every light it is near produces the same colour the
+ * whole-list query did -- the lights the mask omits are exactly the ones
+ * whose falloff term was going to be <= 0 at every vertex of this polygon. */
+static inline void r_light_sel_rgb(float x, float y, float z, float out[3])
+{
+    out[0] = out[1] = out[2] = 0.0f;
+
+    for (int k = 0; k < r_light_nsel; k++) {
+        const r_light_t *l = &r_lights[r_light_sel[k]];
+        const float dx = x - l->x;
+        const float dy = y - l->y;
+        const float dz = z - l->z;
+        const float d2 = dx * dx + dy * dy + dz * dz;
+
+        const float a = 1.0f - d2 * l->inv_r2;
+        if (a > 0.0f) {
+            out[0] += a * l->ir;
+            out[1] += a * l->ig;
+            out[2] += a * l->ib;
+        }
+    }
+}
+
 /* For telemetry: how many lights survived culling this frame. */
 static inline int r_light_count(void) { return r_light_num; }
 
@@ -264,6 +360,14 @@ static inline int   r_light_reaches_box(float bx0, float by0,
                                         float bx1, float by1, float z)
                     { (void)bx0; (void)by0; (void)bx1; (void)by1; (void)z;
                       return 0; }
+static inline uint32_t r_light_mask_box(float bx0, float by0,
+                                        float bx1, float by1, float z)
+                    { (void)bx0; (void)by0; (void)bx1; (void)by1; (void)z;
+                      return 0; }
+static inline void  r_light_select(uint32_t mask) { (void)mask; }
+static inline void  r_light_sel_rgb(float x, float y, float z, float out[3])
+                    { (void)x; (void)y; (void)z;
+                      out[0] = out[1] = out[2] = 0.0f; }
 static inline int   r_light_count(void) { return 0; }
 
 #endif /* D_DYNLIGHT */

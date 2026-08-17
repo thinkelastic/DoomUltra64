@@ -76,6 +76,18 @@ typedef struct {
 static _Alignas(16) sprjob_t jobs[SPR_MAX_JOBS];
 static int      numjobs;
 static int      stat_drawn, stat_uploads, stat_dropped;
+#if D_HWSTAT
+/* Ghosts the size gate turned away, and ghosts that survived it. Extern
+ * rather than file-static with an accessor because main.c's window report
+ * is the only reader, which is the arrangement r_drop_ and r_ph_ use.
+ *
+ * These exist because whether the gate does anything is a question about
+ * the ROUTE, not about the code, and two verification paths answered it
+ * wrongly: abdiff's DEMO walker called the gate a no-op, and ares queues no
+ * thing-ghosts at all. The standard attracts say 458 kept against 231
+ * turned away -- a third of them. */
+int r_refl_small, r_refl_kept;
+#endif
 
 /* As r_bsp's STAT, and for the same reason: stat_uploads sits on five
  * separate per-upload paths through the sprite flush and neither it nor
@@ -1054,6 +1066,33 @@ void r_reflect_add(const r_camera_t *cam, const r_thing_t *t,
     const float halfw = (float)tspr->width * scale_x;
     if (sx + halfw < 0.0f || sx - halfw > (float)SCREEN_W) return;
 
+#if R_REFLMINPX > 0
+    /* Ghosts too small to read as a reflection.
+     *
+     * The pass had a reach gate (128 units above the plane) and an
+     * off-screen gate, but no SIZE gate -- so an imp across the hall queued
+     * a full mirror job, with its own blended quad and its share of the
+     * flush, to put a smudge a few pixels tall on the water.
+     *
+     * The cost this trims is a TAIL, not a steady bill: measured on
+     * hardware the reflect submit is ~200 us in the median frame and spikes
+     * past 4 ms on the worst ones. That is worth doing because the frame is
+     * work-bound rather than display-capped -- the f histogram is unimodal
+     * at 14-16 ms, not paired at 16.67/33.3 -- so the long frames are real
+     * time and not a wait for the field. It is NOT a median-frame win, and
+     * should not be sold as one.
+     *
+     * A height threshold and not a distance one: what matters is how many
+     * pixels the image gets, and a cacodemon at a distance that would hide
+     * an imp is still worth mirroring. scale_y is already in hand. */
+    if ((float)tspr->height * scale_y < (float)R_REFLMINPX) {
+#if D_HWSTAT
+        r_refl_small++;
+#endif
+        return;
+    }
+#endif
+
     const float w_top  = t->z + (float)tspr->topoffset;
     const float w_bot  = w_top - (float)tspr->height;
     const float cy     = SCREEN_H * 0.5f;
@@ -1063,6 +1102,9 @@ void r_reflect_add(const r_camera_t *cam, const r_thing_t *t,
     const float y_bot  = cy - (2.0f * plane_h - w_top - cam->z) * scale_y;
     if (y_bot < -2.0f) return;
 
+#if D_HWSTAT
+    r_refl_kept++;
+#endif
     refljob_t *j = &refl[numrefl++];
     j->tex     = (dt64_tex_t *)t->spr;   /* no mip: images are dim and short */
     j->depth   = depth;

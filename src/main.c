@@ -1553,6 +1553,7 @@ int main(void)
              * exactly what emit_fan's r_tri_slot writes are -- so 54% is a
              * floor and this line exists to find the hardware number. */
             static uint32_t acc_emit, acc_bind;
+            static uint32_t acc_bands, acc_polys, acc_quads, acc_spr;
 
             /* Accumulated since boot: the per-frame counters reset every
              * frame, and a transient drop between two-second samples would
@@ -1563,6 +1564,16 @@ int main(void)
             acc_nd  += r_drop_npts + r_drop_depth + r_drop_side;
             acc_emit += (uint32_t)r_flat_emit_us();
             acc_bind += (uint32_t)r_flat_bind_us();
+            /* What the RDP is being ASKED to draw, as opposed to how long it
+             * took. Fill, per-primitive setup and mode syncs are three
+             * different bottlenecks with three different remedies, and
+             * rdp_busy alone cannot tell them apart: a band count that moves
+             * with rdp_busy says setup, one that does not says fill. These
+             * are the accessors that had no caller until now. */
+            acc_bands += (uint32_t)r_flat_bands();
+            acc_polys += (uint32_t)r_flat_calls();
+            acc_quads += (uint32_t)r_quads_emitted();
+            acc_spr   += (uint32_t)r_sprite_count();
 #endif
 
             if (++statctr % 120 == 0)
@@ -1592,7 +1603,37 @@ int main(void)
                            (unsigned long)(ph_flatflush_us > acc_emit + acc_bind
                                            ? ph_flatflush_us - acc_emit - acc_bind
                                            : 0));
+                    /* Per FRAME, not per window: a primitive count is
+                     * only meaningful against one frame's worth of fill. */
+                    debugf("prim: bands=%lu polys=%lu quads=%lu spr=%lu "
+                           "(per frame)\n",
+                           (unsigned long)(acc_bands / 120),
+                           (unsigned long)(acc_polys / 120),
+                           (unsigned long)(acc_quads / 120),
+                           (unsigned long)(acc_spr   / 120));
+                    acc_bands = acc_polys = acc_quads = acc_spr = 0;
                     acc_emit = acc_bind = 0;
+#if R_REFLECT
+                    /* How many mirror images the size gate kept against how
+                     * many it turned away. Both numbers matter: kept=0 with
+                     * small>0 would mean R_REFLMINPX has switched the pass
+                     * off rather than trimmed it. */
+                    { extern int r_refl_small, r_refl_kept;
+                      debugf("refl: kept=%d small=%d minpx=%d\n",
+                             r_refl_kept, r_refl_small, R_REFLMINPX);
+                      r_refl_kept = r_refl_small = 0; }
+#endif
+#if D_DYNLIGHT
+                    /* Is R_LIGHTMAX a ceiling anyone reaches? peak is the
+                     * most slots any frame in the window used; full is how
+                     * many adds arrived at a full registry. full=0 means the
+                     * cap is dead configuration on this route, whatever it
+                     * is set to. */
+                    { extern int r_light_peak, r_light_full;
+                      debugf("light: peak=%d full=%d cap=%d\n",
+                             r_light_peak, r_light_full, R_LIGHTMAX);
+                      r_light_peak = r_light_full = 0; }
+#endif
                     ph_walk_us = ph_wallflush_us = 0;
                     ph_flatflush_us = ph_sprite_us = 0;
                     /* The per-frame shadows track those counters, so they

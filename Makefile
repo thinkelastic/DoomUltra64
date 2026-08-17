@@ -598,6 +598,32 @@ N64_CFLAGS += -DR_FASTFLOOR=$(R_FASTFLOOR)
 DYNLIGHT ?= 1
 N64_CFLAGS += -DD_DYNLIGHT=$(DYNLIGHT)
 
+# How many dynamic lights can be live at once. Was fixed at 8, and what held
+# it there was the per-vertex query looping over every light in the FRAME --
+# so a ninth light was charged to every lit vertex on screen and the registry
+# evicted by priority instead. LIGHTSEL below removes that coupling, which is
+# what makes raising this affordable: a barrel cluster is eight lights on its
+# own and used to evict the fireball that lit it.
+#
+# The reach mask is a uint16_t, so 16 is the ceiling without widening it.
+LIGHTMAX ?= 16
+N64_CFLAGS += -DR_LIGHTMAX=$(LIGHTMAX)
+
+# LIGHTSEL=0 restores the per-vertex query over the whole light list, which is
+# what flats did before the reach mask was kept. Retained as the A/B and the
+# fallback, in the TRIFAST spirit: the two are supposed to be BIT-IDENTICAL at
+# equal LIGHTMAX, because a light the mask omits is one whose falloff term was
+# going to be <= 0 at every vertex of that polygon. That identity is a claim
+# about the sphere-vs-box test, and this flag is how it stays checkable:
+#
+#   ./abdiff.sh LIGHTSEL=0 LIGHTMAX=8 -- LIGHTSEL=1 LIGHTMAX=8   # must PASS
+#   ./abdiff.sh LIGHTMAX=8 -- LIGHTMAX=16                        # must DIFFER
+#
+# The first proves the selection changes no pixel; the second proves the
+# raised cap actually reaches the screen rather than being dead configuration.
+LIGHTSEL ?= 1
+N64_CFLAGS += -DR_LIGHTSEL=$(LIGHTSEL)
+
 # FOGSCALE=1 scales the light-diminishing range by sector brightness, the
 # way vanilla's diminishing tables do: bright sectors see far, dim sectors
 # fall off close. Light-255 sectors are bit-identical to FOGSCALE=0 (the
@@ -752,6 +778,19 @@ N64_CFLAGS += -DR_SHAFTHUE=$(SHAFTHUE)
 # Capture gates predate this flag -- pin REFLECT=0 when comparing against
 # ref3 captures.
 REFLECT ?= 1
+
+# Smallest mirror image worth queueing, in screen pixels of ghost HEIGHT.
+# 0 restores the old behaviour (every thing over the pool, however distant).
+#
+# The pass gated on reach and on being off-screen, never on size, so a thing
+# across the room queued a full ghost to draw a smudge. What makes this worth
+# a flag rather than a constant: the hardware run that motivated it says the
+# reflect submit is 2-3.3 ms on precisely the frames that overrun a 16.67 ms
+# field, while the median frame has CPU to spare -- so this trims the tail,
+# and how hard to trim it is a look decision, not a perf one. Raise it until
+# the reflections you lose are ones you could not see anyway.
+REFLMINPX ?= 10
+N64_CFLAGS += -DR_REFLMINPX=$(REFLMINPX)
 N64_CFLAGS += -DR_REFLECT=$(REFLECT)
 
 # REFLWOBBLE=0 makes the reflections perfect mirrors again. On moving

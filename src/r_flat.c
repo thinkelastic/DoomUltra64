@@ -44,6 +44,17 @@
 
 #define FLAT_MAX_PTS 24
 
+/* Which per-vertex light query the fan uses. R_LIGHTSEL=1 walks the reach
+ * mask the caller already computed for this surface; =0 walks the frame's
+ * whole list, which is what this did before the mask was kept. Identical
+ * output at equal R_LIGHTMAX -- see the Makefile for the abdiff that holds
+ * that claim honest. */
+#if R_LIGHTSEL
+#define FLAT_LIGHT_AT(x_, y_, z_, out_) r_light_sel_rgb((x_), (y_), (z_), (out_))
+#else
+#define FLAT_LIGHT_AT(x_, y_, z_, out_) r_light_at_rgb((x_), (y_), (z_), (out_))
+#endif
+
 /* Upper bound on a clipped polygon, and the size of every scratch buffer here.
  *
  * Sutherland-Hodgman adds at most one vertex per clipping plane: three for the
@@ -195,7 +206,14 @@ typedef struct {
     uint8_t         texidx;
     /* Nonzero when a light can reach the surface (caller's sphere-vs-box
      * test): the fan skips every per-vertex query otherwise. Occupies what
-     * was the record's one pad byte. */
+     * was the record's one pad byte.
+     *
+     * Still a byte, and still a boolean, because this record is exactly 16
+     * bytes and that is one D-cache line per job. WHICH lights reached is a
+     * uint16_t and lives in joblit[] beside this array -- the same reason
+     * r_light_halo and r_light_prio are parallel arrays rather than fields
+     * of r_light_t: the flush reads the mask once per job, while this byte
+     * is what the hot fold tests. */
     uint8_t         lit;
 #if D_DYNLIGHT
     /* Emissive contribution and its colour, as bytes: this array is 256 jobs
@@ -215,6 +233,12 @@ typedef struct {
  * lines -- which made the size comment above false as built. r_wall.c's
  * quads[] has always done this; these two were simply missed. */
 static _Alignas(16) flatjob_t jobs[FLAT_MAX_JOBS];
+#if D_DYNLIGHT
+/* Which lights reach jobs[i], from the caller's sphere-vs-box test. Parallel
+ * to jobs[] rather than inside it so the record stays one D-cache line: this
+ * is read once per job by the flush, jobs[] is read per vertex. 512 B. */
+static uint16_t joblit[FLAT_MAX_JOBS];
+#endif
 static int         numjobs;
 static dt64_tex_t *jobtex[FLAT_MAX_TEXTURES];
 static int         numjobtex;
@@ -332,6 +356,7 @@ void r_flat_add(const r_polypt_t *pts, int npts, float height, int lightlevel,
     j->shade_ll = (uint8_t)lightlevel;
     j->lit      = (uint8_t)(lit != 0);
 #if D_DYNLIGHT
+    joblit[numjobs - 1] = (uint16_t)lit;
     j->glow    = (uint8_t)(glow < 0.0f ? 0.0f : (glow > 1.0f ? 255.0f : glow * 255.0f));
     j->tint[0] = (uint8_t)(tint[0] * 255.0f);
     j->tint[1] = (uint8_t)(tint[1] * 255.0f);
@@ -486,6 +511,13 @@ void r_flat_flush(const r_camera_t *cam)
             cur_tint[1] = jobs[i].tint[1] * (1.0f / 255.0f);
             cur_tint[2] = jobs[i].tint[2] * (1.0f / 255.0f);
             cur_lit     = jobs[i].lit;
+            /* Expand the reach mask into the compacted set the per-vertex
+             * query walks. Once per job against once per vertex, which is
+             * the whole point: a surface a single muzzle flash touches now
+             * costs one light per vertex however many are in the frame. */
+#if R_LIGHTSEL
+            if (cur_lit) r_light_select(joblit[i]);
+#endif
             cur_neutral = !cur_lit && jobs[i].glow == 0;
 #if R_RIPPLE_ON
             cur_ripple  = jobs[i].glow > 0;
@@ -1060,7 +1092,7 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
             rgba = (cs << 24) | (cs << 16) | (cs << 8) | 255u;              \
         } else {                                                            \
             float la[3];                                                    \
-            if (cur_lit) r_light_at_rgb((p)->wx, (p)->wy, lz, la);          \
+            if (cur_lit) FLAT_LIGHT_AT((p)->wx, (p)->wy, lz, la);         \
             else         la[0] = la[1] = la[2] = 0.0f;                      \
             float rr = shade + near_ + la[0] + glow_r;                      \
             float gg = shade + near_ + la[1] + glow_g;                      \
@@ -1105,7 +1137,7 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
                 FAN_NEAR_DECL(&c[i])
 #if D_DYNLIGHT
                 float la[3];
-                if (cur_lit) r_light_at_rgb(c[i].wx, c[i].wy, lz, la);
+                if (cur_lit) FLAT_LIGHT_AT(c[i].wx, c[i].wy, lz, la);
                 else         la[0] = la[1] = la[2] = 0.0f;
                 float r = shade + near_ + la[0] + glow_r;
                 float g = shade + near_ + la[1] + glow_g;
@@ -1180,7 +1212,7 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
          * term still carries the surface's own tint. The sector base stays
          * neutral so a pool's neighbour keeps its concrete grey. */
         float la[3];
-        if (cur_lit) r_light_at_rgb(c[i].wx, c[i].wy, lz, la);
+        if (cur_lit) FLAT_LIGHT_AT(c[i].wx, c[i].wy, lz, la);
         else         la[0] = la[1] = la[2] = 0.0f;
         const float near_ = r_zlight(shade, c[i].d) - shade;
         float r = shade + near_ + la[0] + glow_r;

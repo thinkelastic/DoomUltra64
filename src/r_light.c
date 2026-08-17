@@ -9,10 +9,22 @@
 
 _Alignas(16) r_light_t r_lights[R_LIGHT_MAX];
 int       r_light_num;
+#if D_HWSTAT
+/* Peak slots used in any frame since the last report, and how many adds
+ * arrived at a full registry. Both zeroed by the reporter, not per frame. */
+int       r_light_peak, r_light_full;
+#endif
+
+/* The compacted selection r_light_select fills and r_light_sel_rgb reads.
+ * Reset to empty with the list: a query issued before any surface selects
+ * then adds nothing, which is the same answer an empty light list gives. */
+uint8_t   r_light_sel[R_LIGHT_MAX];
+int       r_light_nsel;
 
 void r_light_reset(void)
 {
     r_light_num = 0;
+    r_light_nsel = 0;
 }
 
 float r_light_halo[R_LIGHT_MAX];
@@ -59,7 +71,17 @@ void r_light_add(float x, float y, float z, float radius, float intensity,
     int slot;
     if (r_light_num < R_LIGHT_MAX) {
         slot = r_light_num++;
+#if D_HWSTAT
+        /* Whether R_LIGHT_MAX is a real ceiling or dead configuration. The
+         * cap is only worth its slots if the registry actually fills, and
+         * "a lit room fills all eight" is a claim about standing torches
+         * that no measurement had ever been put to. */
+        if (r_light_num > r_light_peak) r_light_peak = r_light_num;
+#endif
     } else {
+#if D_HWSTAT
+        r_light_full++;
+#endif
         /* Full: keep the set worth the most, not whichever arrived first.
          *
          * The count must NOT be rewound to the evicted slot to do this.

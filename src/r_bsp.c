@@ -890,9 +890,11 @@ static void render_flats_inner(const subsector_t *ss)
                    fglow, ftint,
                    /* Sphere-vs-box reach test per surface: a rejected light
                     * adds exactly zero at every vertex, so the fan skips
-                    * its per-vertex queries with identical output. */
-                   r_light_reaches_box((float)rg->bx0, (float)rg->by0,
-                                       (float)rg->bx1, (float)rg->by1, fh),
+                    * its per-vertex queries with identical output. The MASK
+                    * form keeps which ones reached, so the fan's per-vertex
+                    * loop is over those rather than over the whole frame. */
+                   (int)r_light_mask_box((float)rg->bx0, (float)rg->by0,
+                                         (float)rg->bx1, (float)rg->by1, fh),
                    R_REFLECT && D_FlatReflective(sec->floorpic));
 #if R_REFLECT
         /* The mirror pass clips its ghosts to these footprints. Low
@@ -912,8 +914,8 @@ static void render_flats_inner(const subsector_t *ss)
      * itself rather than a flag: F_SKY1 resolves to skyflatnum at load. */
     if (cur_cam->z < ch && sec->ceilingpic != skyflatnum) {
         const int clit =
-            r_light_reaches_box((float)rg->bx0, (float)rg->by0,
-                                (float)rg->bx1, (float)rg->by1, ch);
+            (int)r_light_mask_box((float)rg->bx0, (float)rg->by0,
+                                  (float)rg->bx1, (float)rg->by1, ch);
         /* A ceiling can be emissive too -- a lava ceiling is rare but legal. */
 #if D_DYNLIGHT
         float ctint[3];
