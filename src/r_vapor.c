@@ -269,6 +269,34 @@ void r_vapor_flush(const r_camera_t *cam)
         const float dzf  = dz * cam->focal_y;
         const float vz   = j->h;          /* where the layer hangs, for the light query */
 
+        /* NOT THE POOL YOU ARE STANDING IN.
+         *
+         * The haze is meant to be seen across, at a distance and from above.
+         * Wade into it and the layer hangs at knee height a few units from
+         * the eye, so it stops being atmosphere and becomes a translucent
+         * sheet pasted over the middle of the screen -- and being alpha
+         * blended, it costs the most fill exactly when it looks worst.
+         *
+         * Dropped when the eye is over this layer's own footprint and low
+         * enough to be in it. The height band is generous on purpose: a
+         * player standing in sludge has their eye about 41 units up, and
+         * jumping or riding a lift should not flicker the haze back on. */
+        {
+            const float eh = cam->z - j->h;
+            if (eh > -8.0f && eh < 72.0f) {
+                float bx0 = 1e9f, bx1 = -1e9f, by0 = 1e9f, by1 = -1e9f;
+                for (int q = 0; q < j->npts; q++) {
+                    const float px = j->pts[q].x, py = j->pts[q].y;
+                    if (px < bx0) bx0 = px;
+                    if (px > bx1) bx1 = px;
+                    if (py < by0) by0 = py;
+                    if (py > by1) by1 = py;
+                }
+                if (cam->x >= bx0 && cam->x <= bx1 &&
+                    cam->y >= by0 && cam->y <= by1) continue;
+            }
+        }
+
         float sv[VAP_CLIP_MAX][10];
         for (int i = 0; i < n; i++) {
             const float iw = 1.0f / clip[i].d;

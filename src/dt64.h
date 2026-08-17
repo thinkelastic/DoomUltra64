@@ -67,6 +67,10 @@ int  dt64_palette(void);      /* the bank currently selected */
 /* Live palette entry (current bank), RGBA5551. */
 uint16_t dt64_tlut_color(int idx);
 
+/* Palette entry from a named bank, RGBA5551. Bank 0 is the unflashed
+ * palette: use it for anything measured once and kept. */
+uint16_t dt64_tlut_color_bank(int bank, int idx);
+
 /* Load a .dt64 texture from the ROM filesystem into the texture arena.
  * Returns false on failure, including when the arena is exhausted. */
 bool dt64_load(dt64_tex_t *tex, const char *path);

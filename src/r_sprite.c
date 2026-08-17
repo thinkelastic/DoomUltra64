@@ -414,7 +414,26 @@ void r_sprite_add(const r_camera_t *cam, const r_thing_t *t,
          * which is a different contact and a different lever. */
         float nearc = R_SPR_Z_NEAR;
 #if R_SPRFADE
-        nearc = R_FLAT_Z_NEAR + (R_SPR_Z_NEAR - R_FLAT_Z_NEAR) *
+        /* Decays to the WALLS' constant, not the flats'.
+         *
+         * It used to bottom out at R_FLAT_Z_NEAR, which is where the
+         * through-wall artifact lived: the flats deliberately lead the walls
+         * by (FLATZ/40 - 1), so a sprite that merely stops leading the FLATS
+         * is still ahead of every WALL by 7.5% of its depth -- and a fixed
+         * fraction is a growing number of world units, 75 at 1000 and 150 at
+         * 2000. No amount of decay toward 4.3 could remove it, because 4.3
+         * was already too high.
+         *
+         * Targeting 4.0 makes a distant sprite tie the walls instead of
+         * beating them, which is what stops an enemy showing through one.
+         * What it gives up is the floor contact at range: past roughly 180
+         * units the constant falls under the flats' and the floor can take
+         * the sprite's contact row. That is the right trade -- the audit put
+         * the exposure at 0.056 of a screen row, since the floor's z moves
+         * ~17.9 LSB per row at eye height, so it is a fraction of one row at
+         * the feet of something already small. Up close, where a clipped
+         * foot is actually visible, the full margin is still there. */
+        nearc = R_FLAT_NEAR + (R_SPR_Z_NEAR - R_FLAT_NEAR) *
                 ((float)R_SPRFADE / ((float)R_SPRFADE + depth));
 #endif
         const float zd = depth - R_SPR_PULL;
@@ -435,9 +454,19 @@ void r_sprite_add(const r_camera_t *cam, const r_thing_t *t,
 #else
         const float k = 1.0f; (void)fog_ll;
 #endif
-        j->sr = sh[0] * k;
-        j->sg = sh[1] * k;
-        j->sb = sh[2] * k;
+        /* And the near half of it, on the same terms the floor under the
+         * thing gets (r_nearlight): an imp two paces away in a dim hall
+         * lit at lightlevel/255 while the floor it stands on is lit toward
+         * full brightness reads as a cardboard cut-out. Fullbright frames
+         * are already at 1.0 and the clamp leaves them there. */
+        const float n = fog_ll >= 0 ? r_nearlight(depth) : 0.0f;
+        float sr = sh[0] + n, sg = sh[1] + n, sb = sh[2] + n;
+        if (sr > 1.0f) sr = 1.0f;
+        if (sg > 1.0f) sg = 1.0f;
+        if (sb > 1.0f) sb = 1.0f;
+        j->sr = sr * k;
+        j->sg = sg * k;
+        j->sb = sb * k;
     }
     j->alpha = alpha;
 }
@@ -579,7 +608,19 @@ static void spr_shine_flush(void)
         float daz = j->laz - j->vaz;
         while (daz >  (float)M_PI) daz -= 2.0f * (float)M_PI;
         while (daz < -(float)M_PI) daz += 2.0f * (float)M_PI;
-        const float u_hl = sinf(0.5f * daz);
+        /* The branch cut moved OFF the muzzle flash.
+         *
+         * Wrapping daz keeps it in (-pi, pi], but sin(daz/2) is still
+         * discontinuous at the ends -- and daz = pi means the light is AT
+         * THE EYE, which is exactly a muzzle flash: the brightest thing in
+         * the registry, outranking every torch, so it wins the dominant-light
+         * scan whenever the player fires. The highlight flipped end to end on
+         * alternate frames of every shot.
+         *
+         * This form is continuous there and puts the cut at daz = 0 instead,
+         * where the thing is backlit and the two competing answers are
+         * symmetric rim highlights -- a flip nobody can see. */
+        const float u_hl = -copysignf(cosf(0.5f * daz), daz);
         /* The opaque pass may have swapped in the half-size mip; its own draw
          * scales by 2 to compensate and this pass did not, so a distant barrel
          * got a half-scale highlight parked in its lower right. */

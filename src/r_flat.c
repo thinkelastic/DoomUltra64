@@ -78,12 +78,37 @@
  * so the polygon structure a flat is actually built from is visible on the
  * television. A misplaced or short primitive shows as a wrongly-shaped
  * patch of one colour rather than as a subtle notch in a texture. Not a
- * shipping option; there is no texture and no shading under this. */
+ * shipping option; there is no texture and no shading under this -- and
+ * BOTH of those are things this file has to arrange, neither of which it
+ * used to. The colour is overridden in every emission path (including
+ * FAN_SHADE_DECL, which is the one almost every triangle takes) and TEX0
+ * is cut out of the combiner in r_flat_flush, because flats otherwise run
+ * on the combiner the wall pass left set. Overriding the colour alone
+ * paints the flat's own TEXTURE in that colour, which on the mid-greys
+ * most flats wear is indistinguishable from an ordinary floor: measured
+ * at exactly 0 of 3200 sampled pixels wearing any of the six colours
+ * below, which is how this option came to be believed useless.
+ *
+ * The colour is the band's index WITHIN ITS OWN POLYGON, not an absolute
+ * depth: bands are cut on a global octave ladder but numbered locally, so
+ * two neighbouring surfaces at one depth can wear different colours when
+ * one of them starts nearer. Read a patch against its own surface. */
 static int cur_banddbg;
 static const float flatdbg_col[6][3] = {
     { 1.0f, 0.2f, 0.2f }, { 0.2f, 1.0f, 0.2f }, { 0.3f, 0.4f, 1.0f },
     { 1.0f, 1.0f, 0.2f }, { 1.0f, 0.3f, 1.0f }, { 0.2f, 1.0f, 1.0f },
 };
+/* The same colour the staged paths write, packed the way the direct slot
+ * path hands it to the RSP -- and that path is where almost every triangle
+ * goes, since only the first triangle after each group_begin takes the
+ * rdpq_triangle route. */
+static inline uint32_t flatdbg_rgba(void)
+{
+    const float *dc = flatdbg_col[cur_banddbg % 6];
+    return ((uint32_t)(dc[0] * 255.0f) << 24) |
+           ((uint32_t)(dc[1] * 255.0f) << 16) |
+           ((uint32_t)(dc[2] * 255.0f) << 8) | 255u;
+}
 #endif
 
 /* Texture repeat period, in texels. Flats are 32x32. */
@@ -225,6 +250,11 @@ static int stat_calls, stat_bands;
 /* Counted for the same reason as r_bsp's: a missing floor should be
  * attributable, not guessed at. */
 int r_drop_npts, r_drop_depth, r_drop_side, r_drop_pool, r_drop_clipofl;
+#if R_TRIPROBE
+int   r_probe_tris, r_probe_over, r_probe_tl, r_probe_over_tl;
+float r_probe_worst, r_probe_worst_tl;
+static int probe_frame;
+#endif
 static uint32_t stat_emit_us, stat_bind_us;
 
 void r_flat_begin(void)
@@ -233,6 +263,18 @@ void r_flat_begin(void)
     stat_uploads = 0;
     stat_dropped = 0;
     stat_calls = stat_bands = 0;
+#if R_TRIPROBE
+    { extern void r_wall_probe_report(void); r_wall_probe_report(); }
+    if (++probe_frame >= 60) {
+        probe_frame = 0;
+        debugf("triprobe: %d tris, %d over %.1f:1 (worst %.2f:1) | "
+               "top-left %d tris, %d over (worst %.2f:1)\n",
+               r_probe_tris, r_probe_over, FLAT_MAX_DEPTH_RATIO,
+               r_probe_worst, r_probe_tl, r_probe_over_tl, r_probe_worst_tl);
+    }
+    r_probe_tris = r_probe_over = r_probe_tl = r_probe_over_tl = 0;
+    r_probe_worst = r_probe_worst_tl = 0.0f;
+#endif
     r_drop_npts = r_drop_depth = r_drop_side = r_drop_pool = 0;
     stat_emit_us = stat_bind_us = 0;
     numjobs      = 0;
@@ -375,6 +417,17 @@ static void flow_update(void)
 
 void r_flat_flush(const r_camera_t *cam)
 {
+#if R_FLATDBG
+    /* Shade only, and it has to be said HERE.
+     *
+     * r_flat.c sets no rdpq mode of its own: floors and ceilings run on
+     * whatever r_flush_walls left behind, which is RGB = TEX0 * SHADE.
+     * Under that combiner an overridden vertex colour paints the flat's own
+     * texture in that colour rather than a flat colour, so the diagnostic
+     * looked like it was not painting at all. Left set for the passes that
+     * follow: sprites, halos and the UI each install their own combiner. */
+    rdpq_mode_combiner(RDPQ_COMBINER_SHADE);
+#endif
     r_tri_group_begin();
     /* Group the queue by texture in one pass.
      *
@@ -665,6 +718,13 @@ static void draw_one(const r_camera_t *cam, const r_polypt_t *pts, int npts,
 #else
         const fvtx_t *rest = bandbuf[cur];
 #endif
+#if R_FLATDBG
+        /* At the TOP of the body, not after the split: the last band takes
+         * the early exit below, and every single-band surface -- most of
+         * them -- IS the last band. Assigned after the split, those wore
+         * whatever index the previous polygon happened to leave behind. */
+        cur_banddbg = b;
+#endif
         if (b == bands - 1) {                       /* last band: all of it */
             EMIT_TIMED(rest, rn);
             break;
@@ -678,9 +738,6 @@ static void draw_one(const r_camera_t *cam, const r_polypt_t *pts, int npts,
         const int fn = clip_depth(rest, rn, bandbuf[cur ^ 1], edge[b + 1], true);
 #endif
 
-#if R_FLATDBG
-        cur_banddbg = b;
-#endif
         if (nn >= 3) EMIT_TIMED(near, nn);
 
         rn = fn;
@@ -869,6 +926,41 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
     const float focal_x = cam->focal_x;
     const float dzf     = dz * cam->focal_y;
     const float tscale = cur_tscale;
+
+#if R_TRIPROBE
+    /* --- perspective sanity, per emitted triangle -----------------------
+     *
+     * rdpq normalises the texture coefficients against the NEAREST vertex
+     * of each triangle, so one spanning more than FLAT_MAX_DEPTH_RATIO in
+     * depth loses precision at its far end and warps -- the reason banding
+     * exists. Banding is supposed to make that unreachable; this counts the
+     * triangles that escape it, and reports the top-left quarter of the
+     * viewport separately, because that is where the artifact lives. */
+    for (int i = 2; i < m; i++) {
+        const int idx[3] = { 0, i - 1, i };
+        float dlo = 1e30f, dhi = 0.0f;
+        float xlo = 1e30f, ylo = 1e30f;
+        for (int k = 0; k < 3; k++) {
+            const fvtx_t *p = &c[idx[k]];
+            const float iw = 1.0f / p->d;
+            const float sx = cx + p->o * cam->focal_x * iw;
+            const float sy = cy - dz * cam->focal_y * iw;
+            if (p->d < dlo) dlo = p->d;
+            if (p->d > dhi) dhi = p->d;
+            if (sx < xlo) xlo = sx;
+            if (sy < ylo) ylo = sy;
+        }
+        const float ratio = dlo > 0.0f ? dhi / dlo : 1e30f;
+        r_probe_tris++;
+        if (ratio > r_probe_worst) r_probe_worst = ratio;
+        if (ratio > FLAT_MAX_DEPTH_RATIO + 0.01f) r_probe_over++;
+        if (xlo < SCREEN_W * 0.25f && ylo < SCREEN_H * 0.25f) {
+            r_probe_tl++;
+            if (ratio > r_probe_worst_tl) r_probe_worst_tl = ratio;
+            if (ratio > FLAT_MAX_DEPTH_RATIO + 0.01f) r_probe_over_tl++;
+        }
+    }
+#endif
 #if D_DYNLIGHT
     /* Loop-invariant pieces of the lit path, hoisted by hand: the glow
      * products and the query height do not vary per vertex, and spelling
@@ -919,7 +1011,19 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
 #else
 #define FAN_VIS_DECL(p)  const float vis = 1.0f;
 #endif
-#if D_DYNLIGHT
+/* The near half of the same falloff, from the same depth (see r_nearlight
+ * in r_wall.h). It enters the vertex's light sum beside the point-light and
+ * glow terms and under their clamp, which is where lit_shade puts it on
+ * walls -- a floor and the wall it meets have to agree at the join. */
+#define FAN_NEAR_DECL(p) const float near_ = r_zlight(shade, (p)->d) - shade;
+#if R_FLATDBG
+        /* FIRST, so the diagnostic reaches the path the triangles actually
+         * take. Shading is not overridden downstream here, it is never
+         * computed: nothing about the vertex may influence the colour, or
+         * the picture stops being a map of the polygons. */
+#define FAN_SHADE_DECL(p)                                                   \
+        const uint32_t rgba = flatdbg_rgba(); (void)(p);
+#elif D_DYNLIGHT
         /* Base light and white point lights stay neutral; only the emissive
          * term carries the surface's own colour (see the note at the old
          * staging loop's home: tinting the whole vertex would recolour
@@ -930,16 +1034,19 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
 #define FAN_SHADE_DECL(p)                                                   \
         uint32_t rgba;                                                      \
         FAN_VIS_DECL(p)                                                     \
+        FAN_NEAR_DECL(p)                                                    \
         if (cur_neutral) {                                                  \
-            const uint32_t cs = (uint32_t)(shade * vis * 255.0f);           \
+            float sh_ = shade + near_;                                      \
+            if (sh_ > 1.0f) sh_ = 1.0f;                                     \
+            const uint32_t cs = (uint32_t)(sh_ * vis * 255.0f);             \
             rgba = (cs << 24) | (cs << 16) | (cs << 8) | 255u;              \
         } else {                                                            \
             float la[3];                                                    \
             if (cur_lit) r_light_at_rgb((p)->wx, (p)->wy, lz, la);          \
             else         la[0] = la[1] = la[2] = 0.0f;                      \
-            float rr = shade + la[0] + glow_r;                              \
-            float gg = shade + la[1] + glow_g;                              \
-            float bb = shade + la[2] + glow_b;                              \
+            float rr = shade + near_ + la[0] + glow_r;                      \
+            float gg = shade + near_ + la[1] + glow_g;                      \
+            float bb = shade + near_ + la[2] + glow_b;                      \
             if (rr > 1.0f) rr = 1.0f;                                       \
             if (gg > 1.0f) gg = 1.0f;                                       \
             if (bb > 1.0f) bb = 1.0f;                                       \
@@ -951,7 +1058,10 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
 #else
 #define FAN_SHADE_DECL(p)                                                   \
         FAN_VIS_DECL(p)                                                     \
-        const uint32_t cs = (uint32_t)(shade * vis * 255.0f);               \
+        FAN_NEAR_DECL(p)                                                    \
+        float sh_ = shade + near_;                                          \
+        if (sh_ > 1.0f) sh_ = 1.0f;                                         \
+        const uint32_t cs = (uint32_t)(sh_ * vis * 255.0f);                 \
         const uint32_t rgba = (cs << 24) | (cs << 16) | (cs << 8) | 255u;
 #endif
         /* The texel origins are loop constants, carried pre-scaled into
@@ -974,18 +1084,23 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
                 x3[i][0] = cx + c[i].o * focal_x * iw;
                 x3[i][1] = cy - dzf * iw;
                 FAN_VIS_DECL(&c[i])
+                FAN_NEAR_DECL(&c[i])
 #if D_DYNLIGHT
                 float la[3];
                 if (cur_lit) r_light_at_rgb(c[i].wx, c[i].wy, lz, la);
                 else         la[0] = la[1] = la[2] = 0.0f;
-                float r = shade + la[0] + glow_r;
-                float g = shade + la[1] + glow_g;
-                float b = shade + la[2] + glow_b;
+                float r = shade + near_ + la[0] + glow_r;
+                float g = shade + near_ + la[1] + glow_g;
+                float b = shade + near_ + la[2] + glow_b;
                 x3[i][2] = (r > 1.0f ? 1.0f : r) * vis;
                 x3[i][3] = (g > 1.0f ? 1.0f : g) * vis;
                 x3[i][4] = (b > 1.0f ? 1.0f : b) * vis;
 #else
-                x3[i][2] = x3[i][3] = x3[i][4] = shade * vis;
+                {
+                    float sh_ = shade + near_;
+                    if (sh_ > 1.0f) sh_ = 1.0f;
+                    x3[i][2] = x3[i][3] = x3[i][4] = sh_ * vis;
+                }
 #endif
 #if R_FLATDBG
                 {
@@ -1049,14 +1164,19 @@ static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
         float la[3];
         if (cur_lit) r_light_at_rgb(c[i].wx, c[i].wy, lz, la);
         else         la[0] = la[1] = la[2] = 0.0f;
-        float r = shade + la[0] + glow_r;
-        float g = shade + la[1] + glow_g;
-        float b = shade + la[2] + glow_b;
+        const float near_ = r_zlight(shade, c[i].d) - shade;
+        float r = shade + near_ + la[0] + glow_r;
+        float g = shade + near_ + la[1] + glow_g;
+        float b = shade + near_ + la[2] + glow_b;
         sv[i][2] = (r > 1.0f ? 1.0f : r) * vis;
         sv[i][3] = (g > 1.0f ? 1.0f : g) * vis;
         sv[i][4] = (b > 1.0f ? 1.0f : b) * vis;
 #else
-        sv[i][2] = sv[i][3] = sv[i][4] = shade * vis;
+        {
+            float sh_ = r_zlight(shade, c[i].d);
+            if (sh_ > 1.0f) sh_ = 1.0f;
+            sv[i][2] = sv[i][3] = sv[i][4] = sh_ * vis;
+        }
 #endif
 #if R_FLATDBG
         {

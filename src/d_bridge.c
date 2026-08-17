@@ -1515,6 +1515,9 @@ void D_LightsUpdate(void)
     }
 
     r_light_reset();
+    /* Beads are rebuilt by the same walk below and must be cleared on the
+     * same cadence, or they strobe on the frames this function skips. */
+    { void r_bead_reset(void); r_bead_reset(); }
 
     const player_t *pl = &players[consoleplayer];
     if (!pl->mo) return;

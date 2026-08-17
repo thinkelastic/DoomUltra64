@@ -7,6 +7,7 @@
 #include "r_fastmath.h"
 #include "r_flat.h"          /* R_FLAT_NEAR: the shared depth curve */
 #include "r_light.h"
+#include "r_sky.h"           /* a shaft is this level's sky, falling in */
 #include "r_tri.h"
 
 #include <libdragon.h>
@@ -122,6 +123,13 @@ void r_halo_init(void)
 #endif
 #define SHAFT_AMT ((float)R_SHAFTAMT * 0.01f)
 
+/* How much of the sky's hue the beam takes, hundredths: 0 is white light,
+ * 100 is the backdrop's hue at full saturation. See the note at shaft_tone. */
+#ifndef R_SHAFTHUE
+#define R_SHAFTHUE 55
+#endif
+#define SHAFT_HUE ((float)R_SHAFTHUE * 0.01f)
+
 /* How much of the opening's outline the beam keeps. A sky well is a
  * subsector polygon and those are convex but not always tidy; eight is
  * more corners than any real skylight has and bounds the per-shaft work.
@@ -159,7 +167,18 @@ void r_bead_add(float x, float y, float z, float half_h,
     d->r = r; d->g = g; d->b = b; d->a = a;
 }
 
-void r_halo_begin(void) { num_shafts = 0; num_beads = 0; }
+void r_halo_begin(void) { num_shafts = 0; }
+
+/* Beads keep the LIGHT REGISTRY's lifetime, not the frame's.
+ *
+ * This used to clear them every frame, but their only producer sits inside
+ * D_LightsUpdate, which is cached per GAME TIC and returns early on the
+ * frames between. At 60 fps against Doom's 35 Hz that is nearly every other
+ * frame, so a barrel's rim glow strobed at the tic rate while the registry
+ * halos beside it -- rebuilt on the same cadence but not cleared in between
+ * -- stayed perfectly steady. Cleared where the registry is, so the two
+ * finally share a lifetime. */
+void r_bead_reset(void) { num_beads = 0; }
 
 /* Replace an outline with its own bounding rectangle, wound the same way
  * whatever came in. Used when a well is too many-cornered to carry and
@@ -400,7 +419,8 @@ static void halo_mode(void)
  * for the same reason: its soft side edges must appear once, at the two
  * outer ends, not at every internal seam.
  */
-static void shaft_prism(const r_camera_t *cam, const shaftjob_t *s, float k)
+static void shaft_prism(const r_camera_t *cam, const shaftjob_t *s, float k,
+                        float cr, float cg, float cb)
 {
     const float cs = r_view_cs, sn = r_view_sn;
     const float cxs = SCREEN_W * 0.5f, cys = SCREEN_H * 0.5f;
@@ -550,7 +570,7 @@ static void shaft_prism(const r_camera_t *cam, const shaftjob_t *s, float k)
         float v[4][10];
         for (int i = 0; i < 4; i++) {
             v[i][0] = xs[i]; v[i][1] = ys[i];
-            v[i][2] = 1.00f; v[i][3] = 0.97f; v[i][4] = 0.86f;
+            v[i][2] = cr;    v[i][3] = cg;    v[i][4] = cb;
             v[i][5] = as[i];
             v[i][6] = ss[i]; v[i][7] = ts[i];
             v[i][8] = ws[i];
@@ -561,9 +581,40 @@ static void shaft_prism(const r_camera_t *cam, const shaftjob_t *s, float k)
     }
 }
 
+/* The beam's colour: this level's sky, carried toward white.
+ *
+ * It was a fixed warm white (1.00, 0.97, 0.86), which suits a blue-grey
+ * daytime sky and suits nothing else -- the same pale sunbeam fell through
+ * Inferno's roof as through E1's. The sky is a level constant, so r_sky
+ * measures its hue once when the backdrop is set and this only reads it.
+ *
+ * THE CARRY TOWARD WHITE is not a softening, it is the same correction the
+ * halos need and for the same reason: the blender mixes toward this colour,
+ * so a saturated one pulls the channels it lacks DOWNWARDS. SKY3 averages to
+ * pure red; taken raw, its beam would drive green and blue to zero in
+ * everything it crossed and read as a red gel over the room rather than as
+ * light entering it. Held at 55% of the way -- the halos' own figure -- a
+ * hell sky still throws a distinctly red beam, but one that brightens its
+ * strongest channel more than it dims the others.
+ *
+ * A neutral sky lands on white, which is what E1's grey does: the warmth the
+ * old constant carried was never in that backdrop to begin with. */
+static void shaft_tone(float *r, float *g, float *b)
+{
+    float hr, hg, hb;
+    r_sky_tone(&hr, &hg, &hb);
+    const float w = 1.0f - SHAFT_HUE;
+    *r = w + SHAFT_HUE * hr;
+    *g = w + SHAFT_HUE * hg;
+    *b = w + SHAFT_HUE * hb;
+}
+
 void r_shaft_flush(const r_camera_t *cam)
 {
     if (!num_shafts) return;
+
+    float cr, cg, cb;
+    shaft_tone(&cr, &cg, &cb);
 
     halo_mode();
     rdpq_texparms_t tp = {0};
@@ -572,8 +623,8 @@ void r_shaft_flush(const r_camera_t *cam)
 
     for (int i = 0; i < num_shafts; i++) {
         const shaftjob_t *s = &shafts[i];
-        /* Daylight through a hole: warm white, scaled by how bright the
-         * sector under it actually is. The texture carries the fall from
+        /* Daylight through a hole: the sky's own tone, scaled by how bright
+         * the sector under it actually is. The texture carries the fall from
          * the opening to the floor; the vertex alpha sets its scale.
          *
          * A lever rather than a constant, because the two failure modes sit
@@ -581,7 +632,7 @@ void r_shaft_flush(const r_camera_t *cam)
          * too high and it stops being light in the air and becomes a solid
          * pale slab hanging in the room. It was 0.42 once, which was the
          * slab; 0.21 was the correction and undershot. */
-        shaft_prism(cam, s, SHAFT_AMT * s->lum);
+        shaft_prism(cam, s, SHAFT_AMT * s->lum, cr, cg, cb);
     }
     num_shafts = 0;
 }
@@ -663,7 +714,6 @@ void r_halo_flush(const r_camera_t *cam)
                       d->z + d->h, d->z - d->h,
                       d->r, d->g, d->b, d->a, d->a);
         }
-        num_beads = 0;
     }
 
 }

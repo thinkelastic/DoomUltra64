@@ -152,6 +152,12 @@ uint32_t        r_flat_stamp;
 
 typedef struct { float x, y; } vec2_t;
 
+/* Silent truncation in clip_half drops a vertex and leaves the cell polygon
+ * SMALLER than the region it should tile -- a wedge of floor or ceiling that
+ * simply is not there, with whatever stands behind it showing through. The
+ * flat pass counts its own clip overflow; this one never did. */
+int r_clip_trunc;
+
 /* Signed side of the directed line (px,py)+(dx,dy). Matches r_bsp's
  * point_on_side: positive is Doom's "front". */
 static inline float side_of(float x, float y,
@@ -174,14 +180,16 @@ static int clip_half(const vec2_t *in, int n, vec2_t *out,
         const float sa = sgn * side_of(a.x, a.y, px, py, dx, dy);
         const float sb = sgn * side_of(b.x, b.y, px, py, dx, dy);
 
-        if (sa >= 0.0f) { if (m < MAX_POLY_PTS) out[m++] = a; }
+        if (sa >= 0.0f) {
+            if (m < MAX_POLY_PTS) out[m++] = a; else r_clip_trunc++;
+        }
         if ((sa > 0.0f && sb < 0.0f) || (sa < 0.0f && sb > 0.0f)) {
             const float t = sa / (sa - sb);
             if (m < MAX_POLY_PTS) {
                 out[m].x = a.x + (b.x - a.x) * t;
                 out[m].y = a.y + (b.y - a.y) * t;
                 m++;
-            }
+            } else r_clip_trunc++;
         }
     }
     return m;
@@ -1285,7 +1293,10 @@ void R_BuildSubsectorData(void)
     vec2_t world[4] = { { xl, yl }, { xh, yl }, { xh, yh }, { xl, yh } };
 
     int cursor = 0;
+    r_clip_trunc = 0;
     build_polys(numnodes - 1, world, 4, &cursor);
+    debugf("ssdata: clip_half truncations = %d (cells losing vertices)\n",
+           r_clip_trunc);
 
     /* Bucket things by the cell they stand in, so the renderer walks only the
      * things in subsectors it has already decided are visible -- sprites then

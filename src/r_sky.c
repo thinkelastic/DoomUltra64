@@ -77,7 +77,105 @@ bool r_sky_would_draw(void) { return sky_tex != NULL && sky_x1 >= sky_x0; }
 
 void r_sky_span(int *x0, int *x1) { *x0 = sky_x0; *x1 = sky_x1; }
 
-void r_sky_set(dt64_tex_t *tex) { sky_tex = tex; }
+/* --- the sky's own tone ---------------------------------------------------
+ *
+ * A beam falling through a hole in the roof is daylight from THIS sky, so
+ * its colour belongs to the backdrop rather than to a constant in the halo
+ * pass. The sky texture is fixed for the whole level -- it is chosen once,
+ * per episode -- so this is measured when the backdrop is set and read back
+ * for free every frame after.
+ *
+ * WHICH ROWS. Only the ones the backdrop can show above the horizon. The
+ * vertical mapping in r_sky_draw puts texel row t at y = t * SCREEN_H/200,
+ * so the horizon at SCREEN_H/2 lands on row 100 whatever the screen height;
+ * rows past it are the downward wrap that sits below the horizon and is
+ * almost always behind geometry, which is the whole basis of the vertical
+ * clamp above. On Doom's 128-row skies that drops the bottom fifth -- the
+ * darkest of the landscape -- and averages the part the player looks at.
+ *
+ * WHY THE HUE AND NOT THE COLOUR. The raw average is dark: 0.13 to 0.36
+ * luminance across the six stock skies, since most of a sky texture is
+ * unlit landscape rather than light. Its consumer blends TOWARD it (see
+ * halo_mode), so the average used verbatim would make every beam darken
+ * the room it falls into. The direction of the average is the part worth
+ * having; its magnitude is not. So this reports the hue with its brightest
+ * channel at full and leaves the caller to decide how much of it to take --
+ * Inferno's sky is pure red, and a beam that saturated would act as a
+ * filter over anything not red rather than as light.
+ */
+#define SKY_TONE_ROWS 100
+
+static float sky_tone_r = 1.0f, sky_tone_g = 1.0f, sky_tone_b = 1.0f;
+
+static void sky_tone_measure(const dt64_tex_t *tex)
+{
+    sky_tone_r = sky_tone_g = sky_tone_b = 1.0f;   /* neutral until measured */
+    if (!tex || tex->width <= 0 || tex->height <= 0) return;
+
+    const int w = tex->width, h = tex->height;
+    const int rows = h < SKY_TONE_ROWS ? h : SKY_TONE_ROWS;
+
+    /* 5-bit channels over at most 100x256 texels: 793,600 at the very most,
+     * so plain integer sums with no scaling to worry about. */
+    uint32_t sr = 0, sg = 0, sb = 0;
+    uint32_t n = 0;
+
+    /* Skies are far larger than one TMEM tile and so ship tile-major: each
+     * 64x32 tile contiguous, tiles in row-major order, only the last row and
+     * column partial. Same arithmetic as dt64_upload_tile, walked whole
+     * tiles at a time rather than resolving a texel at a time. */
+    if (tex->flags & DT64_FLAG_TILEMAJOR) {
+        for (int ty = 0; ty < rows; ty += DT64_TILE_H) {
+            /* The tile's full height sets the stride even when the band
+             * stops part-way down it. */
+            const int th  = h - ty < DT64_TILE_H ? h - ty : DT64_TILE_H;
+            const int use = rows - ty < th ? rows - ty : th;
+            const uint8_t *row0 = tex->texels + (size_t)w * (size_t)ty;
+
+            for (int tx = 0; tx < w; tx += DT64_TILE_W) {
+                const int tw = w - tx < DT64_TILE_W ? w - tx : DT64_TILE_W;
+                const uint8_t *p = row0 + (size_t)tx * (size_t)th;
+                for (int y = 0; y < use; y++, p += tw)
+                    for (int x = 0; x < tw; x++) {
+                        const uint16_t c = dt64_tlut_color_bank(0, p[x]);
+                        sr += (c >> 11) & 31;
+                        sg += (c >>  6) & 31;
+                        sb += (c >>  1) & 31;
+                        n++;
+                    }
+            }
+        }
+    } else {
+        for (int y = 0; y < rows; y++) {
+            const uint8_t *p = tex->texels + (size_t)w * (size_t)y;
+            for (int x = 0; x < w; x++) {
+                const uint16_t c = dt64_tlut_color_bank(0, p[x]);
+                sr += (c >> 11) & 31;
+                sg += (c >>  6) & 31;
+                sb += (c >>  1) & 31;
+                n++;
+            }
+        }
+    }
+    if (!n) return;
+
+    /* Normalise on the brightest channel, not on the count: the scale is
+     * discarded anyway and this keeps the divide to one per channel. A sky
+     * that averages to black leaves the neutral tone in place. */
+    const uint32_t m = sr > sg ? (sr > sb ? sr : sb) : (sg > sb ? sg : sb);
+    if (m == 0) return;
+    const float inv = 1.0f / (float)m;
+    sky_tone_r = (float)sr * inv;
+    sky_tone_g = (float)sg * inv;
+    sky_tone_b = (float)sb * inv;
+}
+
+void r_sky_tone(float *r, float *g, float *b)
+{
+    *r = sky_tone_r; *g = sky_tone_g; *b = sky_tone_b;
+}
+
+void r_sky_set(dt64_tex_t *tex) { sky_tex = tex; sky_tone_measure(tex); }
 bool r_sky_present(void)        { return sky_tex != NULL; }
 
 void r_sky_draw(const r_camera_t *cam)

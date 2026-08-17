@@ -39,6 +39,8 @@ void r_halo_init(void);
 
 /* Drop last frame's shafts. Once per frame, before the walk. */
 void r_halo_begin(void);
+/* Beads live with the light registry; see r_halo.c. */
+void r_bead_reset(void);
 
 /* Offer a sky-ceilinged subsector. Rejected unless it is a well: small
  * enough in plan that light falling through it reads as a shaft. */

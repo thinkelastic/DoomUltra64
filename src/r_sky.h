@@ -14,6 +14,13 @@ void r_sky_set(dt64_tex_t *tex);   /* NULL disables the sky entirely */
 bool r_sky_present(void);
 void r_sky_draw(const r_camera_t *cam);
 
+/* The backdrop's average colour over the rows that show above the horizon,
+ * normalised so its brightest channel is 1.0 -- a hue, not a brightness, for
+ * the reasons at sky_tone_measure. Measured once per level, in r_sky_set;
+ * white with no sky set. Used by the light shafts, which are this sky's
+ * daylight falling into the room. */
+void r_sky_tone(float *r, float *g, float *b);
+
 /* Visible-sky column span, accumulated during the BSP walk and consumed by
  * r_sky_draw (which draws only those columns) and by the frame loop (which
  * colour-clears only what the sky will not cover). */

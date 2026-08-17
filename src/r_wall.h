@@ -241,6 +241,85 @@ static inline float r_vis(float depth, float inv)
     return 1.0f - fog;
 }
 
+/* The NEAR half of the same diminishing, which this renderer never had.
+ *
+ * Doom's zlight is level = startmap(light) - scale/2 with scale growing as
+ * 1/distance, so what is CLOSE to the eye is dragged toward the colormap's
+ * full-bright row whatever its sector light says; the sector light only
+ * decides how soon that runs out. r_vis models the far half of that idea
+ * and nothing modelled the near half, so every surface below R_FOG_NEAR
+ * rendered at a flat lightlevel/255 with no distance term at all -- which
+ * is most of what is on screen indoors.
+ *
+ * The visible cost: E1M3's hall ceiling (sector 38, light 160) is 39 units
+ * above the eye and runs from 61 to 400 units away. Vanilla lights it from
+ * colormap 0 down to 17 -- art brightness 1.00 falling to 0.47 -- and this
+ * renderer painted the whole plane 0.62, measured flat to within a 5-bit
+ * quantum over ten screen rows. A near plane with no gradient reads as a
+ * dark shape pasted on the frame rather than as a lit ceiling receding,
+ * which is exactly how it was reported.
+ *
+ * 40/(depth+16) is vanilla's own term carried into brightness units:
+ * scale/64 with scale = (SCREENWIDTH/2)/(depth/16 + 1). Callers add it to
+ * the surface's light and clamp, because it is a floor on brightness, not
+ * a multiplier. */
+#ifndef R_NEARLIGHT
+#define R_NEARLIGHT 1
+#endif
+#define R_NEAR_LIGHT_K 40.0f
+static inline float r_nearlight(float depth)
+{
+#if R_NEARLIGHT
+    return R_NEAR_LIGHT_K / (depth + 16.0f);
+#else
+    (void)depth;
+    return 0.0f;
+#endif
+}
+
+/* VANILLA'S WHOLE CURVE, not just its near half.
+ *
+ * r_nearlight above restores the missing gradient but keeps this renderer's
+ * own base -- lightlevel/255 -- where Doom's is `startmap`, and the two are
+ * not the same shape. Doom quantises the sector light into SIXTEEN bands and
+ * maps each to a starting colormap row, then walks DOWN the colormap with
+ * distance:
+ *
+ *     i        = light >> 4                 0..15, the band
+ *     startmap = (15 - i) * 4               0 (bright) .. 60 (dark)
+ *     level    = startmap - 80/(d/16 + 1)   DISTMAP=2 folded into the 80
+ *     level    = clamp(level, 0, 31)        NUMCOLORMAPS-1
+ *
+ * and colormap row `level` is the art at roughly 1 - level/32 brightness.
+ * The consequences the additive form cannot reproduce: the BANDING (two
+ * sector lights 15 apart are identical, which is why Doom's lighting looks
+ * stepped rather than smooth), the fact that a bright sector reaches full
+ * brightness at ANY distance because startmap is already 0, and the way a
+ * dim sector runs out of colormap and floors at black rather than tapering.
+ *
+ * Measured against E1M3's hall ceiling (sector 38, light 160, running 61 to
+ * 400 units out) vanilla gives colormap 0 -> 17, i.e. 1.00 -> 0.47; this
+ * returns 1.00 -> 0.47 by construction, where lightlevel/255 + near gave a
+ * flat 0.62 -> 0.72.
+ *
+ * `lightf` is the caller's existing 0..1 sector light, so the recovered
+ * 0..255 is exact for every value the loader can produce. */
+#ifndef R_ZLIGHT
+#define R_ZLIGHT 0
+#endif
+static inline float r_zlight(float lightf, float depth)
+{
+#if R_ZLIGHT
+    const int i = ((int)(lightf * 255.0f + 0.5f)) >> 4;
+    float level = (float)((15 - i) * 4) - 80.0f / (depth * (1.0f / 16.0f) + 1.0f);
+    if (level < 0.0f)  level = 0.0f;
+    if (level > 31.0f) level = 31.0f;
+    return 1.0f - level * (1.0f / 32.0f);
+#else
+    return lightf + r_nearlight(depth);
+#endif
+}
+
 /* Project and clip one wall, appending its tiles to the batch. Nothing reaches
  * the RDP until r_flush_walls. */
 void r_draw_wall(const r_camera_t *cam, const r_wall_t *wall);

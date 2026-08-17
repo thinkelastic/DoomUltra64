@@ -145,6 +145,19 @@ uint16_t dt64_tlut_color(int idx)
     return tlut[idx & 255];
 }
 
+/* The same, from a NAMED bank rather than the live one.
+ *
+ * Anything that measures a texture's colour once and keeps the answer wants
+ * bank 0: a damage red or a pickup gold is a display effect lasting a few
+ * frames, and a value computed while one happened to be latched would carry
+ * that flash for the rest of the level. Falls back to the live entry if the
+ * banks are not loaded, which can only be the boot path. */
+uint16_t dt64_tlut_color_bank(int bank, int idx)
+{
+    if (!tlut_banks || bank < 0 || bank >= tlut_nbanks) return tlut[idx & 255];
+    return tlut_banks[bank * 256 + (idx & 255)];
+}
+
 void dt64_bind_tlut(void)
 {
     /* Flushed here rather than at load time so that palette effects, which

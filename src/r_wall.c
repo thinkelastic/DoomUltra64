@@ -180,6 +180,26 @@ typedef struct {
 
 #define R_MAX_SPANS 256
 
+#if R_TRIPROBE
+static int   w_probe_quads, w_probe_over, w_probe_tl, w_probe_over_tl;
+static int   w_probe_dumps, w_probe_fold;
+static float w_probe_worst, w_probe_worst_tl;
+static int   w_probe_frame;
+void r_wall_probe_report(void)
+{
+    if (++w_probe_frame >= 60) {
+        w_probe_frame = 0;
+        debugf("wallprobe: %d quads, %d over 2:1 (worst %.2f:1) | "
+               "top-left %d quads, %d over (worst %.2f:1) | FOLDED %d\n",
+               w_probe_quads, w_probe_over, w_probe_worst,
+               w_probe_tl, w_probe_over_tl, w_probe_worst_tl, w_probe_fold);
+    }
+    w_probe_quads = w_probe_over = w_probe_tl = w_probe_over_tl = 0;
+    w_probe_fold = 0;
+    w_probe_worst = w_probe_worst_tl = 0.0f;
+}
+#endif
+
 #if R_COLUMNS
 static r_span_t spans[R_MAX_SPANS];
 #endif
@@ -325,13 +345,40 @@ static inline void clamp_quad(float *ya_t, float *ya_b, float *ta_t, float *ta_b
     if (*ya_b >  RDP_Y_GUARD) { *ta_b += dta * ( RDP_Y_GUARD - *ya_b); *ya_b =  RDP_Y_GUARD; }
     if (*yb_b >  RDP_Y_GUARD) { *tb_b += dtb * ( RDP_Y_GUARD - *yb_b); *yb_b =  RDP_Y_GUARD; }
 
+    /* An edge with BOTH ends past the bound is fully hidden, so the strip
+     * may be collapsed -- but onto WHICH y matters, and collapsing it to
+     * the bound is what painted a wedge of wall over the ceiling in the
+     * top-left corner of E1M3.
+     *
+     * Take a wall receding steeply away, its near end towering off the top
+     * of the screen. Both top corners are above ylo, so the old code pulled
+     * the top edge flat onto ylo across the WHOLE width. But the near end's
+     * BOTTOM corner was above ylo too -- that entire vertical edge is off
+     * the top of the screen, and the wall is genuinely visible only from
+     * where its bottom edge crosses ylo. Flattening the top onto the bound
+     * fills everything left of that crossing with wall that should not be
+     * on screen at all, and the ceiling behind it loses the pixels. (It
+     * also left the bottom corner above its own top, folding the quad into
+     * a bow-tie whose two triangles cross.)
+     *
+     * Collapsing such an edge onto its own BOTTOM instead leaves it
+     * degenerate at a y the scissor discards, and the surviving triangle is
+     * exactly the visible part: the new top edge runs between two points
+     * that are both <= ylo, so it cannot cut into anything on screen, and
+     * the bottom edge is untouched. Nothing visible is added or lost, and a
+     * degenerate edge cannot invert. T stays affine in Y for every
+     * move. */
     if (*ya_t < ylo && *yb_t < ylo) {
-        *ta_t += dta * (ylo - *ya_t); *ya_t = ylo;
-        *tb_t += dtb * (ylo - *yb_t); *yb_t = ylo;
+        if (*ya_b < ylo) { *ta_t = *ta_b; *ya_t = *ya_b; }
+        else             { *ta_t += dta * (ylo - *ya_t); *ya_t = ylo; }
+        if (*yb_b < ylo) { *tb_t = *tb_b; *yb_t = *yb_b; }
+        else             { *tb_t += dtb * (ylo - *yb_t); *yb_t = ylo; }
     }
     if (*ya_b > yhi && *yb_b > yhi) {
-        *ta_b += dta * (yhi - *ya_b); *ya_b = yhi;
-        *tb_b += dtb * (yhi - *yb_b); *yb_b = yhi;
+        if (*ya_t > yhi) { *ta_b = *ta_t; *ya_b = *ya_t; }
+        else             { *ta_b += dta * (yhi - *ya_b); *ya_b = yhi; }
+        if (*yb_t > yhi) { *tb_b = *tb_t; *yb_b = *yb_t; }
+        else             { *tb_b += dtb * (yhi - *yb_b); *yb_b = yhi; }
     }
 }
 
@@ -437,6 +484,14 @@ static inline float lit_shade(float light, float depth, float finv,
 #else
     (void)wall;
 #endif
+
+    /* Into the same sum the glow and the point lights enter, and under the
+     * same clamp: it is another thing that brightens a surface, not a
+     * separate stage. See r_nearlight. */
+    /* The SECTOR term goes through the curve; the glow and point lights it
+     * was summed with stay additive on top, under the same clamp. With
+     * ZLIGHT off this is exactly `l += r_nearlight(depth)` again. */
+    l += r_zlight(light, depth) - light;
 
     if (l > 1.0f) l = 1.0f;
     return l * r_vis(depth, finv);
@@ -1096,8 +1151,8 @@ R_HOT static void wall_emit(const r_camera_t *cam, const r_wall_t *wall,
             const float shb_t = lit_shade(light, db, finv, wxb, wyb, wall->ztop, wall);
             const float shb_b = lit_shade(light, db, finv, wxb, wyb, wall->zbot, wall);
 #else
-            const float sha = light * r_vis(da, finv);
-            const float shb = light * r_vis(db, finv);
+            const float sha = clamp01(light + r_nearlight(da)) * r_vis(da, finv);
+            const float shb = clamp01(light + r_nearlight(db)) * r_vis(db, finv);
             const float sha_t = sha, sha_b = sha;
             const float shb_t = shb, shb_b = shb;
 #endif
@@ -1305,7 +1360,7 @@ static bool wall_col(wctx_t *c, float ca, float cb, float s_a, float s_b,
         da = c->d1 + c->dd * pa;
         if (da <= 0.0f) { c->have_prev = false; return true; }
         iwa = 1.0f / da;
-        sha = c->light * r_vis(da, c->finv);
+        sha = clamp01(c->light + r_nearlight(da)) * r_vis(da, c->finv);
     }
 
     const float pb = (cb * c->inv_uscale - wall->u0) * c->inv_len;
@@ -1313,7 +1368,7 @@ static bool wall_col(wctx_t *c, float ca, float cb, float s_a, float s_b,
     const float db = c->d1 + c->dd * pb;
     if (db <= 0.0f) { c->have_prev = false; return true; }
     const float iwb = 1.0f / db;
-    const float shb = c->light * r_vis(db, c->finv);
+    const float shb = clamp01(c->light + r_nearlight(db)) * r_vis(db, c->finv);
 
     c->prev_cb = cb;
     c->c_pb = pb; c->c_ob = ob; c->c_db = db;
@@ -1705,23 +1760,87 @@ void r_flush_walls(void)
              * firing with the first triangle after each group_begin (same
              * bits, same timing, no float detour). Slot pattern is
              * r_tri_quad6's: 0,1,2, issue, slot1 = corner 3, issue. */
+#if R_TRIPROBE
+            int tl_hit = 0;
+            /* Same invariant as the flats' triprobe, on the wall quads:
+             * rdpq normalises against the nearest vertex, so a quad wider
+             * than 2:1 in depth warps at its far end. The span merger is
+             * supposed to cut at exactly that; this checks it did, and
+             * reports the top-left quarter of the viewport separately. */
+            {
+                const float wa = (float)q->w_a * (1.0f / 65536.0f);
+                const float wb = (float)q->w_b * (1.0f / 65536.0f);
+                const float dlo = wa < wb ? wa : wb;
+                const float dhi = wa > wb ? wa : wb;
+                float xlo = 1e30f, ylo = 1e30f;
+                for (int k = 0; k < 4; k++) {
+                    const int32_t p = (int32_t)q->xy[k];
+                    const float sx = (float)(p >> 16) * 0.25f;
+                    const float sy = (float)(int16_t)(p & 0xFFFF) * 0.25f;
+                    if (sx < xlo) xlo = sx;
+                    if (sy < ylo) ylo = sy;
+                }
+                const float ratio = dlo > 0.0f ? dhi / dlo : 1e30f;
+                w_probe_quads++;
+                {   /* Corner order is 0=a_top 1=b_top 2=b_bot 3=a_bot, so a
+                     * folded edge shows up as a bottom above its own top. */
+                    const int32_t p0 = (int32_t)q->xy[0], p1 = (int32_t)q->xy[1];
+                    const int32_t p2 = (int32_t)q->xy[2], p3 = (int32_t)q->xy[3];
+                    const int ya_t = (int16_t)(p0 & 0xFFFF);
+                    const int yb_t = (int16_t)(p1 & 0xFFFF);
+                    const int yb_b = (int16_t)(p2 & 0xFFFF);
+                    const int ya_b = (int16_t)(p3 & 0xFFFF);
+                    if (ya_b < ya_t || yb_b < yb_t) w_probe_fold++;
+                }
+                if (ratio > w_probe_worst) w_probe_worst = ratio;
+                if (ratio > 2.01f) w_probe_over++;
+                if (xlo < SCREEN_W * 0.25f && ylo < SCREEN_H * 0.25f) {
+                    w_probe_tl++;
+                    tl_hit = 1;
+                    if (ratio > w_probe_worst_tl) w_probe_worst_tl = ratio;
+                    if (ratio > 2.01f) w_probe_over_tl++;
+                    if (w_probe_dumps < 8) {
+                        w_probe_dumps++;
+                        debugf("wallquad TL: d=%.1f..%.1f ratio=%.2f "
+                               "corners", dlo, dhi, ratio);
+                        for (int k = 0; k < 4; k++) {
+                            const int32_t p = (int32_t)q->xy[k];
+                            debugf(" (%.1f,%.1f)", (float)(p >> 16) * 0.25f,
+                                   (float)(int16_t)(p & 0xFFFF) * 0.25f);
+                        }
+                        debugf("\n");
+                    }
+                }
+            }
+#endif
             r_tri_group_use(R_TRI_USE_WALL);
 #if D_DYNLIGHT
 #define QRGBA(k) (int32_t)q->rgba[k]
 #else
 #define QRGBA(k) (int32_t)((k) == 0 || (k) == 3 ? q->rgba_a : q->rgba_b)
 #endif
-            r_tri_slot(0, (int32_t)q->xy[0], (int32_t)q->zw_a, QRGBA(0),
+#if R_TRIPROBE == 2
+/* Paint whatever wall quad reaches the top-left quarter magenta, so the
+ * frame itself names the primitive instead of a theory naming it. This is
+ * how the wedge was identified; TRIPROBE=1 only measures. */
+#define QCOL(k) (tl_hit ? (int32_t)0xFF00FFFFu : QRGBA(k))
+#elif R_TRIPROBE
+#define QCOL(k) ((void)tl_hit, QRGBA(k))
+#else
+#define QCOL(k) QRGBA(k)
+#endif
+            r_tri_slot(0, (int32_t)q->xy[0], (int32_t)q->zw_a, QCOL(0),
                        (int32_t)q->st[0], q->w_a, q->invw_a);
-            r_tri_slot(1, (int32_t)q->xy[1], (int32_t)q->zw_b, QRGBA(1),
+            r_tri_slot(1, (int32_t)q->xy[1], (int32_t)q->zw_b, QCOL(1),
                        (int32_t)q->st[1], q->w_b, q->invw_b);
-            r_tri_slot(2, (int32_t)q->xy[2], (int32_t)q->zw_b, QRGBA(2),
+            r_tri_slot(2, (int32_t)q->xy[2], (int32_t)q->zw_b, QCOL(2),
                        (int32_t)q->st[2], q->w_b, q->invw_b);
             r_tri_slots_issue(&TRIFMT_WALL);
-            r_tri_slot(1, (int32_t)q->xy[3], (int32_t)q->zw_a, QRGBA(3),
+            r_tri_slot(1, (int32_t)q->xy[3], (int32_t)q->zw_a, QCOL(3),
                        (int32_t)q->st[3], q->w_a, q->invw_a);
             r_tri_slots_issue(&TRIFMT_WALL);
 #undef QRGBA
+#undef QCOL
 #else /* !R_TRI_QUANT */
 #if D_DYNLIGHT
             /* num_tinted == 0 on quiet frames keeps this byte-identical to

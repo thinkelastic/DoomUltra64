@@ -98,6 +98,15 @@ N64_CFLAGS += -DR_SHOW=$(SHOW)
 FLATDBG ?= 0
 N64_CFLAGS += -DR_FLATDBG=$(FLATDBG)
 
+# TRIPROBE=1 checks the invariant banding exists to hold: that no emitted
+# flat triangle spans more than FLAT_MAX_DEPTH_RATIO in depth, since rdpq
+# normalises the texture coefficients against a triangle's nearest vertex
+# and the far end of a deeper one warps. Reports the top-left quarter of
+# the viewport separately. TRIPROBE=2 additionally paints that quad magenta.
+# Off by default; costs a few flops per triangle.
+TRIPROBE ?= 0
+N64_CFLAGS += -DR_TRIPROBE=$(TRIPROBE)
+
 # FLATNUDGE=<hundredths of a unit> is how far each subsector polygon's
 # vertices are pushed outward from their own centroid, to close the
 # T-junction hairlines that neighbouring BSP cells would otherwise leave.
@@ -598,6 +607,29 @@ N64_CFLAGS += -DD_DYNLIGHT=$(DYNLIGHT)
 FOGSCALE ?= 1
 N64_CFLAGS += -DR_FOGSCALE=$(FOGSCALE)
 
+# NEARLIGHT=1 adds the NEAR half of that same diminishing, which the
+# renderer never had: vanilla drags what is close to the eye toward full
+# art brightness whatever the sector light says, and only the far half was
+# modelled here. Without it every surface inside R_FOG_NEAR sits at a flat
+# lightlevel/255 with no distance term, so a dim room's ceiling a few paces
+# overhead is painted one dead value and reads as a dark shape rather than
+# a lit plane. See r_nearlight in src/r_wall.h for the term and the numbers.
+# Light-255 surfaces are bit-identical to NEARLIGHT=0 (the sum clamps at
+# 1.0 there); NEARLIGHT=0 restores the old flat near field for A/B.
+# ZLIGHT=1 replaces the additive near-light term with Doom's ACTUAL zlight
+# curve: 16 quantised light bands, a startmap row per band, and a walk down
+# the 32-row colormap with distance. NEARLIGHT restores the missing gradient
+# but keeps this port's lightlevel/255 base, which is a different shape from
+# vanilla's startmap -- ZLIGHT reproduces the banding, the way a bright
+# sector is full-bright at every distance, and the way a dim one floors at
+# black instead of tapering. See r_zlight in r_wall.h. 0 keeps the additive
+# form, and is bit-identical to it.
+ZLIGHT ?= 0
+N64_CFLAGS += -DR_ZLIGHT=$(ZLIGHT)
+
+NEARLIGHT ?= 1
+N64_CFLAGS += -DR_NEARLIGHT=$(NEARLIGHT)
+
 # NODEZCHECK=1 proves the incremental node-height refresh bit-identical to
 # the full tree walk EVERY frame (snapshot, rerun reference, compare) -- a
 # debug build for door/lift routes; costs more than the work it checks.
@@ -689,6 +721,17 @@ N64_CFLAGS += -DR_SHAFT=$(SHAFT)
 # room. 0.42 was the slab, 0.21 was the correction and undershot.
 SHAFTAMT ?= 32
 N64_CFLAGS += -DR_SHAFTAMT=$(SHAFTAMT)
+
+# SHAFTHUE=<hundredths> is how much of the SKY's colour a beam takes. The
+# light falling through a hole in the roof comes from this level's backdrop,
+# so r_sky averages the rows of it that show above the horizon and the beam
+# is tinted with that hue: neutral under E1's grey sky, gold in Doom II's
+# city, red under Inferno. 0 restores plain white light, 100 takes the hue
+# saturated -- which is too far, because the blender mixes TOWARD the beam's
+# colour and a pure red one drives green and blue out of everything it
+# crosses. 55 is where the halos settled the same trade-off.
+SHAFTHUE ?= 55
+N64_CFLAGS += -DR_SHAFTHUE=$(SHAFTHUE)
 
 # REFLECT=1 draws mirror images of things standing over glowing liquid --
 # a monster wading through nukage reflects in it, dimmed and tinted the
