@@ -635,6 +635,14 @@ typedef int boolean_stub_t;
  * between the BSP walk and each flush is what decides where to optimise. */
 #if D_HWSTAT
 static uint32_t ph_walk_us, ph_wallflush_us, ph_flatflush_us, ph_sprite_us;
+/* The buffer-acquire block, outside frame_total_us by construction. */
+static uint32_t ph_acq_us;
+/* The loop TAIL, which is 42% of the frame and had never been profiled:
+ * everything after the submit stamp. sim is Doom's own simulation, audio is
+ * the mixer and the music stream; what is left over is the UI, the melt and
+ * the interpolation bookkeeping. */
+static uint32_t ph_sim_us, ph_audio_us;
+static uint32_t ph_snd_us, ph_mus_us;
 /* The passes nobody ever timed. They turned out to be the largest single
  * block on a nukage-heavy map -- see the profiling notes -- which is exactly
  * what an unmeasured phase is for. refl is the liquid mirrors; fx is the
@@ -954,6 +962,7 @@ int main(void)
     /* Reserve the arenas after display/RDP init, so their allocations are
      * already out of the system heap and the report reflects reality. */
     mem_init();
+
 #if DEBUG_RDP
     /* Validates every RDP command and reports illegal state combinations,
      * which is otherwise invisible: bad state renders as a blank screen. */
@@ -1055,7 +1064,26 @@ int main(void)
          * frame is in flight -- see the note on D_RequestScreen. */
         screen_apply();
 
+        /* How long the loop BLOCKS here, which is the one cost the frame
+         * counters could not see: t_start is taken after this call, so the
+         * wait for a free framebuffer sits outside frame_total_us entirely.
+         *
+         * This is the throttle. The tail is pipelined -- rdpq_sync_full plus
+         * detach_show return while the RDP is still rasterising -- so
+         * display_get is where the CPU finally has to wait for the RDP to
+         * release a buffer. The note at that tail says "three framebuffers
+         * deep", and that is true at 240p; at 320x480 the heap only affords
+         * TWO (a 480 KB buffer against ~1730 KB free after the arenas), and
+         * double buffering is exactly the arrangement that stops the CPU and
+         * RDP overlapping. Whether that is where the frame's unexplained
+         * time goes is the question this number exists to answer. */
+#if D_HWSTAT
+        const uint32_t t_acq = TICKS_READ();
+#endif
         surface_t *fb = display_get();
+#if D_HWSTAT
+        ph_acq_us += TICKS_TO_US(TICKS_SINCE(t_acq));
+#endif
 
         /* A gamestate change means the frame just shown is the last of the
          * old screen: melt it away over what follows. Doom does this in
@@ -1443,7 +1471,13 @@ int main(void)
          * rebuild (D_LevelPreSetup drains the RDP before freeing assets). */
         { void D_InterpEnd(void); D_InterpEnd(); }
         if (level_loaded) {
+#if D_HWSTAT
+            { const uint32_t t_ = TICKS_READ();
+              run_game_tics(frame_delta_us);
+              ph_sim_us += TICKS_TO_US(TICKS_SINCE(t_)); }
+#else
             run_game_tics(frame_delta_us);
+#endif
 #if D_LEVELTEST
             {   /* Exercise the whole flow without input: exit each level a
                  * second in, and mash "attack" through intermission and
@@ -1554,6 +1588,7 @@ int main(void)
              * floor and this line exists to find the hardware number. */
             static uint32_t acc_emit, acc_bind;
             static uint32_t acc_bands, acc_polys, acc_quads, acc_spr;
+            static uint32_t acc_period, acc_f, acc_c;
 
             /* Accumulated since boot: the per-frame counters reset every
              * frame, and a transient drop between two-second samples would
@@ -1574,6 +1609,13 @@ int main(void)
             acc_polys += (uint32_t)r_flat_calls();
             acc_quads += (uint32_t)r_quads_emitted();
             acc_spr   += (uint32_t)r_sprite_count();
+            /* The whole frame decomposed: period is wall clock between
+             * frames, f runs from after the acquire to the RDP going idle,
+             * c is CPU submit. period - f - acq is the loop's own tail
+             * (game logic, audio, the melt). */
+            acc_period += frame_delta_us;
+            acc_f      += frame_total_us;
+            acc_c      += submit_us;
 #endif
 
             if (++statctr % 120 == 0)
@@ -1605,6 +1647,34 @@ int main(void)
                                            : 0));
                     /* Per FRAME, not per window: a primitive count is
                      * only meaningful against one frame's worth of fill. */
+                    debugf("frame: period=%lu acq=%lu f=%lu c=%lu "
+                           "(us per frame)\n",
+                           (unsigned long)(acc_period / 120),
+                           (unsigned long)(ph_acq_us / 120),
+                           (unsigned long)(acc_f / 120),
+                           (unsigned long)(acc_c / 120));
+                    { const uint32_t tail = acc_period > ph_acq_us + acc_c
+                            ? acc_period - ph_acq_us - acc_c : 0;
+                      const uint32_t known = ph_sim_us + ph_audio_us;
+                      debugf("tail: sim=%lu audio=%lu other=%lu of %lu "
+                             "(us per frame)\n",
+                             (unsigned long)(ph_sim_us / 120),
+                             (unsigned long)(ph_audio_us / 120),
+                             (unsigned long)((tail > known ? tail - known : 0) / 120),
+                             (unsigned long)(tail / 120)); }
+                    { extern uint32_t r_mus_refill_us, r_snd_mix_us;
+                      extern uint32_t r_snd_qwait_us;
+                      debugf("audio: snd=%lu (qwait=%lu mix=%lu)"
+                             " mus=%lu (refill=%lu) (us per frame)\n",
+                             (unsigned long)(ph_snd_us / 120),
+                             (unsigned long)(r_snd_qwait_us / 120),
+                             (unsigned long)(r_snd_mix_us / 120),
+                             (unsigned long)(ph_mus_us / 120),
+                             (unsigned long)(r_mus_refill_us / 120));
+                      r_mus_refill_us = r_snd_mix_us = r_snd_qwait_us = 0; }
+                    ph_snd_us = ph_mus_us = 0;
+                    ph_sim_us = ph_audio_us = 0;
+                    acc_period = acc_f = acc_c = 0; ph_acq_us = 0;
                     debugf("prim: bands=%lu polys=%lu quads=%lu spr=%lu "
                            "(per frame)\n",
                            (unsigned long)(acc_bands / 120),
@@ -1736,8 +1806,21 @@ int main(void)
         /* Keep the mixer fed. It fills whatever room the audio buffers have,
          * so this self-regulates against the frame rate. */
 #if D_SOUND
-        I_Sound_Update();
-        mus_update();
+        {
+#if D_HWSTAT
+          const uint32_t t0 = TICKS_READ();
+          I_Sound_Update();
+          const uint32_t t1 = TICKS_READ();
+          mus_update();
+          const uint32_t t2 = TICKS_READ();
+          ph_snd_us   += TICKS_TO_US(TICKS_DISTANCE(t0, t1));
+          ph_mus_us   += TICKS_TO_US(TICKS_DISTANCE(t1, t2));
+          ph_audio_us += TICKS_TO_US(TICKS_DISTANCE(t0, t2));
+#else
+          I_Sound_Update();
+          mus_update();
+#endif
+        }
 #endif
 
         { static int once = 0; if (!once && level_loaded) { once = 1; r_bsp_dump(); } }

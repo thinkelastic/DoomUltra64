@@ -28,6 +28,20 @@
 
 #include "mus_n64.h"
 
+#if MUS_CART
+#include <fat.h>
+#include <ioctl.h>
+/* SD -> cartridge SDRAM, with neither the N64 nor fatfs in the path. */
+extern int cart_card_rd_cart(uint32_t cart, uint32_t lba, uint32_t count);
+#endif
+
+#if D_HWSTAT
+/* The SD-card refill, timed apart from the rest of mus_update: the music
+ * stream is read off the flashcart's card, and a blocking card read is the
+ * obvious candidate for the 8 ms the audio update was measured to cost. */
+uint32_t r_mus_refill_us;
+#endif
+
 /* The music WAD's own header: sample rate and channel count, ahead of the
  * track lumps. Everything else about the format is implied -- signed 16-bit,
  * interleaved, no per-lump header. */
@@ -60,6 +74,7 @@ static pcminfo_t info;
 
 /* The track currently playing, as a byte range in the file. */
 static long      track_start, track_len, track_pos;
+static char      wad_path[96];
 static bool      playing;
 
 /* Statically reserved, not allocated.
@@ -178,8 +193,12 @@ static bool mus_wad_open(void)
     };
 
     for (int attempt = 0; attempt < 6 && !wad_fp; attempt++) {
-        for (unsigned k = 0; k < sizeof forms / sizeof forms[0] && !wad_fp; k++)
+        for (unsigned k = 0; k < sizeof forms / sizeof forms[0] && !wad_fp; k++) {
             wad_fp = fopen(forms[k], "rb");
+            /* Kept so the cart preloader can reopen it unbuffered. */
+            if (wad_fp) { strncpy(wad_path, forms[k], sizeof wad_path - 1);
+                          wad_path[sizeof wad_path - 1] = 0; }
+        }
         if (!wad_fp) wait_ms(60);
     }
     if (!wad_fp) return false;
@@ -300,6 +319,177 @@ static const char *const mus_dirs[] = {
  * the container it is a backwards seek, so FatFs restarts the walk from the
  * beginning of the file -- the same bounded cost as the seek that selected
  * the track in the first place. */
+#if MUS_CART
+/* The whole track, resident in cartridge SDRAM above the ROM.
+ *
+ * Streaming it off the card cost 1476 us EVERY FRAME, of which 933 us was the
+ * CPU spinning in libcart's __sc_sync while the SC64 pulled sectors, 221 us
+ * was the PI bus, and the rest fatfs. None of that is bandwidth we need: the
+ * stream only wants ~48 KB/s.
+ *
+ * The SC64 can fill its OWN SDRAM from the card without the N64, the PI bus
+ * or fatfs in the path at all, and measured on hardware it does so at
+ * 21.4 MB/s -- twenty times the rate the fread path manages. So the largest
+ * track in the set (E1M5, 7.9 MB) lands in ~370 ms, once, at level load.
+ * Playback afterwards is a PI DMA out of cart RAM: ~220 us a frame, and no
+ * card access at all. Looping costs nothing, since a rewind is just an index.
+ *
+ * Everything here is best-effort. Any failure -- no room, a cart whose
+ * rd_cart does not work, a fragmented file we cannot map -- leaves
+ * cart_resident false and the ordinary fread path carries the track. */
+static bool track_rewind(void);
+
+#define MUS_CART_BASE   0x10C00000u     /* 12 MB in; the ROM ends at ~11.9 */
+#define MUS_CART_MAX    (10u * 1024u * 1024u)
+
+static bool     cart_resident;
+static uint32_t cart_skew;      /* track_start's offset within its sector */
+
+/* Physical sector holding a given byte offset of the open track. */
+/* Which physical sector backs a byte offset.
+ *
+ * MUST be asked through an UNBUFFERED handle. Through an ordinary stdio
+ * stream a 1-byte fread fills stdio's block buffer, so fatfs reads several
+ * sectors and its notion of "current sector" ends up on the LAST of them --
+ * the mapping is then wrong by the buffer size, silently, and the track
+ * plays from the wrong place. The first build of this preloader did exactly
+ * that; its own verification caught it (MISMATCH at +0). */
+static bool sector_of(FILE *h, long ofs, uint32_t *lba)
+{
+    unsigned char b;
+    int64_t sect = 0;
+
+    if (fseek(h, ofs, SEEK_SET) != 0) return false;
+    if (fread(&b, 1, 1, h) != 1) return false;
+    if (ioctl(fileno(h), IOFAT_GET_SECTOR, &sect) != 0) return false;
+    *lba = (uint32_t)sect;
+    return true;
+}
+
+static void cart_preload(void)
+{
+    cart_resident = false;
+    if (track_len <= 0) return;   /* per-file path: length not measured */
+
+    cart_skew = (uint32_t)(track_start & 511);
+    /* An odd skew would put the PI address permanently out of parity with the
+     * ring, which dma_read rejects. Nothing in the set does this today, and
+     * streaming is the right answer if one ever does. */
+    if (cart_skew & 1) {
+        debugf("music: odd track skew %lu -- streaming\n",
+               (unsigned long)cart_skew);
+        return;
+    }
+    const uint32_t total = (uint32_t)track_len + cart_skew;
+    const uint32_t nsect = (total + 511u) / 512u;
+    if ((uint64_t)nsect * 512u > MUS_CART_MAX) {
+        debugf("music: track too big for cart RAM (%lu KB)\n",
+               (unsigned long)(nsect / 2));
+        return;
+    }
+
+    int32_t csize = 0;                       /* cluster size, in sectors */
+    if (ioctl(fileno(fp), IOFAT_GET_CLUSTER_SIZE, &csize) != 0 || csize <= 0) {
+        debugf("music: no cluster size -- streaming\n");
+        return;
+    }
+
+    /* A handle of our own, set unbuffered BEFORE any I/O on it -- which is
+     * the only point at which setvbuf is defined -- so the sector queries
+     * below reach fatfs one sector at a time. */
+    if (!wad_path[0] || fp != wad_fp) {
+        debugf("music: not the container -- streaming\n");
+        return;
+    }
+    FILE *h = fopen(wad_path, "rb");
+    if (!h) {
+        debugf("music: probe handle open failed (errno %d) -- streaming\n", errno);
+        return;
+    }
+    setvbuf(h, NULL, _IONBF, 0);
+
+    const long base = track_start - (long)cart_skew;
+    const uint32_t t0 = TICKS_READ();
+    uint32_t done = 0, runs = 0;
+
+    /* Walk the file a cluster at a time, merging physically contiguous
+     * clusters into one rd_cart. A WAD written in one pass is usually a
+     * handful of runs, so this is a few big transfers, not nsect small ones. */
+    while (done < nsect) {
+        uint32_t lba;
+        if (!sector_of(h, base + (long)done * 512, &lba)) {
+            debugf("music: sector map failed at +%lu -- streaming\n",
+                   (unsigned long)done * 512u);
+            fclose(h); return;
+        }
+
+        uint32_t run = 0;
+        while (done + run < nsect) {
+            const uint32_t want = nsect - (done + run) < (uint32_t)csize
+                                ? nsect - (done + run) : (uint32_t)csize;
+            if (run) {
+                uint32_t nxt;
+                if (!sector_of(h, base + (long)(done + run) * 512, &nxt))
+                    { fclose(h); return; }
+                if (nxt != lba + run) break;
+            }
+            run += want;
+            if (want < (uint32_t)csize) break;
+        }
+        if (cart_card_rd_cart(MUS_CART_BASE + done * 512u, lba, run) != 0) {
+            debugf("music: rd_cart failed at lba %lu\n", (unsigned long)lba);
+            fclose(h);
+            return;
+        }
+        done += run;
+        runs++;
+    }
+    fclose(h);
+
+    /* Verify before trusting it.
+     *
+     * sector_of() asks fatfs which sector backs a byte offset, but it asks
+     * through STDIO -- and a 1-byte fread can be served from stdio's own
+     * block buffer, or pull a multi-sector block, leaving fatfs's notion of
+     * "current sector" pointing somewhere other than the offset we asked
+     * about. That mismaps a run without failing, which is worse than an
+     * error: the track plays, but out of the wrong part of the file.
+     *
+     * So compare what landed in cart RAM against what the file actually
+     * says, at several points including both ends. A mismatch anywhere
+     * drops us back to streaming, which is always correct. */
+    {
+        static uint8_t a_[512] __attribute__((aligned(16)));
+        static uint8_t b_[512] __attribute__((aligned(16)));
+        /* 512-aligned: libdragon's dma_read asserts that the RAM and PI
+         * addresses share parity, and an odd offset against an aligned
+         * buffer trips it. Sector-aligned probes keep both even. */
+        const long probes[5] = { 0, (track_len / 4) & ~511L,
+                                 (track_len / 2) & ~511L,
+                                 (track_len - 1024) & ~511L,
+                                 (track_len - 512) & ~511L };
+        for (int i = 0; i < 5; i++) {
+            const long ofs = probes[i] < 0 ? 0 : probes[i];
+            if (ofs + 512 > track_len) continue;
+            if (fseek(fp, track_start + ofs, SEEK_SET) != 0) return;
+            if (fread(a_, 1, 512, fp) != 512) return;
+            data_cache_hit_writeback_invalidate(b_, sizeof b_);
+            dma_read(b_, MUS_CART_BASE + cart_skew + (uint32_t)ofs, 512);
+            if (memcmp(a_, b_, 512) != 0) {
+                debugf("music: cart preload MISMATCH at +%ld -- streaming\n", ofs);
+                return;                 /* cart_resident stays false */
+            }
+        }
+    }
+
+    if (!track_rewind()) { debugf("music: rewind after preload failed\n"); return; }
+    cart_resident = true;
+    debugf("music: preloaded %lu KB into cart RAM, %lu runs, %lu ms, verified\n",
+           (unsigned long)(nsect / 2), (unsigned long)runs,
+           (unsigned long)(TICKS_TO_US(TICKS_SINCE(t0)) / 1000));
+}
+#endif /* MUS_CART */
+
 static bool track_rewind(void)
 {
     if (fseek(fp, track_start, SEEK_SET) != 0) return false;
@@ -345,7 +535,18 @@ static void refill(int max_bytes)
             if ((long)space > left) space = (int)left;
         }
 
-        size_t got = fread(ring + ring_head, 1, (size_t)space, fp);
+        size_t got;
+#if MUS_CART
+        if (cart_resident) {
+            /* No card, no fatfs: one PI DMA straight out of cart SDRAM. */
+            dma_read(ring + ring_head,
+                     MUS_CART_BASE + cart_skew + (uint32_t)track_pos,
+                     (unsigned long)space);
+            data_cache_hit_invalidate(ring + ring_head, space);
+            got = (size_t)space;
+        } else
+#endif
+        got = fread(ring + ring_head, 1, (size_t)space, fp);
 
         /* Short read means end of track. Rewind and carry on -- a seek to
          * offset zero needs no chain walk, unlike a seek to the end. */
@@ -381,6 +582,7 @@ static void refill(int max_bytes)
  * 48 KB/s drain, so the ring stays near the low-water mark while the worst
  * case a frame absorbs is one bounded read instead of half the ring. */
 #define MUS_REFILL_QUANTUM 4096
+
 
 /* Mixer callback. Copies from the ring and nothing else -- no I/O, no locking.
  * If the ring has run dry the gap is filled with silence rather than stalling:
@@ -627,6 +829,13 @@ void mus_play_track(const char *track)
 
     ring_head = ring_tail = 0;
     playing = true;
+#if MUS_CART
+    /* Before the priming refill below, so that read comes out of cart RAM
+     * too. track_len is 0 on the per-file path (the length is deliberately
+     * not measured there), and cart_preload declines that case, so those
+     * tracks keep streaming exactly as before. */
+    cart_preload();
+#endif
     /* Prime a full low-water mark before the first mix. This is the one
      * unbounded read left, and it happens at level load where a long stall is
      * already expected -- never on the frame path. */
@@ -695,7 +904,15 @@ void mus_update(void)
      * still playing, and reporting otherwise sent me looking in the wrong
      * place. */
     if (playing) {
-        refill(MUS_REFILL_QUANTUM);
+        {
+#if D_HWSTAT
+            { const uint32_t t_ = TICKS_READ();
+              refill(MUS_REFILL_QUANTUM);
+              r_mus_refill_us += TICKS_TO_US(TICKS_SINCE(t_)); }
+#else
+            refill(MUS_REFILL_QUANTUM);
+#endif
+        }
 #if D_HWSTAT
         /* Telemetry builds only: a debugf over an undrained USB link can
          * stall for milliseconds, which a release build should never risk

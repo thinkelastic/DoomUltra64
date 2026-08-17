@@ -240,6 +240,7 @@ N64_CFLAGS += -DR_SPRZ=$(SPRZ)
 # a compare, taking the NEARER of the two -- so it can only reclaim rows the
 # floor was taking and can never push a row farther than before.
 SPRBASE ?= 1
+
 N64_CFLAGS += -DR_SPRBASE=$(SPRBASE)
 
 # different contact: it answers to wall-versus-ceiling corners.
@@ -806,7 +807,33 @@ REFLECT ?= 1
 # field, while the median frame has CPU to spare -- so this trims the tail,
 # and how hard to trim it is a look decision, not a perf one. Raise it until
 # the reflections you lose are ones you could not see anyway.
-REFLMINPX ?= 10
+# MUSCART=1 preloads the whole music track into cartridge SDRAM above the ROM
+# at level load, so playback is a PI DMA out of cart RAM instead of an SD read
+# every frame.
+#
+# Measured on hardware: streaming cost 1476 us EVERY FRAME, of which 933 us
+# was the CPU spinning in libcart while the SC64 pulled sectors and 221 us was
+# the PI bus. The SC64 fills its own SDRAM from the card at 21.4 MB/s -- twenty
+# times the fread path -- so a 4.4 MB track preloads in ~470 ms once, and every
+# frame after pays 236 us. The track is verified against the file at five
+# points before it is trusted; any failure falls back to streaming, so a
+# fragmented card or a different flashcart still plays correctly.
+MUSCART ?= 1
+N64_CFLAGS += -DMUS_CART=$(MUSCART)
+
+# MIXPROBE=1 drains the rspq queue before mixer_try_play and times the drain
+# separately, splitting the mixer's cost into real work and time spent waiting
+# for the RSP to reach the audio ucode. Diagnostic only -- the full sync it
+# adds perturbs the pipeline. It is what established that ~half the mixer's
+# 2.6 ms is preemption latency behind a busy RDP, not mixing.
+MIXPROBE ?= 0
+N64_CFLAGS += -DD_MIXPROBE=$(MIXPROBE)
+
+# Default 0 after measuring it: the reflect submit is ~200 us in the median
+# frame and only spikes on a handful, so a size gate turns away 37% of the
+# mirror images to trim a cost that is usually zero. Raise it if the spikes
+# ever matter; the gate itself is measured and works.
+REFLMINPX ?= 0
 N64_CFLAGS += -DR_REFLMINPX=$(REFLMINPX)
 N64_CFLAGS += -DR_REFLECT=$(REFLECT)
 

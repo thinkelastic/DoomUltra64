@@ -21,6 +21,10 @@
 angle_t R_PointToAngle2(fixed_t x1, fixed_t y1, fixed_t x2, fixed_t y2);
 
 #include <libdragon.h>
+
+#if D_HWSTAT
+uint32_t r_snd_mix_us, r_snd_qwait_us;
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
@@ -265,5 +269,27 @@ void I_Sound_Update(void)
         }
     }
 
+#if D_HWSTAT
+    /* The mixer itself, apart from the panning walk above.
+     *
+     * MIXPROBE=1 drains the rspq queue FIRST and times the drain separately.
+     * The mixer's ucode is submitted through the same queue as every rdpq
+     * command in the frame, so if its 3 ms is really the CPU waiting for the
+     * RSP to reach the audio work, that time moves into qwait and mix
+     * collapses. If mix stays at 3 ms with qwait near zero, the mixer is
+     * doing genuine work and the levers are channel count and sample rate
+     * instead. The probe is a diagnostic only -- a full sync here perturbs
+     * the pipeline, which is why it is not on by default. */
+    { uint32_t t_;
+#if D_MIXPROBE
+      t_ = TICKS_READ();
+      rspq_wait();
+      r_snd_qwait_us += TICKS_TO_US(TICKS_SINCE(t_));
+#endif
+      t_ = TICKS_READ();
+      mixer_try_play();
+      r_snd_mix_us += TICKS_TO_US(TICKS_SINCE(t_)); }
+#else
     mixer_try_play();
+#endif
 }
