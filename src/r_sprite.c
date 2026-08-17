@@ -77,6 +77,19 @@ static _Alignas(16) sprjob_t jobs[SPR_MAX_JOBS];
 static int      numjobs;
 static int      stat_drawn, stat_uploads, stat_dropped;
 
+/* As r_bsp's STAT, and for the same reason: stat_uploads sits on five
+ * separate per-upload paths through the sprite flush and neither it nor
+ * stat_drawn has a single caller anywhere in the tree (r_sprite_count and
+ * r_sprite_uploads are declared in r_sprite.h and never used), so in a
+ * shipping ROM they were counting for nobody. stat_dropped is left alone: it
+ * only fires when a job is already being discarded, and main.c's drop
+ * telemetry reads it. */
+#if D_HWSTAT
+#define STAT(x) (x)
+#else
+#define STAT(x) ((void)0)
+#endif
+
 #if R_REFLECT
 /* Mirror images of things standing over glowing liquid. Few per frame --
  * only things whose own sector floor glows -- so no grouping: each job
@@ -654,7 +667,7 @@ static void spr_shine_flush(void)
                 klit *= SHINE_AMT;
 
                 dt64_upload_tile(TILE0, (dt64_tex_t *)tex, NULL, s0, t0, s1, t1);
-                stat_uploads++;
+                STAT(stat_uploads++);
 
                 /* SUBDIVIDED ACROSS THE SPRITE, not evaluated at the tile's
                  * two edges.
@@ -828,7 +841,7 @@ void r_sprite_flush(void)
 
                     if (!bound) {
                         dt64_upload_tile(TILE0, tex, NULL, s0, t0, s1, t1);
-                        stat_uploads++;
+                        STAT(stat_uploads++);
                         bound = true;
                     }
 
@@ -886,7 +899,7 @@ void r_sprite_flush(void)
                      * a run of the same frame. */
                     if (tex != last_tex || s0 != last_s0 || t0 != last_t0) {
                         dt64_upload_tile(TILE0, tex, NULL, s0, t0, s1, t1);
-                        stat_uploads++;
+                        STAT(stat_uploads++);
                         last_tex = tex; last_s0 = s0; last_t0 = t0;
                     }
                     draw_tile(j, s0, t0, s1, t1, scx, scy, x0, y0);
@@ -894,7 +907,7 @@ void r_sprite_flush(void)
             }
         }
     }
-    stat_drawn += numjobs;
+    STAT(stat_drawn += numjobs);
 
     rdpq_mode_alphacompare(0);
     numjobs = 0;
@@ -1415,7 +1428,7 @@ void r_reflect_flush(const r_camera_t *cam)
                     x0 + wob_lo > (float)SCREEN_W) continue;
 
                 dt64_upload_tile(TILE0, tex, NULL, s0, t0, s1, t1);
-                stat_uploads++;
+                STAT(stat_uploads++);
 
                 float v[4][10];
                 const float xs[4] = { x0 + wob_hi, x1 + wob_hi,
@@ -1579,7 +1592,7 @@ static void reflect_walls_emit(const r_camera_t *cam)
         rdpq_texparms_t tp = {0};
         tp.s.repeats = REPEAT_INFINITE;
         dt64_upload_tile(TILE0, r->tex, &tp, 0, win0, tw, win1);
-        stat_uploads++;
+        STAT(stat_uploads++);
 
         const float eh  = cam->z - r->plane_h;
         const float iw1 = 1.0f / d1, iw2 = 1.0f / d2;

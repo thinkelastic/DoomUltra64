@@ -664,10 +664,19 @@ N64_CFLAGS += -DR_FUSESPLIT=$(FUSESPLIT)
 FASTNARROW ?= 1
 N64_CFLAGS += -DR_FASTNARROW=$(FASTNARROW)
 
-# VAPOR=0 removes the liquid-vapor pass: the translucent noise layer that
+# VAPOR=1 restores the liquid-vapor pass: the translucent noise layer that
 # puts a green haze over nukage and slime and a smoke pall over lava. One
 # z-tested fan per visible pool, drawn after all opaque passes.
-VAPOR ?= 1
+#
+# OFF by default. The haze read as fog sitting on the surface rather than
+# rising off it, and it washed out the pools' own colour and the
+# reflections they carry -- which are the reason the liquid surfaces are
+# interesting to look at in the first place. Nothing else depends on it:
+# the D_GLOW_* liquid families it consumed are also what drive the glow,
+# the reflections and the ripple, so they stay. At 0 the whole translation
+# unit leaves the build and r_vapor.h's no-op stubs take over, so this
+# costs nothing to keep around.
+VAPOR ?= 0
 N64_CFLAGS += -DR_VAPOR=$(VAPOR)
 
 # LIQUIDFLOW=0 stops the liquids sliding. Vanilla nukage does not move --

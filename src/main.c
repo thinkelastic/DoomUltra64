@@ -1541,6 +1541,18 @@ int main(void)
             static int statctr;
 #if D_HWSTAT
             static int acc_dq, acc_df, acc_dsp, acc_nd;
+            /* The flat flush split. r_flat_begin zeroes these every frame,
+             * so they have to be harvested here and summed over the window
+             * like the phase counters they sit beside. emit = the per-vertex
+             * expansion in emit_fan, bind = texture binds and group
+             * re-registration; flat-emit-bind is the polygon clip and the
+             * depth-band split in draw_one. That division is the whole
+             * question behind an RSP vertex overlay: only emit could move.
+             * ares puts emit at 54% of the flush over two routes, but models
+             * neither uncached-store stalls nor D-cache misses -- which is
+             * exactly what emit_fan's r_tri_slot writes are -- so 54% is a
+             * floor and this line exists to find the hardware number. */
+            static uint32_t acc_emit, acc_bind;
 
             /* Accumulated since boot: the per-frame counters reset every
              * frame, and a transient drop between two-second samples would
@@ -1549,6 +1561,8 @@ int main(void)
             acc_df  += r_flat_dropped();
             acc_dsp += r_sprite_dropped();
             acc_nd  += r_drop_npts + r_drop_depth + r_drop_side;
+            acc_emit += (uint32_t)r_flat_emit_us();
+            acc_bind += (uint32_t)r_flat_bind_us();
 #endif
 
             if (++statctr % 120 == 0)
@@ -1568,6 +1582,17 @@ int main(void)
                            (unsigned long)ph_wallflush_us,
                            (unsigned long)ph_flatflush_us,
                            (unsigned long)ph_sprite_us);
+                    /* Printed before ph_flatflush_us is zeroed below: the
+                     * clip figure is the residual of the very window the
+                     * phase line just reported. */
+                    debugf("flat: emit=%lu bind=%lu clip=%lu "
+                           "(us per 120 frames)\n",
+                           (unsigned long)acc_emit,
+                           (unsigned long)acc_bind,
+                           (unsigned long)(ph_flatflush_us > acc_emit + acc_bind
+                                           ? ph_flatflush_us - acc_emit - acc_bind
+                                           : 0));
+                    acc_emit = acc_bind = 0;
                     ph_walk_us = ph_wallflush_us = 0;
                     ph_flatflush_us = ph_sprite_us = 0;
                     /* The per-frame shadows track those counters, so they

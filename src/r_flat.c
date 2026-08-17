@@ -247,6 +247,24 @@ static int stat_uploads;
 static int stat_dropped;
 static int stat_calls, stat_bands;
 
+/* Same treatment, and for the same reason, as r_bsp's STAT: these four sit on
+ * the per-flat and per-BAND paths -- stat_bands is incremented once per
+ * emit_fan, so it is the densest of the lot -- and every one of their
+ * consumers (r_flat_count/uploads/calls/bands) has NO caller anywhere in the
+ * tree. They were pure overhead in a shipping ROM. The variables and the
+ * accessors stay defined, so a build that did not collect them reports zero
+ * rather than failing to link.
+ *
+ * The r_drop_* counters below are deliberately NOT wrapped: they sit on paths
+ * that only execute when a surface is already being dropped, so they cost
+ * nothing in a frame that draws correctly, and they are the telemetry that
+ * makes a missing floor attributable. */
+#if D_HWSTAT
+#define STAT(x) (x)
+#else
+#define STAT(x) ((void)0)
+#endif
+
 /* Counted for the same reason as r_bsp's: a missing floor should be
  * attributable, not guessed at. */
 int r_drop_npts, r_drop_depth, r_drop_side, r_drop_pool, r_drop_clipofl;
@@ -336,7 +354,7 @@ static void bind_flat(dt64_tex_t *tex)
      * ignored for CI8, where palbank is zero. */
     p.palette = tex->palbank;
     rdpq_tex_upload(TILE0, &tex->surface, &p);
-    stat_uploads++;
+    STAT(stat_uploads++);
 }
 
 /* Texel density of the texture bound now. One flat always covers 64 world
@@ -498,7 +516,7 @@ void r_flat_flush(const r_camera_t *cam)
 static void draw_one(const r_camera_t *cam, const r_polypt_t *pts, int npts,
                      float height, float shade)
 {
-    stat_calls++;
+    STAT(stat_calls++);
 #ifdef R_FLATDUMP
     #define DDUMP(what) do { extern uint32_t r_flat_stamp; if ((r_flat_stamp & 127) == 0 && r_flat_stamp > 0)         debugf("dd: h=%d n=%d %s\n", (int)height, npts, what); } while (0)
 #else
@@ -746,7 +764,7 @@ static void draw_one(const r_camera_t *cam, const r_polypt_t *pts, int npts,
         restp = bandbuf[cur];
 #endif
     }
-    stat_flats++;
+    STAT(stat_flats++);
 }
 
 /* One crossing point, computed the same way from either side.
@@ -914,7 +932,7 @@ static int clip_depth(const fvtx_t *in, int n, fvtx_t *out, float d0, bool keep_
 static void emit_fan(const r_camera_t *cam, const fvtx_t *c, int m,
                      float dz, float shade, float sorg, float torg)
 {
-    stat_bands++;
+    STAT(stat_bands++);
     const float cx = SCREEN_W * 0.5f, cy = SCREEN_H * 0.5f;
 
     /* Project. The polygon is already clipped to a bounded region, so the
