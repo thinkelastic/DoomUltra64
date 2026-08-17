@@ -225,6 +225,23 @@ N64_CFLAGS += -DR_SPRZ=$(SPRZ)
 # big distant sprite the whole thing -- that is how pull-only lost barrel
 # explosions. The flats lead the walls by (FLATZ/40 - 1), so no sprite bias
 # can beat 7.5% while FLATZ is 43. Lowering FLATZ is the next lever, and a
+# SPRBASE=0 returns billboards to a single z for the whole quad.
+#
+# Doom's patch anchors hang art BELOW the thing's origin -- BAR1A0 is 23x32
+# with topoffset 28, four rows of barrel under z; TROOA1 and POSSA1 five --
+# and a billboard at one depth loses exactly those rows to the floor, which
+# at that screen row really is nearer. Barrels look sliced off at the base.
+#
+# Not fixable with a constant: the audit put the required bias at nearc>4.72
+# with the eye 41 above the floor, and a constant 5.0 leads the WALLS by 25%
+# of depth, which is the through-wall artifact SPRFADE exists to kill. The
+# contained fix is a z RAMP down the quad, following the floor plane whose z
+# is exactly linear in screen y. Per vertex it is a multiply, a subtract and
+# a compare, taking the NEARER of the two -- so it can only reclaim rows the
+# floor was taking and can never push a row farther than before.
+SPRBASE ?= 1
+N64_CFLAGS += -DR_SPRBASE=$(SPRBASE)
+
 # different contact: it answers to wall-versus-ceiling corners.
 SPRFADE ?= 256
 N64_CFLAGS += -DR_SPRFADE=$(SPRFADE)

@@ -59,6 +59,26 @@ typedef struct {
      * texture's own 1/w cannot supply, and a billboard sits at one depth,
      * so it is one divide per sprite instead of one per tile. */
     float       z;
+#if R_SPRBASE
+    /* Slope of the FLOOR's z in screen rows, so the billboard can follow the
+     * plane it stands on instead of hanging at one depth.
+     *
+     * Doom's patch anchors put art BELOW the thing's origin -- BAR1A0 is
+     * 23x32 with topoffset 28, so four rows of barrel hang under z -- and a
+     * billboard drawn at a single depth loses exactly those rows to the
+     * floor, which at that screen row is genuinely nearer. That is not a
+     * bias bug and no constant fixes it: with the eye 41 above the floor,
+     * the floor at the sprite's bottom row sits at 41/45 of the sprite's
+     * depth, and a bias big enough to win it puts sprites a quarter of
+     * their depth ahead of the WALLS.
+     *
+     * The floor's z is exactly linear in screen y -- z = 1 - nearc*(y-cy)/k
+     * -- and the RDP interpolates z linearly in screen space, so a ramp
+     * reproduces the plane exactly rather than approximating it. Zero when
+     * the eye is level with or below the plane, which disables the ramp by
+     * making its z 1.0 and letting the min below keep the flat value. */
+    float       zk;
+#endif
     uint8_t     mipped;
 #if R_SPRSHINE
     /* Cylindrical specular pass: see spr_shine_flush. Carries the view
@@ -464,6 +484,22 @@ void r_sprite_add(const r_camera_t *cam, const r_thing_t *t,
         const float zd = depth - R_SPR_PULL;
         const float zv = zd > 1.0f ? 1.0f - nearc / zd : 0.0f;
         j->z = zv > 0.0f ? zv : 0.0f;
+#if R_SPRBASE
+        /* The same near constant, applied to the FLOOR's depth at each row
+         * rather than to the thing's own. Reusing nearc rather than the
+         * flats' constant is what keeps the base ahead of the floor by the
+         * margin the bias stack already designed -- the ramp inherits
+         * SPRFADE's decay with it, so this cannot reintroduce the
+         * through-wall lead at range that the fade exists to remove.
+         *
+         * eh is the eye's height above the plane the thing stands on. At or
+         * below it there is no floor contact to lose, and the ramp switches
+         * itself off. */
+        {
+            const float eh = cam->z - t->z;
+            j->zk = eh > 1.0f ? nearc / (eh * cam->focal_y) : 0.0f;
+        }
+#endif
     }
     j->sx    = sx;
     j->sy    = sy;
@@ -538,7 +574,21 @@ static void draw_tile(const sprjob_t *j, int s0, int t0, int s1, int t1,
         v[i][6] = ss[i];
         v[i][7] = ts[i];
         v[i][8] = iw;
+#if R_SPRBASE
+        /* Whichever is nearer: the billboard's own depth, or the floor at
+         * this row. Above the contact the sprite's constant wins and this
+         * costs a compare; over the overhang rows the floor's ramp wins and
+         * the base is drawn instead of eaten. A min and not a blend, so no
+         * row is ever pushed FARTHER than it was -- this can only add
+         * pixels the floor was taking, never take pixels from a wall. */
+        {
+            const float zf = 1.0f - j->zk * (ys[i] - SCREEN_H * 0.5f);
+            const float zc = zf < 0.0f ? 0.0f : zf;
+            v[i][9] = zc < z ? zc : z;
+        }
+#else
         v[i][9] = z;
+#endif
     }
 
     /* Slot reuse, as walls and flats: the second triangle shares v0 and v2
