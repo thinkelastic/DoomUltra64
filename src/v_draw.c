@@ -81,6 +81,8 @@ void V_RestoreBuffer(void)
  * alpha-0 discard for the transparent index comes from set_mode_copy(true);
  * libdragon's rsp fixup multiplies DSDX by 4 and makes the coordinates
  * inclusive, so the same call works unchanged in this mode. */
+
+static void v_ui_mode(bool allow_copy);
 void V_BeginUI(void)
 {
     ui_active = true;
@@ -90,7 +92,15 @@ void V_BeginUI(void)
  * the answer changes when the detail menu does, so it cannot be decided
  * at compile time. COPY mode cannot magnify (see below), so any scaled
  * mode has to take the standard path. */
-    if (SCREEN_W == SCREEN_BASE_W && SCREEN_H == SCREEN_BASE_H) {
+    v_ui_mode(true);
+}
+
+/* The UI's draw mode, factored out because the magnified path has to be able
+ * to leave COPY and come back. `allow_copy` is false for callers that scale:
+ * see the note below on why COPY cannot. */
+static void v_ui_mode(bool allow_copy)
+{
+    if (allow_copy && SCREEN_W == SCREEN_BASE_W && SCREEN_H == SCREEN_BASE_H) {
     rdpq_set_mode_copy(true);
     } else {
     /* COPY mode cannot magnify.
@@ -215,6 +225,16 @@ static int memo_s0, memo_t0, memo_s1, memo_t1;
 
 void v_upload_memo_reset(void) { memo_tex = NULL; }
 
+/* Destination magnification for the next blit, in UI units per texel. 1 is
+ * the ordinary path and is what every caller but the menu's big-text writer
+ * uses. It exists because the IWAD has no per-letter font at menu size --
+ * the menu's words are whole pre-rendered patches, 15 px tall, and the only
+ * font with individual glyphs is the 7 px HUD one. Drawing a label with the
+ * small font next to those reads as a mistake, so the glyphs are magnified
+ * instead. The rectangle was already emitted in scaled form with its source
+ * range stated explicitly, so this costs one multiply. */
+static float v_mag = 1.0f;
+
 static void v_blit_at(const dt64_tex_t *tex, float ox, float oy)
 {
     const int w = tex->width, h = tex->height;
@@ -226,10 +246,10 @@ static void v_blit_at(const dt64_tex_t *tex, float ox, float oy)
         for (int s0 = 0; s0 < w; s0 += tw) {
             const int s1 = s0 + tw > w ? w : s0 + tw;
 
-            const float x0 = (ox + (float)s0) * UI_XSCALE;
-            const float x1 = (ox + (float)s1) * UI_XSCALE;
-            const float y0 = (oy + (float)t0) * UI_YSCALE;
-            const float y1 = (oy + (float)t1) * UI_YSCALE;
+            const float x0 = (ox + (float)s0 * v_mag) * UI_XSCALE;
+            const float x1 = (ox + (float)s1 * v_mag) * UI_XSCALE;
+            const float y0 = (oy + (float)t0 * v_mag) * UI_YSCALE;
+            const float y1 = (oy + (float)t1 * v_mag) * UI_YSCALE;
             if (x1 < 0.0f || x0 > (float)SCREEN_W) continue;
             if (y1 < 0.0f || y0 > (float)SCREEN_H) continue;
 
@@ -492,6 +512,26 @@ void V_DrawPatch(int x, int y, patch_t *patch)
 }
 
 void V_DrawPatchDirect(int x, int y, patch_t *patch) { V_DrawPatch(x, y, patch); }
+
+/* As V_DrawPatch, magnified about its top-left. Nearest-neighbour, which is
+ * what the rest of the UI is: this is the HUD font blown up to sit beside
+ * the menu's own 15 px word patches, not a resampling.
+ *
+ * Must be bracketed by V_MagBegin/V_MagEnd. COPY mode cannot magnify -- see
+ * the long note in v_ui_mode -- and drawing this way inside it produces
+ * exactly the ghosting and gaps described there, which is what the first cut
+ * of the CONTROLLER label looked like on screen. */
+void V_DrawPatchMag(int x, int y, patch_t *patch, float mag)
+{
+    v_mag = mag;
+    V_DrawPatch(x, y, patch);
+    v_mag = 1.0f;
+}
+
+/* Leave COPY for the duration of a scaled run, and go back afterwards. Two
+ * mode changes for a whole label rather than two per glyph. */
+void V_MagBegin(void) { v_ui_mode(false); }
+void V_MagEnd(void)   { v_ui_mode(true);  }
 
 /* Doom tracks dirty rectangles so it can update only what changed. The RDP
  * redraws the whole frame regardless, so there is nothing to mark. */

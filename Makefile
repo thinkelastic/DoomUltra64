@@ -78,8 +78,10 @@ PVS ?= 0
 N64_CFLAGS += -DR_PVS=$(PVS)
 
 # MENUTEST walks the menu at boot for capture: 1 opens the main menu,
-# 2 goes on to the episode list, 3 starts a game. Starting a game is the
-# only path no demo reaches, so it needs driving from here.
+# 2 goes on to the episode list, 3 starts a game, 4 reopens it on the save
+# slot list, 6 opens the automap in play, 7 reopens it on Options. Starting a
+# game is the only path no demo reaches, so it needs driving from here; the
+# rest exist because a menu screen cannot otherwise be screenshotted headless.
 MENUTEST ?= 0
 N64_CFLAGS += -DD_MENUTEST=$(MENUTEST)
 

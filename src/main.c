@@ -439,6 +439,13 @@ static void scene_init(void)
             D_TestMenuKey(13);          /* ENTER on the first episode */
             D_TestMenuKey(13);          /* ENTER on the default skill */
 #endif
+#if D_MENUTEST == 7
+            /* Back into the menu -- the skill press above closed it -- and
+             * down one to Options, to capture the slider rows. */
+            M_StartControlPanel();
+            D_TestMenuKey(0xaf);        /* KEY_DOWNARROW */
+            D_TestMenuKey(13);          /* ENTER on Options */
+#endif
 #if D_MENUTEST == 4
             /* Back to the menu and into Load, to capture the slot list. */
             M_StartControlPanel();

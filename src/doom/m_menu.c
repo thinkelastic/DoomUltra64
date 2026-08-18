@@ -196,6 +196,7 @@ static void M_QuitDOOM(int choice);
 static void M_ChangeMessages(int choice);
 static void M_ChangeSensitivity(int choice);
 static void M_ChangeJoySensitivity(int choice);
+static void M_WriteTextBig(int x, int y, const char *string);
 static void M_SfxVol(int choice);
 static void M_MusicVol(int choice);
 static void M_ChangeDetail(int choice);
@@ -1056,11 +1057,11 @@ void M_DrawOptions(void)
                       W_CacheLumpName(DEH_String(msgNames[showMessages]),
                                       PU_CACHE));
 
-    /* Written, not blitted -- see the OptionsMenu table. The thermo sits on
-     * the row below its label, which is where every other slider in this
-     * menu sits relative to its own item. */
-    M_WriteText(OptionsDef.x, OptionsDef.y + LINEHEIGHT * joysens,
-                "CONTROLLER");
+    /* Written, not blitted -- see the OptionsMenu table -- but at TWICE
+     * size, because the HUD font is 7 px tall and every word patch in this
+     * menu is 15. At 1x the row read as a mistake rather than as an item. */
+    M_WriteTextBig(OptionsDef.x, OptionsDef.y + LINEHEIGHT * joysens,
+                   "CONTROLLER");
     M_DrawThermo(OptionsDef.x, OptionsDef.y + LINEHEIGHT * (joysens + 1),
                  10, joySensitivity);
 }
@@ -1233,6 +1234,40 @@ void M_QuitDOOM(int choice)
  * deleted -- mouseSensitivity is still read by the input code this port
  * inherits, and leaving the setter beside it keeps that pairing intact if
  * a control-options screen ever wants it back. */
+/* M_WriteText's glyph walk at 2x, for a label standing beside the menu's
+ * pre-rendered words. Same font and the same skips; only the advance and the
+ * blit are doubled. No newline case: this draws one short label. */
+static void M_WriteTextBig(int x, int y, const char *string)
+{
+    void V_DrawPatchMag(int vx, int vy, patch_t *p, float mag);
+    void V_MagBegin(void);
+    void V_MagEnd(void);
+    const char *ch = string;
+    int cx = x;
+
+    V_MagBegin();
+    while (1)
+    {
+        int c = *ch++;
+        if (!c)
+            break;
+
+        c = toupper(c) - HU_FONTSTART;
+        if (c < 0 || c >= HU_FONTSIZE)
+        {
+            cx += 8;
+            continue;
+        }
+
+        const int w = SHORT(hu_font[c]->width) * 2;
+        if (cx + w > SCREENWIDTH)
+            break;
+        V_DrawPatchMag(cx, y, hu_font[c], 2.0f);
+        cx += w;
+    }
+    V_MagEnd();
+}
+
 void M_ChangeJoySensitivity(int choice)
 {
     switch (choice)
