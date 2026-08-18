@@ -723,14 +723,24 @@ void M_SaveSelect(int choice)
 
     saveSlot = choice;
     M_StringCopy(saveOldString,savegamestrings[choice], SAVESTRINGSIZE);
-    if (!strcmp(savegamestrings[choice], EMPTYSTRING))
-    {
-        savegamestrings[choice][0] = 0;
 
-        if (joypadSave)
-        {
-            SetDefaultSaveName(choice);
-        }
+    /* Port: the offered name is ALWAYS the current level, whether the slot is
+     * empty or already holds a save.
+     *
+     * Vanilla only auto-named an empty slot and left an occupied one showing
+     * the name it was saved under, which is right at a keyboard -- you edit
+     * what is there. With a joypad there is nothing to edit with, so
+     * overwriting your "E1M1: HANGAR" slot from E1M5 offered E1M1: HANGAR
+     * again and the save was mislabelled unless the player retyped it a
+     * character at a time. Regenerating means an overwrite names itself
+     * after where the player actually is, by the same rule a new save uses.
+     *
+     * saveOldString still holds the previous name, so cancelling out of the
+     * menu restores it and nothing is renamed unless the save goes through. */
+    savegamestrings[choice][0] = 0;
+    if (joypadSave)
+    {
+        SetDefaultSaveName(choice);
     }
     saveCharIndex = strlen(savegamestrings[choice]);
 }
