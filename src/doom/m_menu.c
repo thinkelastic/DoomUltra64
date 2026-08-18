@@ -195,6 +195,7 @@ static void M_QuitDOOM(int choice);
 
 static void M_ChangeMessages(int choice);
 static void M_ChangeSensitivity(int choice);
+static void M_ChangeJoySensitivity(int choice);
 static void M_SfxVol(int choice);
 static void M_MusicVol(int choice);
 static void M_ChangeDetail(int choice);
@@ -342,6 +343,7 @@ enum
     endgame,
     messages,
     detail,
+    joysens,
     soundvol,
     opt_end
 } options_e;
@@ -356,11 +358,26 @@ enum
  * each thermo at LINEHEIGHT * (index + 1) -- so an item can only be
  * removed from the enum and this table together, or the remaining
  * sliders draw against the wrong rows. */
+/* Turn rate, 0..9.
+ *
+ * main.c scales its TURN_FULL by 0.5 + s/10, so the slider runs from half
+ * the shipped rate to 1.4x it in tenths. The default 3 is 0.8 -- four
+ * fifths of what the port turned at before this existed, which is where the
+ * stick actually wants to sit: the old rate was anchored to vanilla's 640
+ * angleturn units a tic, and that number was chosen for a keyboard's
+ * instant on/off, not for a stick you hold at partial deflection. */
+int joySensitivity = 3;
+
 menuitem_t OptionsMenu[]=
 {
     {1,"M_ENDGAM",	M_EndGame,'e'},
     {1,"M_MESSG",	M_ChangeMessages,'m'},
     {1,"M_DETAIL",	M_ChangeDetail,'g'},
+    /* No patch: the IWAD has M_MSENS ("MOUSE SENSITIVITY") and nothing that
+     * says controller, and a slider labelled for hardware the console does
+     * not have is worse than none. M_Drawer skips an empty name, so
+     * M_DrawOptions writes this row's label as text instead. */
+    {2,"",		M_ChangeJoySensitivity,'c'},
     {1,"M_SVOL",	M_Sound,'s'}
 };
 
@@ -1039,6 +1056,13 @@ void M_DrawOptions(void)
                       W_CacheLumpName(DEH_String(msgNames[showMessages]),
                                       PU_CACHE));
 
+    /* Written, not blitted -- see the OptionsMenu table. The thermo sits on
+     * the row below its label, which is where every other slider in this
+     * menu sits relative to its own item. */
+    M_WriteText(OptionsDef.x, OptionsDef.y + LINEHEIGHT * joysens,
+                "CONTROLLER");
+    M_DrawThermo(OptionsDef.x, OptionsDef.y + LINEHEIGHT * (joysens + 1),
+                 10, joySensitivity);
 }
 
 void M_Options(int choice)
@@ -1209,6 +1233,19 @@ void M_QuitDOOM(int choice)
  * deleted -- mouseSensitivity is still read by the input code this port
  * inherits, and leaving the setter beside it keeps that pairing intact if
  * a control-options screen ever wants it back. */
+void M_ChangeJoySensitivity(int choice)
+{
+    switch (choice)
+    {
+      case 0:
+        if (joySensitivity) joySensitivity--;
+        break;
+      case 1:
+        if (joySensitivity < 9) joySensitivity++;
+        break;
+    }
+}
+
 void M_ChangeSensitivity(int choice) __attribute__((unused));
 void M_ChangeSensitivity(int choice)
 {

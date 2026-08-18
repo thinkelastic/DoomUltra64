@@ -29,6 +29,11 @@ touched a PC — video, sound, files, saves, input — was replaced.
   SDRAM at level load, so playback stops costing an SD read every frame.
 - **Saves name themselves** after the level you are in, on overwrite as well
   as on a fresh slot.
+- **A controller sensitivity slider** in Options, and a slower default. The
+  turn rate had always been vanilla's 640 angleturn units a tic — a number
+  chosen for a keyboard, where you control how *long* a turn lasts. A stick
+  controls its *rate*, and at the keyboard figure it overshoots; the default
+  is now four fifths of that, adjustable from half to 1.4x.
 
 ## Why the RDP suits Doom
 
@@ -303,7 +308,7 @@ to be missing, check this first — it is the single most common reason.
 Building the pieces yourself:
 
 ```sh
-./build.sh release                              # -> DoomN64-<version>.zip
+./build.sh release                              # -> DoomUltra64-<version>.zip
 ./build.sh EXTWAD=1                             # -> doom.z64
 ./build.sh GAME=doom2 EXTWAD=1                  # -> doom2.z64
 ./tools/mkmuswad.py DOOMMUS.wad  DOOMMUS.WAD    # from a source music WAD

@@ -780,7 +780,17 @@ static void handle_input(void)
     /* A runs. Either trigger toggles the automap. */
     const int run = in.btn.a;
 
-    const float TURN_FULL = (640.0f / 10430.0f) * (run ? 2.0f : 1.0f);
+    /* Scaled by the CONTROLLER slider in the options menu: 0.5x at 0 up to
+     * 1.4x at 9, in tenths. The default 3 is 0.8 -- deliberately BELOW the
+     * rate this shipped with, which came from vanilla's 640 angleturn units
+     * a tic. That number suits a keyboard, where turning is instant on and
+     * instant off; on a stick held at partial deflection it overshoots.
+     * The deadzone below is a fraction of TURN_FULL, so it scales with the
+     * setting instead of eating a fixed slice of a slower turn. */
+    extern int joySensitivity;
+    const float sens = 0.5f + (float)joySensitivity * 0.1f;
+    const float TURN_FULL =
+        (640.0f / 10430.0f) * (run ? 2.0f : 1.0f) * sens;
 
     float fwd  = in.stick_y / 80.0f;
     float turn = -in.stick_x / 80.0f * TURN_FULL;

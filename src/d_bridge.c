@@ -1107,6 +1107,7 @@ boolean d_level_resident_set(boolean v) { return d_level_resident = v; }
  * and the volumes in doomstat.h. Declared here rather than pulling both
  * headers in, which this file deliberately does not do. */
 extern int detailLevel, showMessages, sfxVolume, musicVolume, screenblocks;
+extern int joySensitivity;
 void S_SetSfxVolume(int volume);
 void S_SetMusicVolume(int volume);
 
@@ -1116,11 +1117,13 @@ void D_OptionsSave(void)
     char buf[192];
     snprintf(buf, sizeof buf,
              "# DoomUltra64 settings, shared with Doom2Ultra64\n"
+             "joysens %d\n"
              "detail %d\n"
              "messages %d\n"
              "sfx %d\n"
              "music %d\n",
-             detailLevel, showMessages, sfxVolume, musicVolume);
+             joySensitivity, detailLevel, showMessages, sfxVolume,
+             musicVolume);
     D_OptionsWrite(buf);
 }
 
@@ -1140,6 +1143,8 @@ void D_OptionsLoad(void)
             sfxVolume = v < 0 ? 0 : (v > 15 ? 15 : v);
         else if (sscanf(p, "music %d", &v) == 1)
             musicVolume = v < 0 ? 0 : (v > 15 ? 15 : v);
+        else if (sscanf(p, "joysens %d", &v) == 1)
+            joySensitivity = v < 0 ? 0 : (v > 9 ? 9 : v);
         p = nl ? nl + 1 : NULL;
     }
 
