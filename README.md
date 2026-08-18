@@ -10,6 +10,26 @@ state) and the flag-gated smoke-trail spawn, which provably leaves the
 demo-sync random sequence untouched. The software column and span rasteriser is gone; everything else that
 touched a PC — video, sound, files, saves, input — was replaced.
 
+## What's new in 0.4
+
+- **Sixteen dynamic lights** instead of eight, and they cost what they
+  actually illuminate rather than what happens to be in the frame.
+- **Doom's real light curve.** Dim sectors floor at black instead of
+  tapering, so darkness reads as darkness; contrast and overall brightness
+  are separate knobs on top.
+- **Polished metal** on doors and wall plates — twenty-five textures now,
+  where it used to be a handful of doors.
+- **Glowing powerup spheres**, each haloed in the measured average colour of
+  its own sprite.
+- **Barrels sit on the floor.** Doom's art hangs a few rows below a thing's
+  origin, and a billboard drawn at one depth lost exactly those rows to the
+  floor — barrels looked sliced off at the base. The quad now follows the
+  floor plane in z, which reclaims them without letting sprites lead walls.
+- **Music streams from cartridge RAM.** A whole track is preloaded into
+  SDRAM at level load, so playback stops costing an SD read every frame.
+- **Saves name themselves** after the level you are in, on overwrite as well
+  as on a fresh slot.
+
 ## Why the RDP suits Doom
 
 The RDP is fixed-function with a 2-stage colour combiner and **4 KB of texture
@@ -65,8 +85,16 @@ pixel-identical to its plain output:
   with the prop, and they flicker on two sines well off each other's
   period so the sum never settles into a beat. Key cards, skulls and
   armour glow their own colour too (`KEYLIGHT=0`), which makes a pickup
-  findable across a dark room. Eight slots, ranked by what each is worth
-  from the eye, so a room full of torches still yields to a fireball.
+  findable across a dark room. **Sixteen** slots, ranked by what each is
+  worth from the eye, so a room full of torches still yields to a fireball.
+  It was eight, and what held it there was the per-vertex query walking
+  every light in the frame whether or not it could reach the surface being
+  shaded — so a ninth light was charged to every lit vertex on screen. The
+  walk already runs a sphere-vs-box test per surface to decide whether it is
+  lit at all; keeping that answer as a bitmask instead of a boolean makes
+  the per-vertex loop cost what a surface actually catches. On the standard
+  attracts the registry peaks at ten, so eight was turning real lights away
+  — a barrel cluster is eight on its own.
 - **Halos and light shafts** (`HALO=0`). Fireballs, explosions and flames
   carry a glow in the air around them, not only on the surfaces they
   reach. Sky openings small enough to be a hole in a roof rather than open
@@ -107,11 +135,33 @@ pixel-identical to its plain output:
   world. Darkness closes in faster in dark sectors, as vanilla's light
   ramp intended, and things sit in that falloff instead of floating
   unfogged in front of it.
+- **Glowing pickups.** The powerup spheres light the room and carry a glow
+  in the air, each in its own colour — and the colour is the *measured*
+  average of the sprite's own pixels through PLAYPAL rather than a guess, so
+  the soulsphere's halo is the blue that is actually in it.
 - **Rumble Pak** (`RUMBLE=0`). A thump when you take a hit — the same
   damage edge the red flash keys on — and concussion from explosions
   within 600 units, scaled by distance. The pak's motor is binary, so
   strength is an error-diffused duty cycle, the way N64 games always
   faked analog rumble.
+- **Polished metal** (`ENVMAP=0`, `ENVAMT=`). Doors and metal wall plates
+  catch and move the room's light instead of reading as flat painted panels
+  — an environment-map sheen, not a mirror, so the texture underneath
+  survives and it rides the wall's own light. It costs one quad and one
+  32×32 tile per surface, because two properties collapse the usual
+  per-vertex reflect to nothing: a door is a *vertical* plane, so its normal
+  is constant, and the camera never pitches, so the reflected azimuth is
+  affine in screen x — which a flat textured quad already interpolates.
+  Twenty-five smooth textures take it; the rusted, grated and riveted
+  variants are deliberately left matte.
+- **Doom's real light curve** (`ZLIGHT=0`, `LIGHTCONTRAST=`, `LIGHTPIVOT=`,
+  `LIGHTBOOST=`). Sixteen quantised light bands, a startmap row per band and
+  a walk down the 32-row colormap with distance — so a dim sector runs *out*
+  of colormap and floors at black instead of tapering, which is what makes a
+  dark room read as dark. A contrast stretch about a low pivot separates the
+  lit rooms from the unlit ones, and `LIGHTBOOST` sets the overall level
+  afterwards. Things sit on the same curve as the world, so a monster in an
+  unlit corner is genuinely hard to see.
 - **Frame interpolation** (`INTERP=0`). The simulation stays 35 Hz; the
   picture does not. View, things, sector movers, the weapon bob and the
   vapor all glide at frame rate, and a paused or menu-held world presents
@@ -222,7 +272,8 @@ single `Doom` folder:
 
 ```
 sd:/Doom/
-  Doom.z64  Doom2.z64        the ROMs
+  DoomUltra64.z64            the Doom ROM
+  Doom2Ultra64.z64           the Doom II ROM
   DOOMMUS.WAD DOOM2MUS.WAD   music (optional, ~150 MB and ~216 MB)
   saves/                     savegames, six slots per game
 ```
@@ -243,6 +294,11 @@ WAD would resolve every name against the wrong art.
 
 **3. Boot a ROM from the flashcart menu.** If the IWAD is missing the game says
 so on screen and names the file it wanted, rather than failing obscurely.
+
+**4. Set Options → Graphic Detail to High.** This is not a cosmetic toggle: on
+Low you lose the metal sheen, the pool reflections and the 320×480 mode
+outright, because all three are gated on it. If a feature listed above appears
+to be missing, check this first — it is the single most common reason.
 
 Building the pieces yourself:
 
@@ -285,6 +341,11 @@ not survive.
 | A | run |
 | L or R | automap |
 | Start | menu |
+
+Saving needs no typing: the slot is offered the name of the level you are
+standing in — "E1M5: PHOBOS LAB" — and A confirms it. That holds when you
+overwrite an existing save too, so a slot is always labelled with where it was
+actually made rather than where it was first used.
 
 ## Testing without hardware
 
