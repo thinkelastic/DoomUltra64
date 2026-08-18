@@ -1724,6 +1724,12 @@ int main(void)
                      * many adds arrived at a full registry. full=0 means the
                      * cap is dead configuration on this route, whatever it
                      * is set to. */
+#if R_ENVMAP
+                    { extern int r_env_dropped, r_env_peak;
+                      debugf("env: peak=%d dropped=%d cap=%d\n",
+                             r_env_peak, r_env_dropped, 16);
+                      r_env_peak = r_env_dropped = 0; }
+#endif
                     { extern int r_light_peak, r_light_full;
                       debugf("light: peak=%d full=%d cap=%d\n",
                              r_light_peak, r_light_full, R_LIGHTMAX);

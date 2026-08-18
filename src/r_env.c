@@ -107,9 +107,22 @@ static void env_build(void)
 
 void r_env_begin(void) { numenv = 0; }
 
+#if D_HWSTAT
+/* Sheens declined because the frame's slot table was already full. Not a
+ * budget: two identical plates side by side, one sheened and one not, reads
+ * as a bug in the material rather than as a limit. */
+int r_env_dropped, r_env_peak;
+#endif
+
 void r_env_wall_add(const r_wall_t *w)
 {
-    if (numenv >= ENV_MAX || w->ztop <= w->zbot) return;
+    if (numenv >= ENV_MAX) {
+#if D_HWSTAT
+        r_env_dropped++;
+#endif
+        return;
+    }
+    if (w->ztop <= w->zbot) return;
 
     /* One leaf arrives once per uncovered column range; keep one sheen, or
      * the blend doubles along the join. Same guard the pool ghosts use. */
@@ -118,6 +131,9 @@ void r_env_wall_add(const r_wall_t *w)
             envwall[i].x2 == w->x2 && envwall[i].y2 == w->y2) return;
 
     envwall_t *e = &envwall[numenv++];
+#if D_HWSTAT
+    if (numenv > r_env_peak) r_env_peak = numenv;
+#endif
     e->x1 = w->x1; e->y1 = w->y1;
     e->x2 = w->x2; e->y2 = w->y2;
     e->zbot = w->zbot; e->ztop = w->ztop;
