@@ -10,68 +10,6 @@ state) and the flag-gated smoke-trail spawn, which provably leaves the
 demo-sync random sequence untouched. The software column and span rasteriser is gone; everything else that
 touched a PC — video, sound, files, saves, input — was replaced.
 
-## What's new in 0.4
-
-- **Sixteen dynamic lights** instead of eight, and they cost what they
-  actually illuminate rather than what happens to be in the frame.
-- **Doom's real light curve.** Dim sectors floor at black instead of
-  tapering, so darkness reads as darkness; contrast and overall brightness
-  are separate knobs on top.
-- **Polished metal** on doors and wall plates — twenty-five textures now,
-  where it used to be a handful of doors.
-- **Glowing powerup spheres**, each haloed in the measured average colour of
-  its own sprite.
-- **Barrels sit on the floor.** Doom's art hangs a few rows below a thing's
-  origin, and a billboard drawn at one depth lost exactly those rows to the
-  floor — barrels looked sliced off at the base. The quad now follows the
-  floor plane in z, which reclaims them without letting sprites lead walls.
-- **Music streams from cartridge RAM.** A whole track is preloaded into
-  SDRAM at level load, so playback stops costing an SD read every frame.
-- **Saves name themselves** after the level you are in, on overwrite as well
-  as on a fresh slot.
-- **A controller sensitivity slider** in Options, and a slower default. The
-  turn rate had always been vanilla's 640 angleturn units a tic — a number
-  chosen for a keyboard, where you control how *long* a turn lasts. A stick
-  controls its *rate*, and at the keyboard figure it overshoots; the default
-  is now four fifths of that, adjustable from half to 1.4x.
-
-## Why the RDP suits Doom
-
-The RDP is fixed-function with a 2-stage colour combiner and **4 KB of texture
-memory**. That rules out a shader-based port, but Doom's data model happens to
-fit what the hardware does well:
-
-- **Palettised art → CI8 + TLUT.** Doom is already 256-colour. One shared
-  PLAYPAL TLUT serves every texture, so palette effects — damage red, pickups,
-  invulnerability — are a 512-byte TLUT swap rather than a re-upload.
-- **BSP traversal → free sort order.** Front-to-back ordering comes out of the
-  BSP, so walls and flats need no depth buffer and the fill rate it would cost.
-- **Light diminishing → vertex shade.** Sector light times distance falloff,
-  modulated in the combiner. Deliberately *not* the RDP's fog unit: fog forces
-  2-cycle mode, where the RDP samples TILE1 as well — and `rdpq_tex_upload_sub`
-  can corrupt the next tile descriptor, so any renderer that uploads while
-  drawing reads garbage. Shade keeps it in 1-cycle mode at roughly double the
-  fill rate, and is exact for lighting that fades to black.
-- **Texture composition → build time.** The console never assembles patches
-  from `TEXTURE1`/`PNAMES`; `tools/wad2n64.c` bakes flat CI8 that DMAs straight
-  off the cartridge.
-
-## The constraint everything is built around
-
-TMEM is 4 KB, and with a TLUT resident it is effectively 2 KB — **2048 CI8
-texels, one 64×32 tile**. A 128×128 wall texture is eight of those.
-
-So walls are drawn as a grid of tiles, and quads are batched and grouped by
-tile rather than drawn as generated. Uploading per quad costs one texture load
-each; grouping costs one per *distinct tile actually on screen* — a small fixed
-number however much geometry samples it. `make test` checks the property by
-subdividing one room into more and more segments and watching uploads stay
-flat.
-
-Reordering is only sound where geometry does not overlap in screen space, which
-Doom's solid-segment clipping guarantees for walls. Sprites and masked
-midtextures get their own ordered pass.
-
 ## What the port adds
 
 Effects the RDP's per-vertex shade makes nearly free. Each is removable with
@@ -199,78 +137,6 @@ timing and pose), `DEMO=1` (walks a level unattended, for measurement),
 is in each save slot), `WIDE=1` (640x240, see below). `Makefile` documents the
 rest.
 
-## WIDE=1 — 640x240, and the one question it asks
-
-`WIDE=1` doubles the horizontal sampling rate: 640x240, the same 240
-scanlines, no interlace. The N64's 480-line modes are interlaced and flicker
-on a CRT, and vertical is the expensive direction here for a structural
-reason — projected Y is never clipped, only clamped against `RDP_Y_GUARD`, and
-that clamp collapses quad edges. Near walls already project to y = -3360 at
-320 wide; scaling Y as well would double every such value and drive far more
-geometry into a clamp that is a known source of artefacts.
-
-Geometry and TMEM uploads really are unchanged — upload count is set by which
-tiles are on screen, not by how many pixels they cover, and LOD selection is
-deliberately pinned to the vertical scale so both modes pick the same mips.
-`make test WIDE=1` confirms it: identical upload and triangle counts to the
-320 build, `oob=0`.
-
-**CPU submit is not unchanged, and this flag is not a clean fill-rate probe.**
-That was the original claim here and hardware disproved it. Measured over the
-same demo route on a stock console:
-
-| | 320x240 | 640x240 |
-|---|---|---|
-| frame time, median | 16.9 ms | 21.3 ms |
-| CPU submit, median | 8.0 ms | 14.4 ms |
-| BSP walk | 3.4 ms | 8.8 ms |
-| missed vsync | 52% | 92% |
-
-The walk more than doubled, and it is CPU work. The occlusion machinery is
-indexed by SCREEN COLUMN — `clip_top[SCREEN_W]`, `clip_bot[SCREEN_W]`, and the
-per-column loops in `clip_solid`, `clip_narrow` and `emit_range` — so twice the
-width means twice those iterations, and the flat pass's span work scales the
-same way. Fill rate and RDRAM bandwidth do double as well, but on a frame that
-is CPU-bound they are not what you are measuring.
-
-The practical consequence: an overclocked CPU buys far more in wide mode than
-an overclocked RDP does. Wide ROMs are shipped separately (`DoomUltra.z64`)
-rather than as a runtime setting, because switching resolution at runtime would
-mean reserving the wide framebuffers permanently — 600 KB out of a texture
-arena that already peaks at 1,914 KB of 2,048 on the heaviest maps.
-
-**This measurement only works on hardware.** In ares the frame time is
-entirely CPU submit — `f` and `c` come out within ~0.2 ms of each other in
-both modes, so the emulator reports no RDP cost to compare. Use `./demo.sh`
-on an SC64 and compare medians across the same route; ares can confirm the
-mode renders, nothing more.
-
-The UI, weapon and automap are authored in Doom's 320-wide frame and drawn at
-`UI_XSCALE` — a pure horizontal double, since `SCREEN_H` never changes. A
-640x240 pixel is half as wide as it is tall, so the doubled HUD comes out the
-same apparent size and shape as the 320 one.
-
-That costs the UI its COPY mode, for a reason worth recording: **COPY cannot
-magnify.** It moves four texels per clock and steps S once per four-pixel
-*group* — which is exactly why libdragon's RSP fixup multiplies DSDX by 4. At
-1:1 that is four consecutive texels per four pixels and the blit is perfect;
-ask for a 2x destination and the group boundaries quantise the sampling rather
-than doubling each texel, and every one-pixel feature ghosts and gaps. On the
-status bar it turns `BULL 40/200` into a row of split glyphs. So wide mode
-draws the UI in standard mode at one pixel per clock. A few tens of thousands
-of pixels a frame; 320 keeps COPY untouched.
-
-What wide mode does *not* buy is sharper texture. LOD is pinned, so the extra
-columns give cleaner geometry edges and nothing else. Unpinning it (`focal_y`
--> `focal_x` in `r_wall.c`) is physically correct at 640 and does sharpen near
-walls, but it holds every surface one mip higher for twice the distance and
-costs TMEM uploads — the resource the whole renderer is built to conserve.
-Measure the cheap version first.
-
-## Installing on a flashcart
-
-Developed against a SummerCart64. Any cart libdragon's SD stack drives should
-work — the paths are not SC64-specific — but only the SC64 has been tested.
 
 **1. Extract the release archive to the root of the SD card.** It creates a
 single `Doom` folder:
@@ -351,39 +217,6 @@ Saving needs no typing: the slot is offered the name of the level you are
 standing in — "E1M5: PHOBOS LAB" — and A confirms it. That holds when you
 overwrite an existing save too, so a slot is always labelled with where it was
 actually made rather than where it was first used.
-
-## Testing without hardware
-
-`make test` compiles the *real* renderer against a mock RDP (`tests/shim/`) and
-software-rasterises what it emits, enforcing invariants that are invisible at
-runtime and fatal on console: every TMEM upload fits 2048 bytes, every sampled
-texel lies inside the resident sub-rectangle, every vertex fits the RDP's s11.2
-range, and the batch never silently drops a quad. It also checks the music WAD
-layout the console-side parser depends on.
-
-The harness is fast and catches a lot, but it only checks what it models. Of
-the bugs that actually shipped in a ROM it caught none — each needed the
-emulator or the console, and each is now recorded as an assertion or a comment
-explaining the hardware's real semantics.
-
-Hard-won ones worth knowing: the RDP does not participate in the VR4300's cache
-coherency, so texture bytes still dirty in the data cache are invisible to it;
-an unused vertex attribute must be `-1` in the triangle format, since zero
-reads position floats as that attribute and trips the FPU on denormals; and the
-emulator tolerates stale inherited depth state that the real RDP does not.
-
-## Layout
-
-```
-src/                port layer: renderer, WAD streaming, arenas, platform
-src/doom/           Doom's own game code, plus marked interpolation snapshots
-n64.ld              repo-local link script; packs the per-seg render core
-                    into one contiguous I-cache window (see r_wall.h)
-tools/wad2n64.c     WAD -> CI8 + shared TLUT, at build time
-tools/mkmuswad.py   music -> one WAD with the directory at the front
-tools/mkpvs.c       precomputed visibility baker (off by default)
-tests/              host harness and the libdragon shim
-```
 
 ## Status and limits
 
