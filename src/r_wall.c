@@ -988,6 +988,25 @@ typedef struct {
     int   vrep_first, tile_h, texh;
     bool  merge_t;
 
+    /* The span's own clipped parameters and the texture coordinates they
+     * produced. The terminal columns take the parameter DIRECTLY from these
+     * rather than recovering it from the texture coordinate, because that
+     * recovery is not an identity in float:
+     *
+     *   sa = (u0 + ua*len) * uscale        going out
+     *   pa = (sa*inv_uscale - u0) * inv_len   coming back
+     *
+     * Every step rounds, so pa != ua by a few ULPs -- and at distance a few
+     * ULPs of parameter is a quarter of a pixel of screen x. Two segs that
+     * meet at a shared map vertex have ub==1 on one and ua==0 on the other,
+     * so both should project that vertex to the same place; through the round
+     * trip they do not, and the sliver between them is a column whose sample
+     * neither seg covers. Measured on a demo route: one seg ended at x
+     * 196.000 and its neighbour began at 196.250, leaving column 196 unlit.
+     * This is the same rule the flats already follow -- carry the shared
+     * vertex verbatim, never recompute it. */
+    float ua, ub, sa, sb;
+
     float prev_cb;                       /* carried far edge (see above) */
     float c_pb, c_ob, c_db, c_iwb, c_shb;
 #if R_TRI_QUANT
@@ -1296,6 +1315,7 @@ R_HOT static void wall_emit(const r_camera_t *cam, const r_wall_t *wall,
         .wall   = wall,
         .tex    = tex,
         .d1 = d1, .o1 = o1, .dd = dd, .od = od,
+        .ua = ua, .ub = ub, .sa = sa, .sb = sb,
         .uscale     = uscale,
         .inv_uscale = inv_uscale,   /* ridden along the descent; same bits */
         .inv_len    = 1.0f / wall_len,
@@ -1393,9 +1413,30 @@ static bool wall_col(wctx_t *c, float ca, float cb, float s_a, float s_b,
      * interior edges compare bit-equal). */
     float pa, oa, da, iwa, sha;
     const bool reuse_a = c->have_prev && ca == c->prev_cb;
+#if D_SEAMPROBE
+    /* Does a wall's own column chain ever break?
+     *
+     * Interior columns are supposed to arrive with ca bit-equal to the
+     * previous column's cb, which is what lets the edge be reused verbatim
+     * and is why an intra-wall seam cannot open. If that ever fails with a
+     * previous column in hand, the wall has a hole of its own making and
+     * the remaining slits are intra-wall. If it never fails, they are
+     * between segs and this emitter is not the place to look. */
+    if (c->have_prev && ca != c->prev_cb) {
+        extern uint32_t r_seam_break;
+        r_seam_break++;
+    }
+#endif
     if (reuse_a) {
         pa = c->c_pb; oa = c->c_ob; da = c->c_db;
         iwa = c->c_iwb; sha = c->c_shb;
+    } else if (ca == c->sa) {
+        pa = c->ua;                      /* the span's own edge, exactly */
+        oa = c->o1 + c->od * pa;
+        da = c->d1 + c->dd * pa;
+        if (da <= 0.0f) { c->have_prev = false; return true; }
+        iwa = 1.0f / da;
+        sha = clamp01(c->light + r_nearlight(da)) * r_vis(da, c->finv);
     } else {
         pa = (ca * c->inv_uscale - wall->u0) * c->inv_len;
         oa = c->o1 + c->od * pa;
@@ -1405,7 +1446,8 @@ static bool wall_col(wctx_t *c, float ca, float cb, float s_a, float s_b,
         sha = clamp01(c->light + r_nearlight(da)) * r_vis(da, c->finv);
     }
 
-    const float pb = (cb * c->inv_uscale - wall->u0) * c->inv_len;
+    const float pb = (cb == c->sb) ? c->ub
+                   : (cb * c->inv_uscale - wall->u0) * c->inv_len;
     const float ob = c->o1 + c->od * pb;
     const float db = c->d1 + c->dd * pb;
     if (db <= 0.0f) { c->have_prev = false; return true; }
@@ -1417,8 +1459,41 @@ static bool wall_col(wctx_t *c, float ca, float cb, float s_a, float s_b,
     c->c_iwb = iwb; c->c_shb = shb;
     c->have_prev = true;
 
-    const float xa = cx + oa * cam->focal_x * iwa;
-    const float xb = cx + ob * cam->focal_x * iwb;
+    float xa = cx + oa * cam->focal_x * iwa;
+    float xb = cx + ob * cam->focal_x * iwb;
+
+#if R_SEGSNAP
+    /* Grow a span's OUTER edges to the enclosing pixel boundary.
+     *
+     * What is left after the two exact-arithmetic fixes is sub-pixel slivers
+     * BETWEEN segs: one seg's span ended at x 196.000 and its neighbour's
+     * began at 196.250, so column 196's sample at exactly 196.0 belonged to
+     * neither and stayed the clear colour. Interior column edges cannot do
+     * this -- they are shared verbatim -- so it is only ever the ends, which
+     * is precisely where two segs meet.
+     *
+     * Chasing that gap closed by making the two projections agree bit for bit
+     * is not enough on its own, because two segs need not share a vertex at
+     * all: they can be different linedefs meeting at a corner with their own
+     * endpoints. So snap outward instead, which does not care why they
+     * disagree. The span can only grow, never shrink, so a column that was
+     * covered stays covered, and neighbours now OVERLAP by less than a pixel
+     * rather than leaving a void. Overlap is free here: walls are opaque and
+     * depth-tested, and the nearer one simply wins the shared column.
+     *
+     * Only the terminal edges move, by at most one pixel, and the texture
+     * coordinate is left alone -- so the art shears by a sub-pixel fraction
+     * at a seg end, which is the same order as the quantisation the batch
+     * already applies. This is what the software renderer got for free by
+     * walking integer columns. */
+    if (xa <= xb) {
+        if (ca == c->sa) xa = floorf(xa);
+        if (cb == c->sb) xb = ceilf(xb);
+    } else {
+        if (ca == c->sa) xa = ceilf(xa);
+        if (cb == c->sb) xb = floorf(xb);
+    }
+#endif
 
 #if R_TRI_QUANT
     /* Quantized edges, once per COLUMN: every band of it shares them, and

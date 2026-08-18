@@ -740,9 +740,30 @@ static bool screen_span(float ax, float ay, float bx, float by,
 
     /* Same inline floor/ceil + integer min/max as span_of_bbox; same
      * bounds argument (da,db >= BSP_NEAR keeps |xa|,|xb| far inside 2^23). */
-    const int fa = rf_floor_i32(xa), fb = rf_floor_i32(xb);
+    /* The columns this seg can actually PAINT, which is not the columns it
+     * touches. With antialias off the RDP writes pixel k only if the sample
+     * at integer k lands inside the span, so [xlo,xhi) paints
+     * ceil(xlo) .. ceil(xhi)-1. The high end already said that; the low end
+     * used floor, and floor(187.5) claims column 187 -- which the seg cannot
+     * write, because 187 < 187.5. That column went into the solid list as
+     * covered, nothing behind was allowed to fill it, and it stayed the clear
+     * colour: a one-pixel vertical slit, worst where a wall is far enough
+     * that a whole 64-texel tile projects to under a pixel.
+     *
+     * Deliberately NOT widened to match SEGSNAP's outward growth. That was
+     * tried -- claim floor(min) because the snapped span paints that far --
+     * and measured WORSE: mid-view hole pixels 1059 -> 2224, tall columns
+     * 27 -> 75. The two do not describe the same span: this is computed once
+     * per seg from its own projection, while painting happens per sub-span
+     * after window clipping and the mip splits, and SEGSNAP grows only an
+     * edge that is terminal in the sub-span it lands in.
+     *
+     * The asymmetry is the point, and it is the safe one: claim NARROWLY,
+     * paint GENEROUSLY. A column painted but not claimed is overdraw, which
+     * the depth buffer sorts out; a column claimed but not painted is a hole
+     * nothing is allowed to fill. */
     const int ca = rf_ceil_i32(xa),  cb = rf_ceil_i32(xb);
-    int lo = fa < fb ? fa : fb;
+    int lo = ca < cb ? ca : cb;
     int hi = (ca > cb ? ca : cb) - 1;
     if (lo < 0) lo = 0;
     if (hi > SCREEN_W - 1) hi = SCREEN_W - 1;

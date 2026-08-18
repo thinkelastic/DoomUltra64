@@ -670,6 +670,15 @@ N64_CFLAGS += -DR_FOGSCALE=$(FOGSCALE)
 # sector is full-bright at every distance, and the way a dim one floors at
 # black instead of tapering. See r_zlight in r_wall.h. 0 keeps the additive
 # form, and is bit-identical to it.
+# SEGSNAP=1 grows a wall span's outer edges to the enclosing pixel boundary,
+# so two adjacent segs overlap by under a pixel instead of leaving a
+# sub-pixel void between them. See the note in wall_col: the void is a column
+# whose sample belongs to neither seg, and it shows as a one-pixel dark
+# hairline at wall corners at distance. Spans only ever grow, so nothing that
+# was covered stops being covered.
+SEGSNAP ?= 1
+N64_CFLAGS += -DR_SEGSNAP=$(SEGSNAP)
+
 ZLIGHT ?= 1
 N64_CFLAGS += -DR_ZLIGHT=$(ZLIGHT)
 

@@ -1210,6 +1210,14 @@ int main(void)
         r_vapor_begin();
         r_env_begin();
         r_halo_begin();
+#if D_SEAMPROBE
+        /* The pose at the frame the scan will report, so a sighting can be
+         * pinned with VIEWLOCK exactly. The periodic hwstat pose is sampled
+         * every 120 frames and lands nowhere near a hole. */
+        { extern int r_seam_pose[4];
+          r_seam_pose[0] = (int)cam.x; r_seam_pose[1] = (int)cam.y;
+          r_seam_pose[2] = (int)cam.z; r_seam_pose[3] = (int)(cam.angle * 1000.0f); }
+#endif
         r_setup_walls();
         r_sky_span_reset();
 #if D_DYNLIGHT

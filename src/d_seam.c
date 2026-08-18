@@ -2,6 +2,9 @@
 
 #include "d_seam.h"
 
+uint32_t r_seam_break;
+int r_seam_pose[4];
+
 #if D_SEAMPROBE
 
 /* Dump latch: 0 = watching, 1 = the next frame's commands are being
@@ -11,13 +14,11 @@
  * sighting and spent itself on the title screen). A small budget of
  * dumps per boot, spaced well apart, so a session can visit more than
  * one seam without burying the log. */
-static volatile int seam_state;
 static uint32_t     seam_frame;
 static int          seam_dumps;         /* dumps burned this boot */
 static uint32_t     seam_last_dump;     /* frame of the last one */
 static int          seam_stable;        /* consecutive frames, same count */
 static int          seam_last_n;
-static int          seam_just_dumped;   /* force the report on close */
 
 /* The RDP command hook. Called by rdpq_debug's trace engine for every
  * command the RDP consumes, with the raw big-endian words -- including the
@@ -46,10 +47,22 @@ static uint64_t seam_qw[SEAM_MAX_QW];
 static struct { uint16_t off; uint8_t n; uint8_t cmd; } seam_cmd[SEAM_MAX_CMD];
 static volatile int seam_nqw, seam_ncmd, seam_lost;
 
+/* Set once the probe is initialised. The hook buffers every frame from then
+ * on, rather than only while a dump is latched.
+ *
+ * The latched form could only ever dump the frame AFTER a sighting, which is
+ * fine for its original use -- a player standing still, where frame N+1 has
+ * the same hole -- and useless on a demo route, where the hole is transient.
+ * Measured: three dumps taken that way all landed on frames whose scan found
+ * ZERO holes, so the decode described a hole-free frame. Buffering always and
+ * printing retroactively means the words belong to the very frame the scan
+ * found the hole in. */
+static volatile int seam_watching;
+
 static void seam_hook(void *ctx, uint64_t *buf, int sz)
 {
     (void)ctx;
-    if (seam_state != 1) return;
+    if (!seam_watching) return;
 
     const int cmd = (int)((buf[0] >> 56) & 0x3F);
     const int keep = (cmd >= 0x08 && cmd <= 0x0F) ||   /* triangles     */
@@ -81,6 +94,8 @@ void d_seam_init(void)
     rdpq_debug_start();
     rdpq_debug_install_hook(seam_hook, NULL);
     debugf("seamprobe: armed, clear is the probe colour\n");
+    seam_watching = 1;
+    debugf("seamprobe: watching wall column continuity\n");
 }
 
 void d_seam_frame(const surface_t *fb, uint16_t clear16)
@@ -92,21 +107,6 @@ void d_seam_frame(const surface_t *fb, uint16_t clear16)
      * here -- main loop context, where a slow USB write is only slow --
      * close the dump, and force this frame's hole report out next to it,
      * whatever the rate limiter thinks. */
-    if (seam_state == 1) {
-        for (int c = 0; c < seam_ncmd; c++) {
-            const uint64_t *q = &seam_qw[seam_cmd[c].off];
-            const int n = seam_cmd[c].n;
-            debugf("st %d %d", seam_cmd[c].cmd, n);
-            for (int i = 0; i < n; i++)
-                debugf(" %016llx", (unsigned long long)q[i]);
-            debugf("\n");
-        }
-        debugf("seamdump end f=%lu cmds=%d lost=%d\n",
-               (unsigned long)seam_frame, seam_ncmd, seam_lost);
-        seam_state = 0;
-        seam_nqw = seam_ncmd = seam_lost = 0;
-        seam_just_dumped = 1;
-    }
 
     /* Only frames that drew the world. The title page and the menus leave
      * most of the screen legitimately clear-coloured -- the very first
@@ -157,13 +157,17 @@ void d_seam_frame(const surface_t *fb, uint16_t clear16)
     }
 
     /* Report continuously but not torrentially: the player navigates by
-     * these lines. The dump-closing frame always reports, so the dump and
-     * its picture sit side by side in the log. */
+     * these lines. A dump prints its own hole list, so the two sit side by
+     * side in the log whatever the rate limiter is doing. */
     static uint32_t last_report;
-    if (seam_frame - last_report >= 8 || seam_just_dumped) {
+    if (seam_frame - last_report >= 8) {
         last_report = seam_frame;
-        seam_just_dumped = 0;
-        debugf("seamhole f=%lu n=%d:", (unsigned long)seam_frame, holes);
+        { extern uint32_t r_seam_break;
+          if (r_seam_break) debugf("colbreak %lu\n",
+                                   (unsigned long)r_seam_break); }
+        debugf("seamhole f=%lu n=%d pose=%d,%d,%d,%d:",
+               (unsigned long)seam_frame, holes,
+               r_seam_pose[0], r_seam_pose[1], r_seam_pose[2], r_seam_pose[3]);
         for (int i = 0; i < nrun; i++)
             debugf(" %d:%d-%d", run[i].y, run[i].x0, run[i].x1);
         debugf(nrun == MAXRUN ? " ...\n" : "\n");
@@ -176,18 +180,46 @@ void d_seam_frame(const surface_t *fb, uint16_t clear16)
     if (holes == seam_last_n) seam_stable++;
     else { seam_stable = 0; seam_last_n = holes; }
 
-    if (seam_state == 0 && seam_stable >= 8 &&
+    /* Fire on the SHAPE of a sighting, not on the player holding still.
+     *
+     * The stability test assumed a human standing at a seam; on a demo route
+     * the count changes every frame and it never armed. And the sighting
+     * cannot be reproduced by pinning the pose afterwards, because FREEZE
+     * restarts the level and its doors and lifts are then in a different
+     * state than they were mid-route. So trigger on what the artifact looks
+     * like instead: many runs, each one or two pixels wide, which is a tall
+     * thin column and exactly the thing under investigation. */
+    int thin = 0;
+    for (int i = 0; i < nrun; i++)
+        if (run[i].x1 - run[i].x0 <= 1) thin++;
+    const int tallthin = (nrun >= 20 && thin >= nrun - 2);
+
+    if ((seam_stable >= 8 || tallthin) &&
         holes >= 3 && holes <= 600 &&
         seam_dumps < 3 &&
         (seam_dumps == 0 || seam_frame - seam_last_dump > 600)) {
         seam_dumps++;
         seam_last_dump = seam_frame;
         seam_stable = 0;
-        seam_nqw = seam_ncmd = seam_lost = 0;
+        /* THIS frame's words, printed now that its holes are known. */
         debugf("seamdump begin f=%lu holes=%d\n",
-               (unsigned long)seam_frame + 1, holes);
-        seam_state = 1;              /* armed last: the hook reads it */
+               (unsigned long)seam_frame, holes);
+        for (int i = 0; i < nrun; i++)
+            debugf("  hole %d:%d-%d\n", run[i].y, run[i].x0, run[i].x1);
+        for (int cc = 0; cc < seam_ncmd; cc++) {
+            const uint64_t *q = &seam_qw[seam_cmd[cc].off];
+            const int n = seam_cmd[cc].n;
+            debugf("st %d %d", seam_cmd[cc].cmd, n);
+            for (int i = 0; i < n; i++)
+                debugf(" %016llx", (unsigned long long)q[i]);
+            debugf("\n");
+        }
+        debugf("seamdump end f=%lu cmds=%d lost=%d\n",
+               (unsigned long)seam_frame, seam_ncmd, seam_lost);
     }
+
+    /* Clear for the next frame, whatever happened this one. */
+    seam_nqw = seam_ncmd = seam_lost = 0;
 }
 
 #endif /* D_SEAMPROBE */
