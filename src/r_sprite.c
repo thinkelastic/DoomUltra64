@@ -516,11 +516,21 @@ void r_sprite_add(const r_camera_t *cam, const r_thing_t *t,
         const float k = 1.0f; (void)fog_ll;
 #endif
         /* And the near half of it, on the same terms the floor under the
-         * thing gets (r_nearlight): an imp two paces away in a dim hall
-         * lit at lightlevel/255 while the floor it stands on is lit toward
-         * full brightness reads as a cardboard cut-out. Fullbright frames
-         * are already at 1.0 and the clamp leaves them there. */
-        const float n = fog_ll >= 0 ? r_nearlight(depth) : 0.0f;
+         * thing gets: an imp two paces away in a dim hall lit at
+         * lightlevel/255 while the floor it stands on is lit toward full
+         * brightness reads as a cardboard cut-out. Fullbright frames are
+         * already at 1.0 and the clamp leaves them there.
+         *
+         * Taken as r_zlight's DELTA rather than r_nearlight's term, which
+         * is the same expression the walls and flats use -- and which is
+         * exactly r_nearlight(depth) again whenever ZLIGHT is off, so this
+         * cannot move the additive look. It matters once the world runs on
+         * the vanilla curve: that curve floors a dim sector at black, and a
+         * thing still carrying the additive term would go on glowing in a
+         * room that had gone dark around it. A monster you can see in the
+         * dark is not a scary monster. */
+        const float base = fog_ll >= 0 ? (float)fog_ll * (1.0f / 255.0f) : 0.0f;
+        const float n = fog_ll >= 0 ? r_zlight(base, depth) - base : 0.0f;
         float sr = sh[0] + n, sg = sh[1] + n, sb = sh[2] + n;
         if (sr > 1.0f) sr = 1.0f;
         if (sg > 1.0f) sg = 1.0f;

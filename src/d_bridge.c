@@ -77,7 +77,13 @@ void *p_level_thing_sprite(int type);
  * the time anything draws: the loader resolves once and the renderer only
  * ever sees the index. A level uses a handful, so the lookup is a scan of
  * a table that is nearly always length 0 to 3. */
-#define MIRROR_MAX 12
+/* Raised from 12 when the shiny set grew past doors. This is a PER-LEVEL
+ * cap and registration silently stops at it (see R_TextureNumForName), so a
+ * level using more shiny textures than fit would get the sheen on some walls
+ * and not others of the same material -- which reads as a bug, not a budget.
+ * The table is scanned linearly per texture lookup, so it is kept small
+ * rather than generous. */
+#define MIRROR_MAX 32
 static int16_t mirror_pic[MIRROR_MAX];
 static int     num_mirror;
 
@@ -101,9 +107,16 @@ static int mirror_for_name(const char *n)
      * and riveted variants (METAL2, BIGDOOR3, SHAWN1) are matte and would
      * read as wet rather than polished. */
     static const char *const shiny[] = {
-        "DOOR1", "DOOR3", "BIGDOOR2", "BIGDOOR4", "SHAWN2", "METAL1",
-        "SHAWN3", "METAL",  "SILVER1", "SILVER2", "SILVER3",
-        "SUPPORT3", "TEKWALL1", "TEKWALL4"
+        /* doors: the plain leaves and the keycard ones, which are the same
+         * polished leaf with a coloured stripe let into it */
+        "DOOR1", "DOOR3", "BIGDOOR1", "BIGDOOR2", "BIGDOOR4", "EXITDOOR",
+        "DOORBLU", "DOORRED", "DOORYEL",
+        "DOORBLU2", "DOORRED2", "DOORYEL2",
+        /* wall plates and trim of the same material */
+        "SHAWN2", "SHAWN3", "METAL", "METAL1",
+        "SILVER1", "SILVER2", "SILVER3",
+        "SUPPORT2", "SUPPORT3", "TEKWALL1", "TEKWALL4",
+        "PLAT1", "STEPTOP"
     };
     /* Compared over eight bytes, not as C strings: Doom's sidedef name
      * fields are char[8] and carry NO terminator when the name fills
@@ -1799,6 +1812,35 @@ void D_LightsUpdate(void)
                 radius = 128.0f; intensity = torch_lum * 0.55f;
                 flame_top = 1;
                 cr = 1.00f; cg = 0.86f; cb = 0.58f; break;
+            /* THE POWERUP SPHERES.
+             *
+             * Colours are the MEASURED average of each sprite's own pixels
+             * through PLAYPAL, normalised so the max channel is 1.0 -- which
+             * the registry requires (see r_light_t: intensity must equal
+             * max(ir,ig,ib)). Averaged over the lump, not eyeballed, so a
+             * soulsphere's glow is the blue that is actually in it:
+             *
+             *   SOULA0  (8.9, 8.9,129.6) -> 0.07 0.07 1.00   deep blue
+             *   PINVA0 (31.5,52.9, 17.0) -> 0.60 1.00 0.32   green
+             *   PINSA0 (71.1, 6.6, 57.0) -> 1.00 0.09 0.80   magenta
+             *   MEGAA0(109.0,87.7, 68.0) -> 1.00 0.80 0.62   warm white
+             *
+             * Reach is the keys' 192 and no more: these sit in the open and
+             * a sphere that lights a whole bay stops reading as an object
+             * and starts reading as a lamp. What makes them GLOW is the halo
+             * below, not the reach. */
+            case MT_MISC12:                          /* soulsphere    */
+                radius = 192.0f; intensity = key_lum * 1.15f;
+                cr = 0.07f; cg = 0.07f; cb = 1.00f; break;
+            case MT_INV:                             /* invulnerability */
+                radius = 192.0f; intensity = key_lum * 1.15f;
+                cr = 0.60f; cg = 1.00f; cb = 0.32f; break;
+            case MT_INS:                             /* blur sphere   */
+                radius = 192.0f; intensity = key_lum;
+                cr = 1.00f; cg = 0.09f; cb = 0.80f; break;
+            case MT_MEGA:                            /* megasphere    */
+                radius = 192.0f; intensity = key_lum * 1.25f;
+                cr = 1.00f; cg = 0.80f; cb = 0.62f; break;
             case MT_MISC0:                           /* green armour  */
                 radius = 192.0f; intensity = key_lum;
                 cr = 0.38f; cg = 1.00f; cb = 0.42f; break;
@@ -1916,6 +1958,18 @@ void D_LightsUpdate(void)
             case MT_MISC29:                                  /* techno lamp */
                 r_light_halo_next(0.09f); break;
 #endif
+            /* A sphere is emissive over its WHOLE art, unlike a torch whose
+             * flame is a fraction of the prop, so the glow is sized to the
+             * sprite rather than to a burning tip: the art is ~32 units and
+             * 0.17 of the 192 reach is 33. Alpha is armed explicitly for the
+             * same reason the barrel's ooze is -- these must be clearly
+             * visible across a room while lighting almost nothing, and
+             * deriving the halo from a reach that modest would leave them
+             * barely there. */
+            case MT_MISC12: case MT_INV: case MT_INS: case MT_MEGA:
+                r_light_halo_next(0.17f);
+                r_light_halo_alpha_next(0.55f);
+                break;
             default: break;
         }
 

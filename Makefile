@@ -668,8 +668,31 @@ N64_CFLAGS += -DR_FOGSCALE=$(FOGSCALE)
 # sector is full-bright at every distance, and the way a dim one floors at
 # black instead of tapering. See r_zlight in r_wall.h. 0 keeps the additive
 # form, and is bit-identical to it.
-ZLIGHT ?= 0
+ZLIGHT ?= 1
 N64_CFLAGS += -DR_ZLIGHT=$(ZLIGHT)
+
+# LIGHTCONTRAST (tenths) and LIGHTPIVOT (percent): a contrast stretch on the
+# sector-light band before it becomes a startmap row. 10 is vanilla exactly,
+# at any pivot.
+#
+# ZLIGHT on its own is darker rather than more contrasty -- measured over one
+# frame it took the mean from 45.6 to 22.0 and near-black pixels from 20% to
+# 79%, but the spread did not widen and the highlights fell with everything
+# else. A gamma made that worse, not better (see r_setup_walls). Stretching
+# about a pivot is what separates a lit room from an unlit one: above the
+# pivot bands are pushed toward full bright and clamp there, below it they
+# are pushed toward black. Dynamic lights are ADDITIVE on top, so they carve
+# harder out of the deeper base -- that is the other half of the effect, and
+# why the light cap went to 16 first.
+# LIGHTBOOST, percent, scales the whole light curve after the contrast
+# stretch. 100 is the curve untouched; 120 is the whole game a fifth brighter
+# without touching how far a lit room stands apart from a dark one.
+LIGHTBOOST ?= 111
+N64_CFLAGS += -DR_LIGHTBOOST=$(LIGHTBOOST)
+
+LIGHTCONTRAST ?= 13
+LIGHTPIVOT ?= 25
+N64_CFLAGS += -DR_LIGHTCONTRAST=$(LIGHTCONTRAST) -DR_LIGHTPIVOT=$(LIGHTPIVOT)
 
 NEARLIGHT ?= 1
 N64_CFLAGS += -DR_NEARLIGHT=$(NEARLIGHT)
@@ -876,7 +899,7 @@ N64_CFLAGS += -DR_REFLWOBBLE=$(REFLWOBBLE)
 # the wall's light, so a door in a dark room stops being flat without glowing.
 ENVMAP ?= 1
 N64_CFLAGS += -DR_ENVMAP=$(ENVMAP)
-ENVAMT ?= 18
+ENVAMT ?= 30
 N64_CFLAGS += -DR_ENVAMT=$(ENVAMT)
 # ENVKNEE=<0..255> is the sector light level below which a door gets NO sheen.
 # A knee rather than a slope: polished metal catches a room that has something

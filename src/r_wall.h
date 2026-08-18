@@ -307,11 +307,14 @@ static inline float r_nearlight(float depth)
 #ifndef R_ZLIGHT
 #define R_ZLIGHT 0
 #endif
+extern float r_startmap[256];
+
 static inline float r_zlight(float lightf, float depth)
 {
 #if R_ZLIGHT
-    const int i = ((int)(lightf * 255.0f + 0.5f)) >> 4;
-    float level = (float)((15 - i) * 4) - 80.0f / (depth * (1.0f / 16.0f) + 1.0f);
+    int i = (int)(lightf * 255.0f + 0.5f);
+    if (i < 0) i = 0; else if (i > 255) i = 255;
+    float level = r_startmap[i] - 80.0f / (depth * (1.0f / 16.0f) + 1.0f);
     if (level < 0.0f)  level = 0.0f;
     if (level > 31.0f) level = 31.0f;
     return 1.0f - level * (1.0f / 32.0f);
