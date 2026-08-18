@@ -339,7 +339,26 @@ static const char *const mus_dirs[] = {
  * cart_resident false and the ordinary fread path carries the track. */
 static bool track_rewind(void);
 
-#define MUS_CART_BASE   0x10C00000u     /* 12 MB in; the ROM ends at ~11.9 */
+/* WELL clear of the ROM, and PROVEN clear before anything is written.
+ *
+ * This was 0x10C00000 -- 12 MB, chosen because Doom's ROM ends at 11.92 MB.
+ * That is an 80 KB margin, which is not a margin, and it is catastrophically
+ * wrong for Doom II: that ROM runs to 15.30 MB, so the preload wrote 4-8 MB
+ * of music straight over the running game's own image. The symptom was a
+ * black screen at the first level transition that never recovered, which is
+ * exactly what overwriting your own code looks like.
+ *
+ * 32 MB instead. The SC64 carries 64 MB of SDRAM, so a 10 MB buffer here
+ * ends at 42 MB with the whole ROM below it and room above. No ROM this
+ * project can build comes near it.
+ *
+ * And the address is no longer TRUSTED: cart_probe writes a pattern and
+ * reads it back before any track is loaded there. A cart that does not
+ * answer -- a smaller SDRAM, a different flashcart, an extended-ROM layout
+ * that reaches up here -- declines the preload and streams instead. The
+ * music verification cannot catch this class of fault on its own: the track
+ * would compare correct while something else entirely was being destroyed. */
+#define MUS_CART_BASE   0x12000000u     /* 32 MB in */
 #define MUS_CART_MAX    (10u * 1024u * 1024u)
 
 static bool     cart_resident;
@@ -366,10 +385,35 @@ static bool sector_of(FILE *h, long ofs, uint32_t *lba)
     return true;
 }
 
+/* Is MUS_CART_BASE real, writable memory that is not something else? */
+static bool cart_probe(void)
+{
+    static int state;               /* 0 untested, 1 good, -1 unusable */
+    static uint32_t pat[8] __attribute__((aligned(16)));
+    static uint32_t chk[8] __attribute__((aligned(16)));
+
+    if (state) return state > 0;
+    for (int i = 0; i < 8; i++) pat[i] = 0xC0DE0000u + (uint32_t)i;
+    data_cache_hit_writeback_invalidate(pat, sizeof pat);
+    dma_write(pat, MUS_CART_BASE, sizeof pat);
+    data_cache_hit_writeback_invalidate(chk, sizeof chk);
+    dma_read(chk, MUS_CART_BASE, sizeof chk);
+    for (int i = 0; i < 8; i++)
+        if (chk[i] != pat[i]) {
+            debugf("music: cart RAM at %08lx unusable (%08lx) -- streaming\n",
+                   (unsigned long)MUS_CART_BASE, (unsigned long)chk[0]);
+            state = -1;
+            return false;
+        }
+    state = 1;
+    return true;
+}
+
 static void cart_preload(void)
 {
     cart_resident = false;
     if (track_len <= 0) return;   /* per-file path: length not measured */
+    if (!cart_probe()) return;
 
     cart_skew = (uint32_t)(track_start & 511);
     /* An odd skew would put the PI address permanently out of parity with the
@@ -542,7 +586,27 @@ static void refill(int max_bytes)
             dma_read(ring + ring_head,
                      MUS_CART_BASE + cart_skew + (uint32_t)track_pos,
                      (unsigned long)space);
-            data_cache_hit_invalidate(ring + ring_head, space);
+            /* Invalidate the LINES the transfer touched, not the byte range.
+             *
+             * dma_read writes through the uncached alias, so nothing else
+             * makes the CPU's view of the ring current -- but the cache op
+             * asserts on a 16-byte aligned address AND a 16-byte multiple
+             * length, and neither ring_head nor space is either: space is
+             * capped by the ring wrap, the free space, the budget, and by
+             * (track_len - track_pos), which is an arbitrary byte count at
+             * the loop point. Handing it the raw range crashed on the
+             * assertion mid-play, once a track first wrapped.
+             *
+             * Rounding outward is safe here: in this path the ring is only
+             * ever written by DMA through the uncached alias, so the lines
+             * on either side hold no dirty CPU writes to lose -- only clean
+             * lines left by wave_read's memcpy out of it. */
+            {
+                const uint32_t lo = (uint32_t)(ring + ring_head) & ~15u;
+                const uint32_t hi = ((uint32_t)(ring + ring_head)
+                                     + (uint32_t)space + 15u) & ~15u;
+                data_cache_hit_invalidate((void *)lo, hi - lo);
+            }
             got = (size_t)space;
         } else
 #endif
