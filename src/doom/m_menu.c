@@ -345,6 +345,7 @@ enum
     messages,
     detail,
     joysens,
+    joysens_slider,     /* spacer: the thermo below CONTROLLER lives here */
     soundvol,
     opt_end
 } options_e;
@@ -379,6 +380,11 @@ menuitem_t OptionsMenu[]=
      * not have is worse than none. M_Drawer skips an empty name, so
      * M_DrawOptions writes this row's label as text instead. */
     {2,"",		M_ChangeJoySensitivity,'c'},
+    /* A slider needs a ROW to stand in, which is what vanilla's option_empty
+     * entries were for -- every thermo in this menu is drawn one line below
+     * its item. Without this the CONTROLLER thermo landed on top of SOUND
+     * VOLUME. status -1 keeps the cursor from stopping here. */
+    {-1,"",		0,'\0'},
     {1,"M_SVOL",	M_Sound,'s'}
 };
 
