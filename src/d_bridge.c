@@ -1110,6 +1110,7 @@ extern int detailLevel, showMessages, sfxVolume, musicVolume, screenblocks;
 const char *D_ModSelected(void);
 void        D_ModSetSelected(const char *name);
 extern int joySensitivity;
+extern int rumbleOn;
 void S_SetSfxVolume(int volume);
 void S_SetMusicVolume(int volume);
 
@@ -1124,9 +1125,10 @@ void D_OptionsSave(void)
              "messages %d\n"
              "sfx %d\n"
              "music %d\n"
+             "rumble %d\n"
              "mod %s\n",
              joySensitivity, detailLevel, showMessages, sfxVolume,
-             musicVolume, D_ModSelected());
+             musicVolume, rumbleOn, D_ModSelected());
     D_OptionsWrite(buf);
 }
 
@@ -1168,6 +1170,7 @@ void D_OptionsLoad(void)
             musicVolume = v < 0 ? 0 : (v > 15 ? 15 : v);
         else if (sscanf(p, "joysens %d", &v) == 1)
             joySensitivity = v < 0 ? 0 : (v > 9 ? 9 : v);
+        else if (sscanf(p, "rumble %d", &v) == 1) rumbleOn = v ? 1 : 0;
         else if (!strncmp(p, "mod ", 4)) D_ModSetSelected(p + 4);
         p = nl ? nl + 1 : NULL;
     }
@@ -1295,7 +1298,15 @@ boolean D_NonVanillaPlayback(boolean conditional, int lumpnum,
  * exist so the vendored responders compile, bound to values d_ui can send. */
 int key_pause           = 'p';
 int key_demo_quit       = 'q';
-int key_message_refresh = KEY_ENTER;
+/* Deliberately a key no button can send.
+ *
+ * A posts KEY_ENTER so it can select in menus, and HU_Responder treats
+ * key_message_refresh as "show the last message again" -- so in play, every
+ * press of the run button re-displayed whatever the player last picked up.
+ * It reads exactly like the game announcing a stimpack you did not take.
+ * Nothing on a controller should refresh a message, and there is no keyboard
+ * here to want it. */
+int key_message_refresh = -1;
 int key_multi_msg       = 't';
 int key_multi_msgplayer[8];
 int key_nextweapon      = 0;

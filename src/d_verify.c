@@ -116,7 +116,7 @@ void D_LevelPostSetup(void)
 
 #if R_RUNTIMEART
     { extern int p_art_us, p_art_count;
-      extern int r_wadart_io_us, r_wadart_io_n;
+      extern int r_wadart_io_us;
       extern int r_wadart_find_us, r_wadart_draw_us, r_wadart_mask_us, r_wadart_build_us;
       debugf("art: %d composed, %d ms (io %d, find %d, draw %d, mask %d, build %d)\n",
              p_art_count, p_art_us / 1000, r_wadart_io_us / 1000,

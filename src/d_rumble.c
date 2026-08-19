@@ -17,6 +17,11 @@
 #include <string.h>
 #include "d_rumble.h"
 
+/* Options -> RUMBLE. On by default: a Rumble Pak that is seated was seated
+ * on purpose. Lives here rather than with the menu's own settings because
+ * this is the only file that can honour it. */
+int rumbleOn = 1;
+
 static float level;      /* current energy; decays per frame */
 static float sustain;    /* floor held while a caller keeps asking */
 static float acc;        /* dither accumulator: duty == level, exactly */
@@ -58,13 +63,16 @@ void D_RumbleFrame(void)
     }
     return;
 #else
-    if (!joypad_get_rumble_supported(JOYPAD_PORT_1)) {
-        /* Pak pulled mid-game: make sure the state machine lets go. */
+    /* Switched off, or the pak was pulled mid-game. Either way the state
+     * machine has to LET GO rather than merely stop adding: skipping the
+     * update alone would leave a motor that happened to be on running until
+     * the pak was unplugged. */
+    if (!rumbleOn || !joypad_get_rumble_supported(JOYPAD_PORT_1)) {
         if (motor_on) {
             joypad_set_rumble_active(JOYPAD_PORT_1, false);
             motor_on = 0;
         }
-        level = acc = 0.0f;
+        level = sustain = acc = 0.0f;
         return;
     }
 #endif

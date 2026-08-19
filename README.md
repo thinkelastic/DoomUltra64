@@ -57,6 +57,7 @@ stock N64 has.
 | Start | Menu |
 
 Turning too fast or too slow? **Options → Controller** sets the turn speed.
+**Options → Rumble** turns the Rumble Pak on and off.
 
 Saving needs no typing — the slot is offered the name of the level you're in,
 and A accepts it.
@@ -133,7 +134,8 @@ didn't, and this spends it on light.
 - **Doom's real light curve** — dim rooms fall to black instead of a flat grey.
 - **Smoother motion** — the game still ticks at Doom's 35 Hz, but the view,
   monsters, lifts and doors glide at full frame rate.
-- **Rumble Pak** support, with a thump when you take a hit.
+- **Rumble Pak** support, with a thump when you take a hit — switchable in
+  Options.
 
 Any of these can be switched off at build time for the plain look.
 

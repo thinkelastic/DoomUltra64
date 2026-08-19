@@ -40,6 +40,10 @@
 #include "w_wad.h"
 #include "z_zone.h"
 
+/* DoomUltra64: Options -> RUMBLE, defined in d_rumble.c which is the only
+ * thing that can act on it. */
+extern int rumbleOn;
+
 /* DoomUltra64: the mods list and the WAD stack behind it. */
 #include "../d_mod.h"
 
@@ -220,6 +224,7 @@ static void M_DrawNewGame(void);
 static void M_DrawEpisode(void);
 static void M_DrawOptions(void);
 static void M_DrawMods(void);
+static void M_ChangeRumble(int choice);
 static void M_Mods(int choice);
 static void M_ModPick(int choice);
 static void M_DrawSound(void);
@@ -357,6 +362,7 @@ enum
      * LINEHEIGHT * (index + 1), so an item inserted anywhere above would
      * slide the CONTROLLER slider onto the wrong row. */
     mods,
+    rumble,
     opt_end
 } options_e;
 
@@ -398,7 +404,12 @@ menuitem_t OptionsMenu[]=
     {1,"M_SVOL",	M_Sound,'s'},
     /* No patch for this one either: no IWAD has ever contained a graphic
      * that says MODS. Written as text by M_DrawOptions, like CONTROLLER. */
-    {1,"",		M_Mods,'w'}
+    {1,"",		M_Mods,'w'},
+    /* Written as text like the two above, for the same reason: no IWAD has
+     * a graphic that says RUMBLE. The ON/OFF beside it is the MESSAGES row's
+     * own patch, so the two values are the same art at the same size rather
+     * than a lookalike drawn some other way. */
+    {2,"",		M_ChangeRumble,'r'}
 };
 
 menu_t  OptionsDef =
@@ -444,6 +455,18 @@ static void M_ModLabel(int i, char *out, size_t cap)
     const char *nm = (i == 0) ? "NO MOD" : D_ModName(i - 1);
     if (!nm) nm = "?";
     snprintf(out, cap, "%.*s", MOD_LABEL_MAX, nm);
+}
+
+/* status 2 in the table, so left and right both land here as vanilla's
+ * two-state items do; either way it flips. */
+static void M_ChangeRumble(int choice)
+{
+    void D_OptionsSave(void);
+    choice = 0;
+    rumbleOn = !rumbleOn;
+    /* A thump on the way ON, so the setting demonstrates itself. */
+    if (rumbleOn) { void D_RumbleAdd(float amount); D_RumbleAdd(0.6f); }
+    D_OptionsSave();
 }
 
 static void M_Mods(int choice)
@@ -1204,6 +1227,11 @@ void M_DrawOptions(void)
                  10, joySensitivity);
 
     M_WriteTextBig(OptionsDef.x, OptionsDef.y + LINEHEIGHT * mods, "MODS");
+
+    M_WriteTextBig(OptionsDef.x, OptionsDef.y + LINEHEIGHT * rumble, "RUMBLE");
+    V_DrawPatchDirect(OptionsDef.x + 120, OptionsDef.y + LINEHEIGHT * rumble,
+                      W_CacheLumpName(DEH_String(msgNames[rumbleOn]),
+                                      PU_CACHE));
 }
 
 void M_Options(int choice)

@@ -218,7 +218,11 @@ boolean D_UI_HandleInput(joypad_buttons_t held)
         { 2, KEY_DOWNARROW },
         { 3, KEY_LEFTARROW },
         { 4, KEY_RIGHTARROW},
-        { 5, KEY_ENTER     },   /* a      -- select in menus; use in play */
+        /* Note "in menus". USE is B, and it travels as a ticcmd flag rather
+         * than a key -- this comment used to claim A was use in play, which
+         * is how nobody noticed A was also Doom's message-refresh key and
+         * re-announced your last pickup every time you ran. */
+        { 5, KEY_ENTER     },   /* a      -- select in menus */
         { 6, '='           },   /* c-up   -- automap zoom in (map only) */
         { 7, '-'           },   /* c-down -- automap zoom out (map only) */
     };
