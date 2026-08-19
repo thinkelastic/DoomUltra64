@@ -5,12 +5,20 @@ build-doom2/
 filesystem-doom2/
 shots/
 *.z64
-# The release archive is a build product (make release).
+# The release archive is a build product (make release). Both names: the
+# releases were DoomN64-* before the rename, and the old rule silently
+# stopped matching when they became DoomUltra64-*.
 DoomN64-*.zip
+DoomUltra64-*.zip
 # Commercial IWADs are not redistributable. Ignore the whole directory
 # rather than a lowercase glob: the previous rule missed DOOM.WAD purely
 # because of its case and swept 10 MB of id's data into a commit.
 assets/
+# Same for the rendered soundtracks: `make release` picks these up from
+# beside the Makefile, and they are as non-redistributable as the IWADs --
+# and 190 MB each.
+DOOMMUS.WAD
+DOOM2MUS.WAD
 # Emulator save files land beside the ROM.
 *.ram
 *.sav
