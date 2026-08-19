@@ -52,7 +52,7 @@ misbehaving later.
 
 ## Controls
 
-| | |
+| Button | Action |
 |---|---|
 | Stick / D-pad | Move and turn |
 | C-left / C-right | Strafe |
