@@ -204,6 +204,7 @@ static void M_ChangeMessages(int choice);
 static void M_ChangeSensitivity(int choice);
 static void M_ChangeJoySensitivity(int choice);
 static void M_WriteTextBig(int x, int y, const char *string);
+static int  M_StringWidthBig(const char *string);
 static void M_SfxVol(int choice);
 static void M_MusicVol(int choice);
 static void M_ChangeDetail(int choice);
@@ -355,14 +356,15 @@ enum
     endgame,
     messages,
     detail,
+    /* Above the slider pair, not below it. What must never be broken is
+     * that joysens_slider stays immediately after joysens: M_DrawOptions
+     * places the thermo at LINEHEIGHT * (joysens + 1), so the two move
+     * together or the slider lands on another item's row. */
+    rumble,
     joysens,
     joysens_slider,     /* spacer: the thermo below CONTROLLER lives here */
     soundvol,
-    /* Last on purpose. M_DrawOptions places every thermo at
-     * LINEHEIGHT * (index + 1), so an item inserted anywhere above would
-     * slide the CONTROLLER slider onto the wrong row. */
     mods,
-    rumble,
     opt_end
 } options_e;
 
@@ -391,6 +393,8 @@ menuitem_t OptionsMenu[]=
     {1,"M_ENDGAM",	M_EndGame,'e'},
     {1,"M_MESSG",	M_ChangeMessages,'m'},
     {1,"M_DETAIL",	M_ChangeDetail,'g'},
+    /* Written as text: no IWAD contains a graphic that says RUMBLE. */
+    {2,"",		M_ChangeRumble,'r'},
     /* No patch: the IWAD has M_MSENS ("MOUSE SENSITIVITY") and nothing that
      * says controller, and a slider labelled for hardware the console does
      * not have is worse than none. M_Drawer skips an empty name, so
@@ -404,12 +408,7 @@ menuitem_t OptionsMenu[]=
     {1,"M_SVOL",	M_Sound,'s'},
     /* No patch for this one either: no IWAD has ever contained a graphic
      * that says MODS. Written as text by M_DrawOptions, like CONTROLLER. */
-    {1,"",		M_Mods,'w'},
-    /* Written as text like the two above, for the same reason: no IWAD has
-     * a graphic that says RUMBLE. The ON/OFF beside it is the MESSAGES row's
-     * own patch, so the two values are the same art at the same size rather
-     * than a lookalike drawn some other way. */
-    {2,"",		M_ChangeRumble,'r'}
+    {1,"",		M_Mods,'w'}
 };
 
 menu_t  OptionsDef =
@@ -1228,10 +1227,18 @@ void M_DrawOptions(void)
 
     M_WriteTextBig(OptionsDef.x, OptionsDef.y + LINEHEIGHT * mods, "MODS");
 
-    M_WriteTextBig(OptionsDef.x, OptionsDef.y + LINEHEIGHT * rumble, "RUMBLE");
-    V_DrawPatchDirect(OptionsDef.x + 120, OptionsDef.y + LINEHEIGHT * rumble,
-                      W_CacheLumpName(DEH_String(msgNames[rumbleOn]),
-                                      PU_CACHE));
+    /* "RUMBLE:" then the value hard against it, which is how the MESSAGES
+     * row above reads -- its colon is part of the M_MESSG patch and its
+     * ON/OFF follows directly. A fixed column left a gap here instead,
+     * because RUMBLE is a shorter word than the patches around it. */
+    {
+        static const char label[] = "RUMBLE:";
+        const int ry = OptionsDef.y + LINEHEIGHT * rumble;
+        M_WriteTextBig(OptionsDef.x, ry, label);
+        V_DrawPatchDirect(OptionsDef.x + M_StringWidthBig(label) + 2, ry,
+                          W_CacheLumpName(DEH_String(msgNames[rumbleOn]),
+                                          PU_CACHE));
+    }
 }
 
 void M_Options(int choice)
@@ -1405,6 +1412,19 @@ void M_QuitDOOM(int choice)
 /* M_WriteText's glyph walk at 2x, for a label standing beside the menu's
  * pre-rendered words. Same font and the same skips; only the advance and the
  * blit are doubled. No newline case: this draws one short label. */
+/* How wide M_WriteTextBig will draw a string. Needed to butt the ON/OFF up
+ * against the label the way the MESSAGES row does, instead of parking it at
+ * a fixed column and leaving a gap whose size depends on the word. */
+static int M_StringWidthBig(const char *string)
+{
+    int w = 0;
+    for (const char *ch = string; *ch; ch++) {
+        const int c = toupper(*ch) - HU_FONTSTART;
+        w += (c < 0 || c >= HU_FONTSIZE) ? 8 : SHORT(hu_font[c]->width) * 2;
+    }
+    return w;
+}
+
 static void M_WriteTextBig(int x, int y, const char *string)
 {
     void V_DrawPatchMag(int vx, int vy, patch_t *p, float mag);

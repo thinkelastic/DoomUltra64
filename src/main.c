@@ -829,8 +829,25 @@ static void handle_input(void)
     const float TURN_FULL =
         (640.0f / 10430.0f) * (run ? 2.0f : 1.0f) * sens;
 
+    /* Clamped, because the stick reads PAST its nominal 80.
+     *
+     * The octagonal gate lets a healthy stick reach the mid-80s on the
+     * cardinals, so dividing by 80 alone yields magnitudes above 1 and
+     * D_PlayerInput's `fwd * 50` running becomes a forwardmove above 50.
+     * Doom reads that as a cheat: G_Ticker flags anything over
+     * TURBOTHRESHOLD (0x32) and announces "Green: is turbo!" once every
+     * 128 tics, which is why it looked like a random message rather than
+     * something the player was doing. It also meant running was a few
+     * percent faster than vanilla, which is the part nobody would have
+     * reported. */
     float fwd  = in.stick_y / 80.0f;
-    float turn = -in.stick_x / 80.0f * TURN_FULL;
+    float turn_x = -in.stick_x / 80.0f;
+    if (fwd    >  1.0f) fwd    =  1.0f;
+    if (fwd    < -1.0f) fwd    = -1.0f;
+    if (turn_x >  1.0f) turn_x =  1.0f;
+    if (turn_x < -1.0f) turn_x = -1.0f;
+
+    float turn = turn_x * TURN_FULL;
     if (fabsf(fwd)  < 0.08f) fwd = 0.0f;        /* stick deadzone */
     if (fabsf(turn) < TURN_FULL * 0.08f) turn = 0.0f;
 
