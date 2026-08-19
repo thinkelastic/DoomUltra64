@@ -439,6 +439,13 @@ N64_CFLAGS += -DR_BILINEAR=$(BILINEAR)
 SOUND ?= 1
 N64_CFLAGS += -DD_SOUND=$(SOUND)
 
+# MODTEST=1 drives a mod switch from the title screen a few seconds in, so
+# the in-place WAD rebuild is exercised without a card full of mods. MENUTEST
+# cannot do it: every value that reaches the mods list starts a game first,
+# and a started game is what the picker refuses.
+MODTEST ?= 0
+N64_CFLAGS += -DD_MODTEST=$(MODTEST)
+
 LEVELTEST ?= 0
 N64_CFLAGS += -DD_LEVELTEST=$(LEVELTEST)
 
@@ -1123,7 +1130,7 @@ $(BUILD_DIR)/src/r_fastmath.o: N64_CFLAGS += -fno-builtin
 # w_n64/i_n64 shims rather than by porting d_main.c and its dependencies.
 #
 # This makes the project GPL-2: Doom's source is GPL and this links against it.
-src += src/w_n64.c src/i_n64.c src/v_draw.c src/d_ui.c src/i_sound_n64.c src/mus_n64.c src/doom/sounds.c src/d_bridge.c src/d_verify.c src/r_ssdata.c
+src += src/w_n64.c src/i_n64.c src/v_draw.c src/d_ui.c src/i_sound_n64.c src/mus_n64.c src/doom/sounds.c src/d_bridge.c src/d_verify.c src/d_mod.c src/r_ssdata.c
 src += src/doom/m_fixed.c src/doom/m_bbox.c src/doom/tables.c src/doom/z_zone.c
 src += src/doom/p_setup.c
 
@@ -1194,6 +1201,21 @@ assets_conv = $(FS)/playpal.tlut
 # built it -- and the player supplies, or swaps, their own.
 EXTWAD ?= 0
 
+# PWAD=path/to/mod.wad bakes a mod into the cartridge.
+#
+# Two halves, and both are needed. Its textures, flats, sprites and sounds go
+# through wad2n64 stacked on top of the IWAD, so the mod's own art is in the
+# ROM -- without this a mod's custom walls come up missing, because the
+# runtime resolves art by NAME against files baked at build time and can no
+# more invent a texture than it can invent a level. Its lumps are also copied
+# into the filesystem as mod.wad, which is where the runtime reads its MAPS
+# from; see D_ModStack.
+#
+# A mod on the CARD needs no rebuild and gets only the first half -- new maps
+# drawn with stock art. This is the other trade: perfect fidelity for a ROM
+# per mod.
+PWAD ?=
+
 # The IWAD ships in the ROM itself. It is far too large for RDRAM (14 MB
 # against 8), so lumps are streamed off the cartridge on demand. Kept out of
 # the stamp rule because it is a plain copy with its own dependency.
@@ -1232,7 +1254,14 @@ $(BUILD_DIR)/mkpvs: tools/mkpvs.c
 $(BUILD_DIR)/.assets.stamp: $(BUILD_DIR)/wad2n64 $(BUILD_DIR)/mkpvs $(WAD) $(BUILD_DIR)/.flags
 	@mkdir -p $(FS) $(BUILD_DIR)
 	@echo "    [WAD  ] $(WAD)"
-	@$(BUILD_DIR)/wad2n64 $(WAD) $(FS) --all $(if $(filter 0,$(CI4FLATS)),--no-ci4)
+	@$(BUILD_DIR)/wad2n64 $(WAD) $(FS) --all $(if $(filter 0,$(CI4FLATS)),--no-ci4) \
+	    $(if $(PWAD),--pwad $(PWAD))
+	@# The maps, which are read at runtime rather than baked. Removed when
+	@# no PWAD is set: the filesystem directory is packed as it stands, so
+	@# one left behind by an earlier PWAD= build would ride into every ROM
+	@# after it -- the same trap extwad-prune exists for.
+	@rm -f $(FS)/mod.wad
+	$(if $(PWAD),@cp $(PWAD) $(FS)/mod.wad && echo "    [PWAD ] $(PWAD)")
 	@if [ "$(PVS)" != "0" ]; then $(BUILD_DIR)/mkpvs $(WAD) $(FS); fi
 	@echo "    [SFX  ] converting effects to wav64"
 	@$(N64_INST)/bin/audioconv64 --wav-mono -o $(FS) $(FS)/*.wav
@@ -1263,7 +1292,7 @@ $(FS)/doom.wad: $(WAD)
 # an unchanged signature, rebuilt nothing, and relinked the -O3 objects into a
 # ROM claiming to be the baseline. That is the exact failure this mechanism
 # exists to prevent, reintroduced through the one door it was not watching.
-FLAGSIG := $(N64_CFLAGS) O3=$(O3)
+FLAGSIG := $(N64_CFLAGS) O3=$(O3) PWAD=$(PWAD)
 $(shell mkdir -p $(BUILD_DIR); \
         [ "$$(cat $(BUILD_DIR)/.flags 2>/dev/null)" = '$(FLAGSIG)' ] || \
         printf '%s' '$(FLAGSIG)' > $(BUILD_DIR)/.flags)

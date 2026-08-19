@@ -40,6 +40,9 @@
 #include "w_wad.h"
 #include "z_zone.h"
 
+/* DoomUltra64: the mods list and the WAD stack behind it. */
+#include "../d_mod.h"
+
 #include "r_local.h"
 
 
@@ -216,6 +219,9 @@ static void M_DrawReadThis2(void);
 static void M_DrawNewGame(void);
 static void M_DrawEpisode(void);
 static void M_DrawOptions(void);
+static void M_DrawMods(void);
+static void M_Mods(int choice);
+static void M_ModPick(int choice);
 static void M_DrawSound(void);
 static void M_DrawLoad(void);
 static void M_DrawSave(void);
@@ -347,6 +353,10 @@ enum
     joysens,
     joysens_slider,     /* spacer: the thermo below CONTROLLER lives here */
     soundvol,
+    /* Last on purpose. M_DrawOptions places every thermo at
+     * LINEHEIGHT * (index + 1), so an item inserted anywhere above would
+     * slide the CONTROLLER slider onto the wrong row. */
+    mods,
     opt_end
 } options_e;
 
@@ -385,7 +395,10 @@ menuitem_t OptionsMenu[]=
      * its item. Without this the CONTROLLER thermo landed on top of SOUND
      * VOLUME. status -1 keeps the cursor from stopping here. */
     {-1,"",		0,'\0'},
-    {1,"M_SVOL",	M_Sound,'s'}
+    {1,"M_SVOL",	M_Sound,'s'},
+    /* No patch for this one either: no IWAD has ever contained a graphic
+     * that says MODS. Written as text by M_DrawOptions, like CONTROLLER. */
+    {1,"",		M_Mods,'w'}
 };
 
 menu_t  OptionsDef =
@@ -397,6 +410,125 @@ menu_t  OptionsDef =
     60,37,
     0
 };
+
+/* --- mods ---------------------------------------------------------------
+ *
+ * A list of the .wad files sitting in the card's mods folder, plus the entry
+ * that turns them all off. Filled in when the menu opens rather than at boot,
+ * so a card swapped between sessions still lists what is actually on it.
+ *
+ * The names come off a FAT directory and are drawn as text: no IWAD contains
+ * a patch that says SIGIL.WAD, and a mod's file name is the only thing the
+ * player has to recognise it by.
+ */
+#define MOD_ITEM_MAX (D_MOD_MAX + 1)      /* + the "no mod" row */
+static menuitem_t ModsMenu[MOD_ITEM_MAX];
+
+menu_t  ModsDef =
+{
+    1,                  /* replaced by M_Mods before the menu is ever drawn */
+    &OptionsDef,
+    ModsMenu,
+    M_DrawMods,
+    50,45,
+    0
+};
+
+/* How many characters of a mod's name fit across the screen at the big
+ * font's 2x. Longer names are cut rather than allowed to run off the edge --
+ * the tail of a file name is rarely the part that identifies it. */
+#define MOD_LABEL_MAX 18
+
+static void M_ModLabel(int i, char *out, size_t cap)
+{
+    const char *nm = (i == 0) ? "NO MOD" : D_ModName(i - 1);
+    if (!nm) nm = "?";
+    snprintf(out, cap, "%.*s", MOD_LABEL_MAX, nm);
+}
+
+static void M_Mods(int choice)
+{
+    choice = 0;
+
+    /* Switching the WAD stack under a live game would leave every sector,
+     * side and thing pointing into lumps that no longer exist.
+     *
+     * The test is `usergame`, not "is a level up": the title screen runs the
+     * attract demos, so a level IS resident and being drawn for most of the
+     * time a player spends at the menu. usergame is what vanilla uses to
+     * mean a game the player is actually playing -- M_EndGame just above
+     * asks exactly the same question -- and a demo can be thrown away
+     * without anyone minding. */
+    if (usergame) {
+        M_StartMessage(DEH_String("you must end the game first!\n\npress a key."),
+                       NULL, false);
+        return;
+    }
+
+    D_ModScan();
+
+    const int n = D_ModCount();
+    for (int i = 0; i < n + 1 && i < MOD_ITEM_MAX; i++) {
+        ModsMenu[i].status  = 1;
+        ModsMenu[i].name[0] = '\0';       /* drawn as text by M_DrawMods */
+        ModsMenu[i].routine = M_ModPick;
+        ModsMenu[i].alphaKey = '\0';
+    }
+    ModsDef.numitems = (short)((n + 1 > MOD_ITEM_MAX) ? MOD_ITEM_MAX : n + 1);
+
+    /* Open on the row that is already playing, so the menu says what is
+     * loaded without the player having to read for it. */
+    ModsDef.lastOn = 0;
+    for (int i = 0; i < n; i++)
+        if (!strcasecmp(D_ModName(i), D_ModSelected())) { ModsDef.lastOn = (short)(i + 1); break; }
+
+    M_SetupNextMenu(&ModsDef);
+}
+
+static void M_DrawMods(void)
+{
+    M_WriteTextBig(ModsDef.x, 15, "MODS");
+
+    if (D_ModCount() == 0) {
+        /* An empty folder and a missing folder look the same from here, and
+         * the answer to both is the same sentence. */
+        M_WriteText(ModsDef.x, ModsDef.y + LINEHEIGHT * 2,
+                    "PUT .WAD FILES IN");
+        M_WriteText(ModsDef.x, ModsDef.y + LINEHEIGHT * 2 + 10,
+                    "SD:/DOOM/MODS/");
+    }
+
+    char label[MOD_LABEL_MAX + 1];
+    for (int i = 0; i < ModsDef.numitems; i++) {
+        M_ModLabel(i, label, sizeof label);
+        M_WriteTextBig(ModsDef.x, ModsDef.y + LINEHEIGHT * i, label);
+    }
+}
+
+static void M_ModPick(int choice)
+{
+    void D_StartTitle(void);
+
+    const char *want = (choice == 0) ? "" : D_ModName(choice - 1);
+    if (!want) return;
+
+    /* Back to the title page BEFORE the stack is touched. An attract demo is
+     * almost certainly playing, and it reads its level through the very lump
+     * table about to be rebuilt; ending it first means nothing is mid-read
+     * when the directory goes away. */
+    M_ClearMenus();
+    D_StartTitle();
+
+    if (!D_ModApply(want)) {
+        M_StartMessage(DEH_String("that mod could not be loaded.\n\npress a key."),
+                       NULL, false);
+        return;
+    }
+
+    /* And again, so the title art itself is re-read from the new stack
+     * rather than left as whatever the old one had cached. */
+    D_StartTitle();
+}
 
 //
 // Read This! MENU 1 & 2
@@ -1070,6 +1202,8 @@ void M_DrawOptions(void)
                    "CONTROLLER");
     M_DrawThermo(OptionsDef.x, OptionsDef.y + LINEHEIGHT * (joysens + 1),
                  10, joySensitivity);
+
+    M_WriteTextBig(OptionsDef.x, OptionsDef.y + LINEHEIGHT * mods, "MODS");
 }
 
 void M_Options(int choice)

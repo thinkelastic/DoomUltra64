@@ -23,14 +23,39 @@
 
 typedef struct {
     char     name[WAD_LUMP_NAME_LEN + 1];   /* NUL-terminated for convenience */
-    uint32_t offset;                        /* byte offset within the WAD */
+    uint32_t offset;                        /* byte offset within its WAD */
     uint32_t size;
+    uint8_t  src;                           /* which open WAD holds it */
 } wad_lump_t;
+
+/* How many WADs can be stacked at once. Doom's own -file takes a list; here
+ * it is an IWAD plus a mod, and the spare slots cost 16 bytes each. */
+#define WAD_MAX_SRC 8
 
 /* Mount the WAD from the ROM filesystem and read its directory into RAM.
  * The directory is small (2305 lumps x 16 B = 36 KB for Ultimate Doom) and is
- * consulted constantly, so it stays resident; lump payloads do not. */
+ * consulted constantly, so it stays resident; lump payloads do not.
+ *
+ * This closes anything already open and starts a fresh stack: it is the IWAD
+ * call. Mods go on top of it with wad_add. */
 bool wad_open(const char *path);
+
+/* Stack another WAD on top of the ones already open, as Doom's -file does.
+ *
+ * The new directory is appended, and since wad_find searches backwards a
+ * later WAD's lump shadows an earlier one of the same name -- which is the
+ * whole of Doom's PWAD rule. Map lumps follow their marker, so a PWAD that
+ * replaces MAP01 brings its own THINGS and LINEDEFS along with it.
+ *
+ * Must be called before W_N64_Init, which snapshots the directory. */
+bool wad_add(const char *path);
+
+/* Close every open WAD and drop the merged directory. The mod picker calls
+ * this before rebuilding the stack; nothing else needs it. */
+void wad_reset(void);
+
+/* How many WADs are currently stacked, IWAD included. */
+int  wad_num_sources(void);
 
 int  wad_num_lumps(void);
 const wad_lump_t *wad_lump(int index);

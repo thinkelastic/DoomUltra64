@@ -87,6 +87,34 @@ Any GUS-style instrument set works. Expect a few minutes and ~200 MB per game.
 
 ---
 
+## Mods
+
+Drop add-on `.wad` files into a `mods` folder beside the game:
+
+```
+sd:/Doom/mods/
+  sigil.wad
+  hellrevealed.wad
+```
+
+Then pick one in **Options → MODS**. The list shows what's on the card; choose
+one and the game reloads with it, choose **NO MOD** to go back. Your choice is
+remembered next time you switch on. You'll need to be at the title screen —
+the game won't swap a mod out from under a level you're playing.
+
+**What works:** new levels. That's most of what mods are, and megawads play
+start to finish.
+
+**What doesn't:** a mod's own textures, monsters and sounds. Those live in the
+cartridge, baked in when the ROM was built, so a mod that brings custom art
+shows the stock art instead — or a blank wall where a texture should be. It's
+a limit of putting Doom on a cartridge, not something the mod got wrong.
+
+If you can build (below), `./build.sh PWAD=sigil.wad` makes a ROM with that
+mod's art baked in properly, and then everything works.
+
+---
+
 ## What it adds
 
 The N64's graphics chip has room to spare where Doom's original renderer
@@ -119,6 +147,7 @@ The first build takes a few minutes.
 ./build.sh                        # -> doom.z64
 ./build.sh GAME=doom2             # -> doom2.z64
 ./build.sh EXTWAD=1               # reads the .WAD from the card
+./build.sh PWAD=sigil.wad         # bakes a mod's art in, so all of it works
 ./build.sh release                # -> DoomUltra64-<version>.zip
 ./build.sh test                   # host-side checks
 ./run.sh                          # run in ares, screenshot to shots/

@@ -1107,6 +1107,8 @@ boolean d_level_resident_set(boolean v) { return d_level_resident = v; }
  * and the volumes in doomstat.h. Declared here rather than pulling both
  * headers in, which this file deliberately does not do. */
 extern int detailLevel, showMessages, sfxVolume, musicVolume, screenblocks;
+const char *D_ModSelected(void);
+void        D_ModSetSelected(const char *name);
 extern int joySensitivity;
 void S_SetSfxVolume(int volume);
 void S_SetMusicVolume(int volume);
@@ -1114,23 +1116,44 @@ void S_SetMusicVolume(int volume);
 void D_OptionsSave(void)
 {
     boolean D_OptionsWrite(const char *text);
-    char buf[192];
+    char buf[320];
     snprintf(buf, sizeof buf,
              "# DoomUltra64 settings, shared with Doom2Ultra64\n"
              "joysens %d\n"
              "detail %d\n"
              "messages %d\n"
              "sfx %d\n"
-             "music %d\n",
+             "music %d\n"
+             "mod %s\n",
              joySensitivity, detailLevel, showMessages, sfxVolume,
-             musicVolume);
+             musicVolume, D_ModSelected());
     D_OptionsWrite(buf);
+}
+
+/* The selected mod, and nothing else.
+ *
+ * Boot has to stack the mod BEFORE W_N64_Init snapshots the lump directory,
+ * which is long before D_OptionsLoad runs -- that one sets volumes and view
+ * size, and needs a game that already exists. So the mod key is read on its
+ * own here, and again with the rest below. */
+void D_OptionsLoadMod(void)
+{
+    boolean D_OptionsRead(char *buf, size_t cap);
+    char buf[320];
+    if (!D_OptionsRead(buf, sizeof buf)) return;
+
+    for (char *p = buf; p && *p; ) {
+        char *nl = strchr(p, '\n');
+        if (nl) *nl = '\0';
+        if (!strncmp(p, "mod ", 4)) D_ModSetSelected(p + 4);
+        p = nl ? nl + 1 : NULL;
+    }
 }
 
 void D_OptionsLoad(void)
 {
     boolean D_OptionsRead(char *buf, size_t cap);
-    char buf[192];
+    char buf[320];
     if (!D_OptionsRead(buf, sizeof buf)) return;
 
     for (char *p = buf; p && *p; ) {
@@ -1145,6 +1168,7 @@ void D_OptionsLoad(void)
             musicVolume = v < 0 ? 0 : (v > 15 ? 15 : v);
         else if (sscanf(p, "joysens %d", &v) == 1)
             joySensitivity = v < 0 ? 0 : (v > 9 ? 9 : v);
+        else if (!strncmp(p, "mod ", 4)) D_ModSetSelected(p + 4);
         p = nl ? nl + 1 : NULL;
     }
 

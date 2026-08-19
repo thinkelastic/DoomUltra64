@@ -258,6 +258,11 @@ void D_SetDataDir(const char *dir)
     if (dir) snprintf(data_dir, sizeof data_dir, "%s", dir);
 }
 
+/* Where the game's files were found, "" before the IWAD resolves. The mod
+ * loader wants the same folder for the same reason saves do: it is the only
+ * thing the console knows about where it was launched from. */
+const char *D_DataDir(void) { return data_dir; }
+
 /* --- shared options file -------------------------------------------------
  *
  * Settings live in the ROM FOLDER, not in saves/ and not per game: Doom and

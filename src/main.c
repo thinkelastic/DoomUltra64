@@ -29,6 +29,7 @@
 #include "r_sprite.h"
 #include "r_vapor.h"
 #include "wad.h"
+#include "d_mod.h"
 #include "r_wall.h"
 #include "r_wipe.h"
 #include "scene.h"
@@ -344,17 +345,31 @@ static void scene_init(void)
                  * arrangement a player is likely to have. */
                 { void D_SetDataDir(const char *dir);
                   D_SetDataDir(iwad_dirs[d]); }
+                D_ModSetIwad(path);
                 break;
             }
         }
 
     /* The copy inside the cartridge, when one was built in. */
-    if (!wad_ok && (wad_ok = wad_open("/doom.wad")))
+    if (!wad_ok && (wad_ok = wad_open("/doom.wad"))) {
         debugf("wad: using the embedded /doom.wad\n");
+        D_ModSetIwad("/doom.wad");
+    }
 
     if (wad_ok) {
         void D_LoadLevel(int episode, int map);
         void D_PlayerView(float *x, float *y, float *z, float *angle);
+
+        /* Mods go on before the lump table is built, never after: W_N64_Init
+         * snapshots the merged directory, and Doom's whole PWAD rule is that
+         * a later entry of the same name shadows an earlier one. Stacking
+         * afterwards would leave the game holding the IWAD's copy of every
+         * lump the mod meant to replace. */
+        {
+            void D_OptionsLoadMod(void);
+            D_OptionsLoadMod();
+            D_ModStack();
+        }
 
         Z_Init();
         W_N64_Init();
@@ -445,6 +460,16 @@ static void scene_init(void)
             M_StartControlPanel();
             D_TestMenuKey(0xaf);        /* KEY_DOWNARROW */
             D_TestMenuKey(13);          /* ENTER on Options */
+#endif
+#if D_MENUTEST == 8
+            /* On to the mods list: Options, then down to the last row. The
+             * slider's spacer row has status -1 and the cursor steps over
+             * it, so five presses cover six items. */
+            M_StartControlPanel();
+            D_TestMenuKey(0xaf);        /* KEY_DOWNARROW, onto Options */
+            D_TestMenuKey(13);          /* ENTER */
+            for (int i = 0; i < 5; i++) D_TestMenuKey(0xaf);
+            D_TestMenuKey(13);          /* ENTER on MODS */
 #endif
 #if D_MENUTEST == 4
             /* Back to the menu and into Load, to capture the slot list. */
@@ -1423,6 +1448,49 @@ int main(void)
             if (countdown > 0 && --countdown == 0) {
                 debugf("menutest: opening the automap\n");
                 D_TestMenuKey(9);       /* KEY_TAB */
+            }
+        }
+#endif
+#if D_MODTEST
+        /* Drive an actual mod switch, which MENUTEST cannot: every value
+         * that reaches the mods list also starts a game, and a started game
+         * is exactly what the picker refuses. At the title screen usergame
+         * is false, so this exercises the whole rebuild -- wad_reset, the
+         * IWAD re-open, W_N64_Init over the top of a live game, the cache
+         * drop and the palette. Picking NO MOD is enough: the path is
+         * identical whatever is chosen. */
+        {
+            void M_StartControlPanel(void);
+            void D_TestMenuKey(int key);
+            static int countdown = 240;
+            if (countdown > 0 && --countdown == 0) {
+                debugf("modtest: switching mods from the title screen\n");
+                M_StartControlPanel();
+                D_TestMenuKey(0xaf);    /* Options */
+                D_TestMenuKey(13);
+                for (int i = 0; i < 5; i++) D_TestMenuKey(0xaf);
+                D_TestMenuKey(13);      /* ENTER on MODS */
+                D_TestMenuKey(13);      /* ENTER on NO MOD */
+                debugf("modtest: switch returned, still alive\n");
+            }
+        }
+#endif
+#if D_MENUTEST == 9
+        /* The mods list from INSIDE a level, which must refuse: the keys
+         * above are pressed at boot, before the level is resident, so the
+         * D_InLevel guard is not exercised by MENUTEST=8 at all. This waits
+         * for the level to exist first. */
+        {
+            void M_StartControlPanel(void);
+            void D_TestMenuKey(int key);
+            static int countdown = 150;
+            if (countdown > 0 && --countdown == 0) {
+                debugf("menutest: mods list from inside a level\n");
+                M_StartControlPanel();
+                D_TestMenuKey(0xaf);    /* Options */
+                D_TestMenuKey(13);
+                for (int i = 0; i < 5; i++) D_TestMenuKey(0xaf);
+                D_TestMenuKey(13);      /* ENTER on MODS */
             }
         }
 #endif

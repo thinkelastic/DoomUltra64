@@ -62,8 +62,21 @@ static int    numlumps_cached;
 static struct { const void *ptr; lumpindex_t lump; } static_map[W_STATIC_MAP_MAX];
 static int static_map_count;
 
+/* Re-runnable, because the mod picker rebuilds the WAD stack while the game
+ * is up. The three tables are freed and taken again at the new size.
+ *
+ * What makes this safe is that the IWAD is always re-opened FIRST and a mod
+ * only ever appends: lump indices 0..n-1 name the same lumps before and
+ * after, so every index Doom cached earlier -- the UI's patches above all --
+ * still points where it did. Only the appended tail changes. */
+static lumpinfo_t *lump_recs;
+
 void W_N64_Init(void)
 {
+    if (lumpcache) { Z_Free(lumpcache); lumpcache = NULL; }
+    if (lump_recs) { Z_Free(lump_recs); lump_recs = NULL; }
+    if (lumpinfo)  { Z_Free(lumpinfo);  lumpinfo  = NULL; }
+
     numlumps_cached = wad_num_lumps();
     numlumps        = (unsigned int)numlumps_cached;
 
@@ -71,6 +84,7 @@ void W_N64_Init(void)
     memset(lumpcache, 0, numlumps_cached * sizeof *lumpcache);
 
     lumpinfo_t  *recs = Z_Malloc(numlumps_cached * sizeof *recs, PU_STATIC, NULL);
+    lump_recs = recs;
     lumpinfo = Z_Malloc(numlumps_cached * sizeof *lumpinfo, PU_STATIC, NULL);
 
     for (int i = 0; i < numlumps_cached; i++) {

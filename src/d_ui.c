@@ -190,7 +190,7 @@ static void post_key(int key, boolean down)
         G_Responder(&ev);
 }
 
-#if D_MENUTEST
+#if D_MENUTEST || D_MODTEST
 /* Press and release a key exactly as a controller button would, menu first
  * and the game second -- reaching only M_Responder meant keys the game owns,
  * such as the automap toggle, could not be driven from a test at all. */

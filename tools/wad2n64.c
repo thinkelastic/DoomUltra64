@@ -104,6 +104,41 @@ static int wad_open(wad_t *w, const char *path) {
     return 0;
 }
 
+/* Stack a PWAD on top of an already-open WAD.
+ *
+ * The two files' bytes go in one buffer and the two directories in one array,
+ * mod last -- which is all "later wins" needs, because wad_lump already
+ * searches backwards and the emitters overwrite a file when they meet its
+ * name a second time. It is the same merge src/wad.c performs on the console,
+ * for the same reason, and it is what puts a mod's own textures and sprites
+ * in the ROM instead of leaving its walls blank.
+ */
+static void wad_append(wad_t *w, const char *path) {
+    wad_t p;
+    wad_open(&p, path);
+
+    const size_t base = w->size;
+    uint8_t *grown = realloc(w->data, w->size + p.size);
+    if (!grown) die("out of memory merging '%s'", path);
+    memcpy(grown + base, p.data, p.size);
+    w->data = grown;
+    w->size += p.size;
+
+    waddirent_t *dir = realloc(w->dir,
+                               (size_t)(w->numlumps + p.numlumps) * sizeof *dir);
+    if (!dir) die("out of memory merging '%s' directory", path);
+    w->dir = dir;
+    for (int32_t i = 0; i < p.numlumps; i++) {
+        w->dir[w->numlumps + i] = p.dir[i];
+        w->dir[w->numlumps + i].filepos += (int32_t)base;
+    }
+    w->numlumps += p.numlumps;
+
+    printf("wad2n64: + %s (%d lumps, %d total)\n", path, p.numlumps, w->numlumps);
+    free(p.data);
+    free(p.dir);
+}
+
 /* Doom lump names are 8 bytes, upper-case, NUL-padded only if shorter. */
 static int lump_name_eq(const char *lump8, const char *want) {
     for (int i = 0; i < 8; i++) {
@@ -563,19 +598,19 @@ static void emit_flat_ci4(const char *outdir, const char *name,
 }
 
 static void emit_all_flats(wad_t *w, const char *outdir) {
-    int start = -1, end = -1;
-    for (int32_t i = 0; i < w->numlumps; i++) {
-        if (lump_name_eq(w->dir[i].name, "F_START")) start = i;
-        if (lump_name_eq(w->dir[i].name, "F_END"))   end = i;
-    }
-    if (start < 0 || end < 0 || end <= start) {
-        printf("  [FLAT ] no F_START/F_END markers, skipping flats\n");
-        return;
-    }
-
+    /* Every marker region, not just the last one. A merged stack has one per
+     * WAD, and taking only the final pair -- which is what a "remember the
+     * last F_START" scan does -- would emit the mod's flats and silently drop
+     * the IWAD's. Later regions still win, because emitting a name twice
+     * overwrites the first file. PWADs conventionally open theirs FF_START. */
     uint8_t small[32 * 32];
-    int total = 0, ci4 = 0;
-    for (int32_t i = start + 1; i < end; i++) {
+    int total = 0, ci4 = 0, inside = 0, seen = 0;
+    for (int32_t i = 0; i < w->numlumps; i++) {
+        if (lump_name_eq(w->dir[i].name, "F_START") ||
+            lump_name_eq(w->dir[i].name, "FF_START")) { inside = 1; seen = 1; continue; }
+        if (lump_name_eq(w->dir[i].name, "F_END") ||
+            lump_name_eq(w->dir[i].name, "FF_END"))   { inside = 0; continue; }
+        if (!inside) continue;
         if (w->dir[i].size != 4096) continue;          /* markers, oddities */
 
         order_add(w->dir[i].name);
@@ -607,6 +642,10 @@ static void emit_all_flats(wad_t *w, const char *outdir) {
                 small[y * 32 + x] = src[(y * 2) * 64 + (x * 2)];
         emit_texture_quiet(outdir, fname, small, 32, 32, 0);
         total++;
+    }
+    if (!seen) {
+        printf("  [FLAT ] no F_START/F_END markers, skipping flats\n");
+        return;
     }
     printf("  [FLAT ] %d flats: %d full-res 64x64 CI4, %d downsampled to "
            "32x32 CI8 into %s/\n", total, ci4, total - ci4, outdir);
@@ -753,19 +792,16 @@ static void emit_all_ui(wad_t *w, const char *outdir) {
 }
 
 static void emit_all_sprites(wad_t *w, const char *outdir) {
-    int start = -1, end = -1;
-    for (int32_t i = 0; i < w->numlumps; i++) {
-        if (lump_name_eq(w->dir[i].name, "S_START")) start = i;
-        if (lump_name_eq(w->dir[i].name, "S_END"))   end = i;
-    }
-    if (start < 0 || end < 0 || end <= start) {
-        printf("  [SPR  ] no S_START/S_END markers, skipping sprites\n");
-        return;
-    }
-
-    int total = 0;
+    /* Every marker region -- see emit_all_flats for why one pair is not
+     * enough once a mod is stacked on top. */
+    int total = 0, inside = 0, seen = 0;
     size_t bytes = 0;
-    for (int32_t i = start + 1; i < end; i++) {
+    for (int32_t i = 0; i < w->numlumps; i++) {
+        if (lump_name_eq(w->dir[i].name, "S_START") ||
+            lump_name_eq(w->dir[i].name, "SS_START")) { inside = 1; seen = 1; continue; }
+        if (lump_name_eq(w->dir[i].name, "S_END") ||
+            lump_name_eq(w->dir[i].name, "SS_END"))   { inside = 0; continue; }
+        if (!inside) continue;
         if (w->dir[i].size < 12) continue;
 
         const uint8_t *patch = w->data + w->dir[i].filepos;
@@ -815,6 +851,10 @@ static void emit_all_sprites(wad_t *w, const char *outdir) {
         free(mask);
         total++;
     }
+    if (!seen) {
+        printf("  [SPR  ] no S_START/S_END markers, skipping sprites\n");
+        return;
+    }
     printf("  [SPR  ] %d sprite frames, %.1f MB into %s/\n",
            total, bytes / 1e6, outdir);
 }
@@ -825,10 +865,13 @@ int main(int argc, char **argv) {
     if (argc < 4) {
         fprintf(stderr,
             "usage: wad2n64 <doom.wad> <outdir> <TEXTURE> [TEXTURE...]\n"
-            "       wad2n64 <doom.wad> <outdir> --all\n"
+            "       wad2n64 <doom.wad> <outdir> --all [--pwad mod.wad]\n"
             "\n"
             "Composes Doom wall textures into flat CI8 data for the RDP and\n"
-            "emits the shared PLAYPAL TLUT.\n");
+            "emits the shared PLAYPAL TLUT.\n"
+            "\n"
+            "--pwad stacks a mod on top, so its textures, flats, sprites and\n"
+            "sounds are baked in place of the ones it replaces.\n");
         return 1;
     }
 
@@ -838,6 +881,10 @@ int main(int argc, char **argv) {
     wad_t wad;
     wad_open(&wad, wadpath);
     printf("wad2n64: %s (%d lumps)\n", wadpath, wad.numlumps);
+
+    /* Before any emitter runs: they all read through the merged directory. */
+    for (int a = 3; a + 1 < argc; a++)
+        if (strcmp(argv[a], "--pwad") == 0) wad_append(&wad, argv[a + 1]);
 
     emit_tlut(&wad, outdir);
 
@@ -859,6 +906,13 @@ int main(int argc, char **argv) {
     }
 
     for (int i = 3; i < argc; i++) {
+        /* Options and their operands are not texture names. Without this a
+         * stray --pwad on the single-texture path would be looked up as a
+         * texture and die on a name no WAD contains. */
+        if (strncmp(argv[i], "--", 2) == 0) {
+            if (strcmp(argv[i], "--pwad") == 0) i++;
+            continue;
+        }
         int tw, th, masked;
         uint8_t *texels = compose_texture(&wad, argv[i], &tw, &th, &masked);
         emit_texture(outdir, argv[i], texels, tw, th, masked);
