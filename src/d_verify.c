@@ -114,6 +114,23 @@ void D_LevelPostSetup(void)
     }
     d_level_resident_set(true);
 
+#if R_RUNTIMEART
+    { extern int p_art_us, p_art_count;
+      extern int r_wadart_io_us, r_wadart_io_n;
+      extern int r_wadart_find_us, r_wadart_draw_us, r_wadart_mask_us, r_wadart_build_us;
+      debugf("art: %d composed, %d ms (io %d, find %d, draw %d, mask %d, build %d)\n",
+             p_art_count, p_art_us / 1000, r_wadart_io_us / 1000,
+             r_wadart_find_us / 1000, r_wadart_draw_us / 1000,
+             r_wadart_mask_us / 1000, r_wadart_build_us / 1000); }
+#endif
+#if R_WADART_VERIFY
+    /* Cumulative: sprites resolve lazily as they are first drawn, so a
+     * level's count keeps climbing after its geometry is up. */
+    { extern int r_wadart_verify_ok, r_wadart_verify_bad;
+      debugf("wadart verify: %d identical, %d MISMATCHED\n",
+             r_wadart_verify_ok, r_wadart_verify_bad); }
+#endif
+
     if (gamemode == commercial)
         debugf("level MAP%02d: %d sectors, %d segs, zone free %d KB\n",
                gamemap, numsectors, numsegs, Z_FreeMemory() / 1024);

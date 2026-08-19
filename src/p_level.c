@@ -7,6 +7,7 @@
 
 #include "mem.h"
 #include "wad.h"
+#include "r_wadart.h"
 
 /* On-disk record sizes, from the Doom specs. Checked against the lump size so
  * a mismatch is caught at load rather than as corrupt geometry later. */
@@ -145,6 +146,14 @@ static int      order_nflats, order_ntex;
 
 static void anim_load_order(void)
 {
+#if R_RUNTIMEART
+    /* The order comes from the WAD's own TEXTURE1 and flat markers, which is
+     * where texorder.bin got it -- the converter wrote that file only because
+     * nothing on the console used to read either. Now something does. */
+    order_nflats = r_wadart_numflats();
+    order_ntex   = r_wadart_numtextures();
+    order_names  = (uint8_t *)(order_ntex || order_nflats ? (void *)1 : NULL);
+#else
     if (order_names) return;
 
     int size = 0;
@@ -156,15 +165,20 @@ static void anim_load_order(void)
     if (2 + flatbytes + 2 > size) { order_nflats = 0; return; }
     order_ntex = (raw[2 + flatbytes] << 8) | raw[3 + flatbytes];
     order_names = raw;
+#endif
 }
 
 static const char *order_name(int section_flats, int i)
 {
+#if R_RUNTIMEART
+    return section_flats ? r_wadart_flatname(i) : r_wadart_texname(i);
+#else
     if (!order_names) return NULL;
     if (section_flats)
         return i < order_nflats ? (const char *)(order_names + 2 + i * 8) : NULL;
     return i < order_ntex
         ? (const char *)(order_names + 4 + order_nflats * 8 + i * 8) : NULL;
+#endif
 }
 
 static int order_find(int section_flats, const char *name)
@@ -172,6 +186,7 @@ static int order_find(int section_flats, const char *name)
     const int n = section_flats ? order_nflats : order_ntex;
     for (int i = 0; i < n; i++) {
         const char *c = order_name(section_flats, i);
+        if (!c) continue;
         int eq = 1;
         for (int k = 0; k < 8; k++) {
             const char a = c[k], b = name[k] ? name[k] : 0;
@@ -294,6 +309,52 @@ R_HOT dt64_tex_t *p_level_texture(int index)
 int p_level_numtextures(void) { return lvl_numtex; }
 
 /* Resolve an 8-byte sidedef texture name, loading it on first reference. */
+/* One piece of art, from wherever this build gets it.
+ *
+ * RUNTIMEART composes it out of the WAD on the spot, which is what lets a
+ * single ROM play any WAD on the card; otherwise it is read from the .dt64
+ * the converter baked. The prefix names Doom's namespace -- "" wall, f_
+ * flat, s_ sprite, u_ menu art -- and m_/q_/n_ are the mip levels, which the
+ * converter emitted as separate files and the composer derives. */
+/* What composing costs, in microseconds and pieces, cumulative. The whole
+ * trade for a ROM that plays any WAD is paid here, so it is worth a number
+ * rather than an impression. */
+int p_art_us, p_art_count;
+
+static bool art_load(dt64_tex_t *t, const char *prefix, const char *nm)
+{
+#if R_RUNTIMEART
+    const uint32_t t0 = TICKS_READ();
+    bool ok;
+    switch (prefix[0]) {
+    case '\0': ok = r_wadart_texture(t, nm, 0); break;
+    case 'm':   ok = r_wadart_texture(t, nm, 1); break;
+    case 'q':   ok = r_wadart_texture(t, nm, 2); break;
+    case 'f':   ok = r_wadart_flat(t, nm);       break;
+    case 's':   ok = r_wadart_sprite(t, nm, 0);  break;
+    case 'n':   ok = r_wadart_sprite(t, nm, 1);  break;
+    case 'u':   ok = r_wadart_ui(t, nm);         break;
+    default:    r_wadart_absent = 1; ok = false; break;
+    }
+    p_art_us += (int)TICKS_TO_US(TICKS_DISTANCE(t0, TICKS_READ()));
+    if (ok) p_art_count++;
+    return ok;
+#else
+    char path[32];
+    snprintf(path, sizeof path, "/%s%s.dt64", prefix, nm);
+    return dt64_load(t, path);
+#endif
+}
+
+static int art_absent(void)
+{
+#if R_RUNTIMEART
+    return r_wadart_absent;
+#else
+    return dt64_last_absent;
+#endif
+}
+
 static int tex_resolve_pfx(const uint8_t *name8, const char *prefix);
 static int tex_lookup_pfx(const uint8_t *name8, const char *prefix);
 
@@ -399,7 +460,7 @@ static int tex_resolve_pfx(const uint8_t *name8, const char *prefix)
 
     char path[32];
     snprintf(path, sizeof path, "/%s%s.dt64", prefix, nm);
-    if (!dt64_load(&lvl_tex[lvl_numtex], path)) {
+    if (!art_load(&lvl_tex[lvl_numtex], prefix, nm)) {
         /* Wall textures always exist in a converted set; a miss here is a
          * real fault worth naming. Sprite probes miss by design and stay
          * quiet. */
@@ -416,7 +477,7 @@ static int tex_resolve_pfx(const uint8_t *name8, const char *prefix)
         /* Only a genuinely absent file is remembered. A failed read or a
          * momentarily full arena must stay retryable, or one bad cartridge
          * read hides that sprite for the whole level. */
-        if (!dt64_last_absent) {
+        if (!art_absent()) {
             debugf("tex load failed (retryable): %s\n", path);
             return -1;
         }
@@ -432,6 +493,9 @@ static int tex_resolve_pfx(const uint8_t *name8, const char *prefix)
         lvl_numtex++;
         return -1;
     }
+#if R_WADART_VERIFY
+    r_wadart_verify(prefix, nm, &lvl_tex[lvl_numtex]);
+#endif
     memcpy(lvl_texname[lvl_numtex], &key, 12);
     lvl_texkey[lvl_numtex] = key;
     tex_hash[h] = (int16_t)lvl_numtex;
@@ -450,7 +514,10 @@ static int tex_resolve_pfx(const uint8_t *name8, const char *prefix)
          * at less than half size. */
         char mpath[36];
         snprintf(mpath, sizeof mpath, "/n_%s.dt64", nm);
-        if (dt64_load(&lvl_tex[lvl_numtex], mpath)) {
+        if (art_load(&lvl_tex[lvl_numtex], "n_", nm)) {
+#if R_WADART_VERIFY
+            r_wadart_verify("n", nm, &lvl_tex[lvl_numtex]);
+#endif
             lvl_tex[idx].mip = &lvl_tex[lvl_numtex];
             snprintf(lvl_texname[lvl_numtex], sizeof lvl_texname[0], "^%s", nm);
             lvl_numtex++;
@@ -465,7 +532,11 @@ static int tex_resolve_pfx(const uint8_t *name8, const char *prefix)
         for (unsigned l = 0; l < sizeof lvlpfx && lvl_numtex < MAX_LEVEL_TEX; l++) {
             char mpath[32];
             snprintf(mpath, sizeof mpath, "/%c_%s.dt64", lvlpfx[l], nm);
-            if (!dt64_load(&lvl_tex[lvl_numtex], mpath)) break;
+            { const char p2[3] = { lvlpfx[l], '_', 0 };
+              if (!art_load(&lvl_tex[lvl_numtex], p2, nm)) break; }
+#if R_WADART_VERIFY
+            { const char p2[2] = { lvlpfx[l], 0 }; r_wadart_verify(p2, nm, &lvl_tex[lvl_numtex]); }
+#endif
             lvl_tex[prev].mip = &lvl_tex[lvl_numtex];
             snprintf(lvl_texname[lvl_numtex], sizeof lvl_texname[0], "~%u%s",
                      l, nm);

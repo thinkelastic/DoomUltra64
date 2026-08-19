@@ -102,16 +102,17 @@ one and the game reloads with it, choose **NO MOD** to go back. Your choice is
 remembered next time you switch on. You'll need to be at the title screen —
 the game won't swap a mod out from under a level you're playing.
 
-**What works:** new levels. That's most of what mods are, and megawads play
-start to finish.
+New levels work, and so do a mod's own textures, floors, monsters and menu
+art — the cartridge reads Doom's art straight from the WAD as each level
+loads, so there's nothing to convert and nothing to rebuild.
 
-**What doesn't:** a mod's own textures, monsters and sounds. Those live in the
-cartridge, baked in when the ROM was built, so a mod that brings custom art
-shows the stock art instead — or a blank wall where a texture should be. It's
-a limit of putting Doom on a cartridge, not something the mod got wrong.
+The one thing still baked in is **sound effects**, so a mod's custom sounds
+play as the stock ones. Everything you can see is the mod's own.
 
-If you can build (below), `./build.sh PWAD=sigil.wad` makes a ROM with that
-mod's art baked in properly, and then everything works.
+The same applies to the game itself: any Doom-format IWAD works, so
+[Freedoom](https://freedoom.github.io/) or a total conversion drops straight
+in. Levels take a moment longer to load than they used to — that's the art
+being built as it's needed.
 
 ---
 
@@ -147,7 +148,6 @@ The first build takes a few minutes.
 ./build.sh                        # -> doom.z64
 ./build.sh GAME=doom2             # -> doom2.z64
 ./build.sh EXTWAD=1               # reads the .WAD from the card
-./build.sh PWAD=sigil.wad         # bakes a mod's art in, so all of it works
 ./build.sh release                # -> DoomUltra64-<version>.zip
 ./build.sh test                   # host-side checks
 ./run.sh                          # run in ares, screenshot to shots/

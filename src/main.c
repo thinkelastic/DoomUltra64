@@ -30,6 +30,7 @@
 #include "r_vapor.h"
 #include "wad.h"
 #include "d_mod.h"
+#include "r_wadart.h"
 #include "r_wall.h"
 #include "r_wipe.h"
 #include "scene.h"
@@ -373,6 +374,10 @@ static void scene_init(void)
 
         Z_Init();
         W_N64_Init();
+
+        /* PNAMES and the TEXTURE directories, from whatever stack just got
+         * built. Everything the renderer asks for by name goes through it. */
+        r_wadart_init();
 
         /* Before anything reads a level or draws a menu: Doom's own code
          * branches on gamemode in a dozen places, and every one of them was

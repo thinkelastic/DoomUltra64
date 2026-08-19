@@ -162,6 +162,7 @@ bool D_ModApply(const char *name)
 
     /* The lump table, then everything read through it. */
     W_N64_Init();
+    { void r_wadart_init(void); r_wadart_init(); }
     W_N64_DropCache();
     D_IdentifyGame();
 

@@ -443,6 +443,28 @@ N64_CFLAGS += -DD_SOUND=$(SOUND)
 # the in-place WAD rebuild is exercised without a card full of mods. MENUTEST
 # cannot do it: every value that reaches the mods list starts a game first,
 # and a started game is what the picker refuses.
+# RUNTIMEART=1 composes every texture, flat, sprite and piece of menu art
+# from the WAD as the level loads, instead of reading the .dt64 files the
+# converter baked. That is what frees a ROM from the one IWAD it was built
+# against: any WAD on the card plays, and a mod's own art appears without
+# anyone rebuilding anything.
+#
+# Affordable because Doom's art is ALREADY 8-bit palettised -- none of this
+# is colour work, only layout -- and vanilla Doom composes its textures at
+# runtime for the same reason. Proven byte-identical to the baked output
+# across both IWADs with WADARTVERIFY=1 before it was ever switched on.
+# On by default: this is what makes the cartridge WAD-agnostic, which is the
+# whole point. RUNTIMEART=0 restores the baked art for an A/B.
+RUNTIMEART ?= 1
+N64_CFLAGS += -DR_RUNTIMEART=$(RUNTIMEART)
+
+# WADARTVERIFY=1 composes every texture the level loads a second time, from
+# the WAD at runtime, and compares it byte for byte with the baked .dt64 the
+# converter produced. Two independent implementations agreeing on a whole
+# level's art is what makes it safe to delete the baked one.
+WADARTVERIFY ?= 0
+N64_CFLAGS += -DR_WADART_VERIFY=$(WADARTVERIFY)
+
 MODTEST ?= 0
 N64_CFLAGS += -DD_MODTEST=$(MODTEST)
 
@@ -1130,7 +1152,7 @@ $(BUILD_DIR)/src/r_fastmath.o: N64_CFLAGS += -fno-builtin
 # w_n64/i_n64 shims rather than by porting d_main.c and its dependencies.
 #
 # This makes the project GPL-2: Doom's source is GPL and this links against it.
-src += src/w_n64.c src/i_n64.c src/v_draw.c src/d_ui.c src/i_sound_n64.c src/mus_n64.c src/doom/sounds.c src/d_bridge.c src/d_verify.c src/d_mod.c src/r_ssdata.c
+src += src/w_n64.c src/i_n64.c src/v_draw.c src/d_ui.c src/i_sound_n64.c src/mus_n64.c src/doom/sounds.c src/d_bridge.c src/d_verify.c src/d_mod.c src/r_wadart.c src/r_ssdata.c
 src += src/doom/m_fixed.c src/doom/m_bbox.c src/doom/tables.c src/doom/z_zone.c
 src += src/doom/p_setup.c
 
@@ -1254,8 +1276,14 @@ $(BUILD_DIR)/mkpvs: tools/mkpvs.c
 $(BUILD_DIR)/.assets.stamp: $(BUILD_DIR)/wad2n64 $(BUILD_DIR)/mkpvs $(WAD) $(BUILD_DIR)/.flags
 	@mkdir -p $(FS) $(BUILD_DIR)
 	@echo "    [WAD  ] $(WAD)"
+	@# A RUNTIMEART build composes its art as levels load, so none is baked.
+	@# The stale ones have to GO, not merely stop being written: the
+	@# filesystem directory is packed as it stands, so art from an earlier
+	@# baked build would ride into the ROM and put back the nine megabytes
+	@# this exists to remove -- the trap extwad-prune already documents.
+	$(if $(filter-out 0,$(RUNTIMEART)),@rm -f $(FS)/*.dt64 $(FS)/texorder.bin)
 	@$(BUILD_DIR)/wad2n64 $(WAD) $(FS) --all $(if $(filter 0,$(CI4FLATS)),--no-ci4) \
-	    $(if $(PWAD),--pwad $(PWAD))
+	    $(if $(PWAD),--pwad $(PWAD)) $(if $(filter-out 0,$(RUNTIMEART)),--no-art)
 	@# The maps, which are read at runtime rather than baked. Removed when
 	@# no PWAD is set: the filesystem directory is packed as it stands, so
 	@# one left behind by an earlier PWAD= build would ride into every ROM

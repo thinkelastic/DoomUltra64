@@ -891,17 +891,26 @@ int main(int argc, char **argv) {
     for (int a = 3; a < argc; a++)
         if (strcmp(argv[a], "--no-ci4") == 0) g_no_ci4 = 1;
 
+    /* RUNTIMEART builds compose their own art as levels load, so baking it
+     * would put nine megabytes in the cartridge for nothing. Sounds are not
+     * art: they are still wav64 and still baked. */
+    int no_art = 0;
+    for (int a = 3; a < argc; a++)
+        if (strcmp(argv[a], "--no-art") == 0) no_art = 1;
+
     if (argc >= 4 && strcmp(argv[3], "--all") == 0) {
-        order_begin(outdir, "flats");
-        emit_all_flats(&wad, outdir);
-        order_end();
-        order_begin(outdir, "textures");
-        emit_all_textures(&wad, outdir);
-        order_end();
-        if (order_file) fclose(order_file);
-        emit_all_sprites(&wad, outdir);
+        if (!no_art) {
+            order_begin(outdir, "flats");
+            emit_all_flats(&wad, outdir);
+            order_end();
+            order_begin(outdir, "textures");
+            emit_all_textures(&wad, outdir);
+            order_end();
+            if (order_file) fclose(order_file);
+            emit_all_sprites(&wad, outdir);
+        }
         emit_all_sounds(&wad, outdir);
-        emit_all_ui(&wad, outdir);
+        if (!no_art) emit_all_ui(&wad, outdir);
         return 0;
     }
 
