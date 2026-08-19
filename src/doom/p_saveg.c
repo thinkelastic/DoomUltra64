@@ -1647,7 +1647,7 @@ void P_UnArchiveWorld (void)
 	sec->ceilingheight = saveg_read16() << FRACBITS;
 	sec->oldfloorheight = sec->floorheight;
 	sec->oldceilingheight = sec->ceilingheight;
-	// DoomN64: heights written directly, invisibly to the mover path --
+	// DoomUltra64: heights written directly, invisibly to the mover path --
 	// every sector is suspect, so the renderer's node height ranges do
 	// one full rebuild on the next frame. See T_MovePlane.
 	{ extern void R_NodeZMarkAll(void); R_NodeZMarkAll(); }

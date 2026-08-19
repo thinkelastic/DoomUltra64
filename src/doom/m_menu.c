@@ -73,7 +73,7 @@ int			showMessages = 1;
 	
 
 // Blocky mode, has default, 0 = high, 1 = normal
-/* DoomN64: this port spends GRAPHIC DETAIL on RESOLUTION rather than on
+/* DoomUltra64: this port spends GRAPHIC DETAIL on RESOLUTION rather than on
  * vanilla's pixel doubling -- HIGH is 320x480 interlaced, LOW is 320x240
  * (see R_SetViewSize in d_bridge.c). This initialiser is only the FIRST-RUN
  * value: D_OptionsLoad restores the player's choice from options.cfg beside
@@ -350,7 +350,7 @@ enum
     opt_end
 } options_e;
 
-/* DoomN64: SCREEN SIZE and MOUSE SENSITIVITY are both gone, items and
+/* DoomUltra64: SCREEN SIZE and MOUSE SENSITIVITY are both gone, items and
  * sliders. Screen size sized vanilla's view window down into the status
  * bar, and this port always draws the full screen (R_SetViewSize in
  * d_bridge.c ignores `blocks`). Mouse sensitivity has no mouse to scale:
@@ -932,7 +932,7 @@ void M_SfxVol(int choice)
 	
     S_SetSfxVolume(sfxVolume * 8);
 
-    /* DoomN64: persist to the shared options file beside the ROMs. */
+    /* DoomUltra64: persist to the shared options file beside the ROMs. */
     { void D_OptionsSave(void); D_OptionsSave(); }
 }
 
@@ -952,7 +952,7 @@ void M_MusicVol(int choice)
 	
     S_SetMusicVolume(musicVolume * 8);
 
-    /* DoomN64: persist to the shared options file beside the ROMs. */
+    /* DoomUltra64: persist to the shared options file beside the ROMs. */
     { void D_OptionsSave(void); D_OptionsSave(); }
 }
 
@@ -1095,7 +1095,7 @@ void M_ChangeMessages(int choice)
 
     message_dontfuckwithme = true;
 
-    /* DoomN64: persist to the shared options file beside the ROMs. */
+    /* DoomUltra64: persist to the shared options file beside the ROMs. */
     { void D_OptionsSave(void); D_OptionsSave(); }
 }
 
@@ -1235,7 +1235,7 @@ void M_QuitDOOM(int choice)
 
 
 
-/* DoomN64: the MOUSE SENSITIVITY menu item is gone (see OptionsMenu), and
+/* DoomUltra64: the MOUSE SENSITIVITY menu item is gone (see OptionsMenu), and
  * with no item to reach it this handler has no caller. Kept rather than
  * deleted -- mouseSensitivity is still read by the input code this port
  * inherits, and leaving the setter beside it keeps that pairing intact if
@@ -1318,7 +1318,7 @@ void M_ChangeDetail(int choice)
     else
 	players[consoleplayer].message = DEH_String(DETAILLO);
 
-    /* DoomN64: settings live in a file beside the ROMs, shared with Doom II.
+    /* DoomUltra64: settings live in a file beside the ROMs, shared with Doom II.
      * Written on every change rather than at exit, because a console has no
      * orderly shutdown to hook -- the player switches it off. */
     { void D_OptionsSave(void); D_OptionsSave(); }

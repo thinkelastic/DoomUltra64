@@ -52,7 +52,7 @@ T_MovePlane
     boolean	flag;
     fixed_t	lastpos;
 
-    // DoomN64: every gradual sector-height change in the game funnels
+    // DoomUltra64: every gradual sector-height change in the game funnels
     // through this function, which makes it the one choke point where the
     // renderer's node height ranges can learn WHICH sector went stale --
     // the alternative was an every-frame checksum over all sectors. Marks

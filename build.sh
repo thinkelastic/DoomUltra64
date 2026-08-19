@@ -10,11 +10,11 @@ cd "$(dirname "$0")"
 # property of the toolchain image rather than of the project's flags -- see the
 # Dockerfile. Give it its own image so the two never overwrite each other, and
 # a plain ./build.sh keeps producing an unperturbed ROM.
-image=doomn64-build
+image=doomultra64-build
 build_args=()
 for arg in "$@"; do
     if [ "$arg" = "RSPQPROF=1" ]; then
-        image=doomn64-build-rspqprof
+        image=doomultra64-build-rspqprof
         build_args=(--build-arg RSPQ_PROFILE=1)
     fi
 done

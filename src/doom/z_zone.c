@@ -28,7 +28,7 @@
 
 #define ZONEID 0x1d4a11
 #define MINFRAGMENT 64
-// DoomN64: 16, up from 8 -- the VR4300's D-cache line. Every hot zone
+// DoomUltra64: 16, up from 8 -- the VR4300's D-cache line. Every hot zone
 // array the renderer walks (the node mirror's 64-byte records, the seg
 // mirror's 32, the flat regions' 16, Doom's own segs and sectors) is one
 // coin-flip from a permanent extra-line-per-record tax at 8; line
@@ -45,14 +45,14 @@ typedef struct memblock_s {
     int                id;      // ZONEID
     struct memblock_s *next;
     struct memblock_s *prev;
-    uint64_t           pad_align;   // DoomN64: header to 32 = 2 lines
+    uint64_t           pad_align;   // DoomUltra64: header to 32 = 2 lines
 } memblock_t;
 
 typedef struct {
     int         size;           // total bytes in zone
     memblock_t  blocklist;      // sentinel (head of circular list)
     memblock_t *rover;
-    uint32_t    pad_align;      // DoomN64: see memblock_t
+    uint32_t    pad_align;      // DoomUltra64: see memblock_t
 } memzone_t;
 
 static memzone_t *mainzone;

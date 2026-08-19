@@ -1,4 +1,4 @@
-# DoomN64 build environment.
+# DoomUltra64 build environment.
 # Extends the libdragon toolchain image (mips64-elf GCC 14.4) by building and
 # installing libdragon itself, so project builds need no toolchain setup.
 FROM ghcr.io/dragonminded/libdragon:latest

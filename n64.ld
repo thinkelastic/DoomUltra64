@@ -1,4 +1,4 @@
-/* DoomN64 repo-local override of the toolchain's n64.ld.
+/* DoomUltra64 repo-local override of the toolchain's n64.ld.
  *
  * GNU ld resolves -Tn64.ld against the link's working directory BEFORE the
  * -L library paths, and the build links from the repo root -- so this copy

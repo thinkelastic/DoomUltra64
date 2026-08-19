@@ -651,7 +651,7 @@ N64_CFLAGS += -DR_LIGHTSEL=$(LIGHTSEL)
 # gain the same falloff walls have (they previously had none), which is the
 # one deliberate look change. FOGSCALE=0 restores the fixed 512..3500 ramp.
 FOGSCALE ?= 1
-N64_CFLAGS += -DR_FOGSCALE=$(FOGSCALE)
+N64_CFLAGS +=
 
 # NEARLIGHT=1 adds the NEAR half of that same diminishing, which the
 # renderer never had: vanilla drags what is close to the eye toward full
@@ -1334,6 +1334,8 @@ test: $(assets)
 	@mkdir -p $(BUILD_DIR)/shots
 	@echo "    [HOST ] $(BUILD_DIR)/host_render"
 	@$(HOST_CC) -O2 -Wall -Wextra -I tests/shim -DR_WIDE=$(WIDE) \
+	    -DR_LIGHTCONTRAST=$(LIGHTCONTRAST) -DR_LIGHTPIVOT=$(LIGHTPIVOT) \
+	    -DR_LIGHTBOOST=$(LIGHTBOOST) -DR_FOGSCALE=$(FOGSCALE) \
 	    -o $(BUILD_DIR)/host_render tests/host_render.c \
 	    src/r_wall.c src/r_flat.c src/r_sprite.c -lm
 	@$(BUILD_DIR)/host_render $(BUILD_DIR)/shots $(FS)
